@@ -170,6 +170,7 @@ class RiskManager:
     _MIN_KELLY_SAMPLES = 12
     _COLD_START_MULT = 0.40   # 표본 부족 시 full-size의 40%만 사용
     _MIN_KELLY_MULT = 0.15
+    _MIN_BET = 0.12        # 베팅 사이즈 바닥값 — 신호가 임계값을 넘었으면 최소한은 잡는다
 
     def _kelly_stats(self) -> Tuple[Optional[float], float, float]:
         """(fractional Kelly 비중, 승률, 손익비). 표본이 적으면 첫 값이 None."""
@@ -264,13 +265,22 @@ class RiskManager:
         if symbol_room <= 0.01:
             return self._reject(f"종목 비중 상한 도달 {current_w:.1%} (미체결 포함)")
 
-        # --- 사이징: 변동성 타게팅 × 켈리 배수 × 신호강도 × 레짐, 그리고 모든 상한 ---
+        # --- 사이징: 변동성 타게팅 × 켈리 배수 × 베팅 사이즈 × 레짐, 그리고 모든 상한 ---
         vol_w = self._volatility_weight(signal.volatility)
         kelly_mult, win_rate, payoff, kelly_w = self._kelly_multiplier()
-        # 신호 강도 스케일: 임계값 대비 초과분을 0.6~1.0으로 매핑
-        strength = float(np.clip((signal.score - self.s.SIGNAL_BUY_THRESHOLD) /
-                                 max(1e-6, 1.0 - self.s.SIGNAL_BUY_THRESHOLD), 0.0, 1.0))
-        signal_scale = 0.6 + 0.4 * strength
+
+        # 베팅 사이즈는 캘리브레이션된 상승확률에서 나온다.
+        #   z = (p − 0.5)/sqrt(p(1−p)),  size = 2·Φ(z) − 1
+        # 확률 0.51과 0.95를 같게 취급하던 이전 선형 스케일을 대체한다.
+        # 신호가 임계값을 넘었는데 베팅이 0에 가까우면 최소 바닥값을 적용해
+        # "진입은 하되 아주 작게" 가 되도록 한다.
+        if signal.bet >= 0.0:
+            signal_scale = float(np.clip(signal.bet, self._MIN_BET, 1.0))
+        else:
+            # 모델 미로딩(bet=-1): 기존 점수 기반 선형 스케일로 폴백한다
+            strength = float(np.clip((signal.score - self.s.SIGNAL_BUY_THRESHOLD) /
+                                     max(1e-6, 1.0 - self.s.SIGNAL_BUY_THRESHOLD), 0.0, 1.0))
+            signal_scale = 0.6 + 0.4 * strength
 
         target_w = vol_w * kelly_mult * signal_scale * signal.regime
         target_w = min(target_w, self.s.MAX_POSITION_WEIGHT, symbol_room, sector_room, gross_room)
@@ -299,12 +309,14 @@ class RiskManager:
             weight=target_w,
             stop_price=stop_price,
             reason=(
-                f"vol_w={vol_w:.3f} kelly_mult={kelly_mult:.2f} scale={signal_scale:.2f} "
+                f"vol_w={vol_w:.3f} kelly_mult={kelly_mult:.2f} bet={signal_scale:.2f} "
                 f"→ w={target_w:.3f} qty={qty}"
             ),
             detail={
                 "vol_weight": round(vol_w, 4),
                 "kelly_mult": round(kelly_mult, 4),
+                "bet_size": round(signal_scale, 4),
+                "model_proba": round(signal.model_proba, 4),
                 "kelly_weight": round(kelly_w, 4),
                 "win_rate": round(win_rate, 3),
                 "payoff": round(payoff, 3),

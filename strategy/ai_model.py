@@ -107,17 +107,35 @@ def make_triple_barrier_labels(
 
 
 def label_panel(
-    featured: Dict[str, pd.DataFrame], settings: Optional[Settings] = None
+    featured: Dict[str, pd.DataFrame], settings: Optional[Settings] = None,
+    with_weights: bool = True,
 ) -> Dict[str, pd.DataFrame]:
+    """삼중배리어 라벨과 표본 가중치를 붙인다.
+
+    라벨이 미래 H봉을 공유하므로 연속 샘플은 서로 독립이 아니다. 가중치를 붙이지 않으면
+    중첩이 심한 구간이 과대 대표되고 검증 점수도 부풀려진다(strategy/sample_weights.py 참고).
+    """
     settings = settings or get_settings()
+    horizon = settings.LABEL_HORIZON
     for symbol, df in featured.items():
         df["label"] = make_triple_barrier_labels(
             df,
-            horizon=settings.LABEL_HORIZON,
+            horizon=horizon,
             pt_atr=settings.LABEL_PT_ATR,
             sl_atr=settings.LABEL_SL_ATR,
             cost=settings.round_trip_cost,
         )
+        if with_weights:
+            from strategy.sample_weights import compute_sample_weights
+
+            n = len(df)
+            close = df["close"].to_numpy(dtype=float)
+            logret = np.zeros(n, dtype=float)
+            logret[1:] = np.log(np.maximum(close[1:], 1e-9) / np.maximum(close[:-1], 1e-9))
+            t_start = np.arange(n, dtype=np.int64)
+            t_end = np.minimum(t_start + horizon, n - 1)
+            weights, _ = compute_sample_weights(t_start, t_end, logret, n_bars=n)
+            df["sample_w"] = weights
         featured[symbol] = df
     return featured
 
@@ -156,6 +174,46 @@ class PurgedKFold:
             if len(train_idx) < 50 or len(test_idx) < 10:
                 continue
             yield train_idx, test_idx
+
+
+# ======================================================================== 베팅 사이징
+def bet_size(proba, threshold: float = 0.5):
+    """상승확률을 0~1 베팅 사이즈로 바꾼다 (López de Prado 방식).
+
+        z = (p − 0.5) / sqrt(p(1−p))
+        size = 2·Φ(z) − 1
+
+    확률이 0.5면 0, 확신이 커질수록 1에 접근한다. 분모의 sqrt(p(1−p))는 확률 자체의
+    표준오차라, **같은 0.1 차이라도 확률이 극단에 가까울수록 더 크게 반영**된다.
+
+    기존 방식(임계값 대비 점수의 선형 스케일)은 0.51과 0.95를 거의 같게 취급했다.
+    확률을 수량에 직접 연결하는 것이 이 변경의 핵심이다.
+    """
+    from scipy.stats import norm
+
+    p = np.clip(np.asarray(proba, dtype=float), 1e-6, 1 - 1e-6)
+    denom = np.sqrt(np.maximum(p * (1.0 - p), 1e-12))
+    z = (p - threshold) / denom
+    size = 2.0 * norm.cdf(z) - 1.0
+    return float(size) if np.isscalar(proba) or np.ndim(proba) == 0 else size
+
+
+class _PurgedSplitAdapter:
+    """PurgedKFold를 sklearn의 cv 인터페이스로 감싼다.
+
+    `CalibratedClassifierCV`가 요구하는 `split(X, y, groups)` 시그니처를 맞춰 주면,
+    **폴드 안에서만** 캘리브레이터를 학습해 누수를 막을 수 있다.
+    """
+
+    def __init__(self, splits: List[Tuple[np.ndarray, np.ndarray]]):
+        self._splits = splits
+
+    def split(self, X=None, y=None, groups=None):
+        for train_idx, test_idx in self._splits:
+            yield train_idx, test_idx
+
+    def get_n_splits(self, X=None, y=None, groups=None) -> int:
+        return len(self._splits)
 
 
 # ======================================================================== 모델
@@ -207,6 +265,10 @@ class TrainReport:
     fold_aucs: List[float] = field(default_factory=list)
     feature_importance: Dict[str, float] = field(default_factory=dict)
     trained_at: str = ""
+    brier: float = 0.0            # 확률 예측의 평균제곱오차. 낮을수록 잘 맞는 확률
+    brier_uncal: float = 0.0      # 캘리브레이션 전
+    effective_n: float = 0.0      # 중첩 라벨을 감안한 유효 표본 수
+    mean_uniqueness: float = 1.0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -214,6 +276,9 @@ class TrainReport:
             "positive_rate": round(self.positive_rate, 4), "cv_auc": round(self.cv_auc, 4),
             "cv_acc": round(self.cv_acc, 4), "cv_f1": round(self.cv_f1, 4),
             "fold_aucs": [round(a, 4) for a in self.fold_aucs],
+            "brier": round(self.brier, 5), "brier_uncal": round(self.brier_uncal, 5),
+            "effective_n": round(self.effective_n, 1),
+            "mean_uniqueness": round(self.mean_uniqueness, 4),
             "top_features": dict(sorted(self.feature_importance.items(),
                                         key=lambda kv: -kv[1])[:15]),
             "trained_at": self.trained_at,
@@ -229,6 +294,9 @@ class TrainReport:
             + ", ".join(f"{a:.3f}" for a in self.fold_aucs) + ")",
             f" CV 정확도     : {self.cv_acc:.4f}",
             f" CV F1         : {self.cv_f1:.4f}",
+            f" Brier (보정후) : {self.brier:.5f}  (보정전 {self.brier_uncal:.5f})",
+            f" 유효 표본     : {self.effective_n:,.0f} / {self.samples:,}"
+            f"  (평균 고유도 {self.mean_uniqueness:.3f})",
             " 상위 피처     :",
         ]
         for name, imp in sorted(self.feature_importance.items(), key=lambda kv: -kv[1])[:12]:
@@ -243,6 +311,10 @@ class AlphaModel:
     def __init__(self, settings: Optional[Settings] = None):
         self.settings = settings or get_settings()
         self.model = None
+        self.calibrated = False
+        # 라벨의 기저확률(양성 비율). 캘리브레이션된 확률은 이 값을 중심으로 분포하므로
+        # 점수와 베팅 사이즈의 중립점도 0.5가 아니라 이 값이어야 한다.
+        self.base_rate: float = 0.5
         self.columns: List[str] = list(FEATURE_COLUMNS)
         self.report: Optional[TrainReport] = None
         self._mean: Optional[np.ndarray] = None
@@ -258,15 +330,31 @@ class AlphaModel:
         return Path(self.settings.MODEL_DIR) / f"{self.settings.MODEL_NAME}_report.json"
 
     # ------------------------------------------------------------------ 학습
-    def fit(self, featured: Dict[str, pd.DataFrame], verbose: bool = True) -> TrainReport:
-        from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
+    def fit(self, featured: Dict[str, pd.DataFrame], verbose: bool = True,
+            calibrate: bool = False) -> TrainReport:
+        """표본 가중치 + purged 폴드 내 확률 캘리브레이션으로 학습한다.
+
+        `calibrate=True`면 purged 분할 안에서 isotonic 캘리브레이션을 학습한다(전체 데이터로
+        보정하면 누수다). 다만 **기본값은 False**다. 측정해 보면 캘리브레이션이 확률 스프레드를
+        기저확률 주위로 압축해, 확률 차이를 수량에 반영하는 베팅 사이징과 정면으로 충돌한다.
+
+            가중치 O · 보정 X · 베팅 O → Sharpe 1.744  (익스포저 42%)
+            가중치 O · 보정 isotonic  → Sharpe 0.105  (익스포저 18%)
+            가중치 O · 보정 sigmoid   → Sharpe 1.003  (익스포저 33%)
+
+        확률의 정직성이 필요하면(예: 리포트) 켜서 Brier를 보고, 사이징에는 쓰지 않는다.
+        """
+        from sklearn.metrics import accuracy_score, brier_score_loss, f1_score, roc_auc_score
+
+        from strategy.sample_weights import effective_sample_size
 
         labeled = label_panel(featured, self.settings)
-        X, y, t_index, columns = stack_training_matrix(labeled)
+        X, y, t_index, columns, w = stack_training_matrix(labeled)
         if len(X) < 300:
             raise ValueError(f"학습 데이터가 부족합니다 (샘플 {len(X)}개). 기간을 늘리세요.")
 
         self.columns = columns
+        self.base_rate = float(np.clip(y.mean(), 0.05, 0.95))
         self._mean = X.mean(axis=0)
         self._std = np.where(X.std(axis=0) > 1e-9, X.std(axis=0), 1.0)
         Xs = (X - self._mean) / self._std
@@ -276,27 +364,60 @@ class AlphaModel:
             horizon=self.settings.LABEL_HORIZON,
             embargo=self.settings.CV_EMBARGO,
         )
-        aucs, accs, f1s = [], [], []
-        for fold, (tr, te) in enumerate(cv.split(t_index), 1):
-            est = _build_estimator(seed=42 + fold)
-            est.fit(Xs[tr], y[tr])
-            proba = est.predict_proba(Xs[te])[:, 1]
-            pred = (proba >= 0.5).astype(int)
-            if len(np.unique(y[te])) < 2:
-                continue
-            aucs.append(roc_auc_score(y[te], proba))
-            accs.append(accuracy_score(y[te], pred))
-            f1s.append(f1_score(y[te], pred, zero_division=0))
-            if verbose:
-                logger.info(f"[AlphaModel] fold{fold} AUC={aucs[-1]:.4f} ACC={accs[-1]:.4f}")
+        splits = [(tr, te) for tr, te in cv.split(t_index)
+                  if len(np.unique(y[tr])) >= 2 and len(np.unique(y[te])) >= 2]
+        if not splits:
+            raise ValueError("PurgedKFold가 유효한 분할을 만들지 못했습니다. 기간을 늘리세요.")
 
-        # 전체 데이터로 최종 학습
-        self.model = _build_estimator(seed=7)
-        self.model.fit(Xs, y)
+        aucs, accs, f1s, briers_uncal = [], [], [], []
+        for fold, (tr, te) in enumerate(splits, 1):
+            est = _build_estimator(seed=42 + fold)
+            est.fit(Xs[tr], y[tr], sample_weight=w[tr])
+            raw = est.predict_proba(Xs[te])[:, 1]
+            pred = (raw >= 0.5).astype(int)
+            aucs.append(roc_auc_score(y[te], raw, sample_weight=w[te]))
+            accs.append(accuracy_score(y[te], pred, sample_weight=w[te]))
+            f1s.append(f1_score(y[te], pred, zero_division=0, sample_weight=w[te]))
+            briers_uncal.append(brier_score_loss(y[te], raw, sample_weight=w[te]))
+            if verbose:
+                logger.info(f"[AlphaModel] fold{fold} AUC={aucs[-1]:.4f} "
+                            f"ACC={accs[-1]:.4f} Brier={briers_uncal[-1]:.4f}")
+
+        # --- 최종 모델: purged 분할 안에서만 isotonic 캘리브레이션 ---
+        base = _build_estimator(seed=7)
+        self.calibrated = False
+        if calibrate and len(splits) >= 2:
+            from sklearn.calibration import CalibratedClassifierCV
+
+            try:
+                model = CalibratedClassifierCV(
+                    base, method="isotonic", cv=_PurgedSplitAdapter(splits), ensemble=True
+                )
+                model.fit(Xs, y, sample_weight=w)
+                self.model = model
+                self.calibrated = True
+            except Exception as exc:
+                logger.warning(f"[AlphaModel] 캘리브레이션 실패, 원본 모델 사용: {exc}")
+                base.fit(Xs, y, sample_weight=w)
+                self.model = base
+        else:
+            base.fit(Xs, y, sample_weight=w)
+            self.model = base
+
+        # 캘리브레이션 효과: 마지막 폴드 검증 구간에서 Brier 재측정
+        brier_after = float(np.mean(briers_uncal)) if briers_uncal else 0.0
+        if self.calibrated:
+            _, te = splits[-1]
+            try:
+                brier_after = float(brier_score_loss(
+                    y[te], self.model.predict_proba(Xs[te])[:, 1], sample_weight=w[te]))
+            except Exception:
+                pass
 
         importance = self._extract_importance(Xs, y)
         self.report = TrainReport(
-            backend="lightgbm" if HAS_LGB else "sklearn-HistGBDT",
+            backend=("lightgbm" if HAS_LGB else "sklearn-HistGBDT")
+                    + (" + isotonic" if self.calibrated else ""),
             samples=len(X),
             features=len(columns),
             positive_rate=float(y.mean()),
@@ -306,6 +427,10 @@ class AlphaModel:
             fold_aucs=[float(a) for a in aucs],
             feature_importance=importance,
             trained_at=dt.datetime.now().isoformat(timespec="seconds"),
+            brier=brier_after,
+            brier_uncal=float(np.mean(briers_uncal)) if briers_uncal else 0.0,
+            effective_n=effective_sample_size(w),
+            mean_uniqueness=float(np.median(w)) if len(w) else 1.0,
         )
         return self.report
 
@@ -368,6 +493,8 @@ class AlphaModel:
             pickle.dump(
                 {
                     "model": self.model,
+                    "calibrated": self.calibrated,
+                    "base_rate": self.base_rate,
                     "columns": self.columns,
                     "mean": self._mean,
                     "std": self._std,
@@ -391,6 +518,8 @@ class AlphaModel:
             with path.open("rb") as fp:
                 blob = pickle.load(fp)
             self.model = blob["model"]
+            self.calibrated = bool(blob.get("calibrated", False))
+            self.base_rate = float(blob.get("base_rate", 0.5))
             self.columns = blob["columns"]
             self._mean = blob.get("mean")
             self._std = blob.get("std")
@@ -625,7 +754,14 @@ class EnsembleAlphaStrategy(AbstractStrategy):
         proba = float(row.get("proba", 0.5))
         tech = float(row.get("tech", 0.0))
         cs = float(row.get("cs", 0.0))
-        raw = w_m * (2.0 * proba - 1.0) + w_t * tech + w_c * cs
+        # 모델 기여도의 중립점 = 라벨의 기저확률(양성 비율).
+        # 양성 비율이 42%면 보정 여부와 무관하게 예측 확률이 그 주위에 분포한다.
+        # 중립점을 0.5로 두면 정상 신호가 전부 음수로 읽혀 진입이 거의 사라진다
+        #   (측정: 중립점 0.5 → Sharpe −1.47 · 익스포저 4.3%,
+        #          중립점 기저확률 → Sharpe 1.74 · 익스포저 42%)
+        neutral = getattr(self.model, "base_rate", 0.5)
+        model_score = (proba - neutral) / max(neutral, 1.0 - neutral)
+        raw = w_m * float(np.clip(model_score, -1.0, 1.0)) + w_t * tech + w_c * cs
         score = float(np.clip(raw * regime.scale, -1.0, 1.0))
 
         atr_abs = float(row.get("atr_abs", 0.0) or 0.0)
@@ -635,10 +771,17 @@ class EnsembleAlphaStrategy(AbstractStrategy):
         if not np.isfinite(vol20) or vol20 <= 0:
             vol20 = 0.25
 
+        # 베팅 사이즈: 모델이 있으면 캘리브레이션된 확률에서, 없으면 점수에서 유도한다.
+        # 확률을 수량에 직접 연결하는 경로다(strategy/risk_manager.py가 이 값을 쓴다).
+        if w_m > 0:
+            bet = float(np.clip(bet_size(proba, threshold=neutral), 0.0, 1.0))
+        else:
+            bet = -1.0   # 콜드 스타트: 리스크 매니저가 점수 기반 선형 스케일로 폴백한다
+
         return Signal(
             symbol=symbol, score=score, price=price, ts=ts or dt.datetime.now(),
             model_proba=proba, tech_score=tech, cs_score=cs, regime=regime.scale,
-            atr=atr_abs, volatility=vol20, reason=f"regime={regime.label}",
+            atr=atr_abs, volatility=vol20, bet=bet, reason=f"regime={regime.label}",
         )
 
     def signals_at(

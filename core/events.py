@@ -87,6 +87,7 @@ class Signal:
     regime: float = 1.0              # 레짐 스케일 0~1
     atr: float = 0.0                 # 변동성(원 단위) - 포지션 사이징 입력
     volatility: float = 0.0          # 연율 변동성
+    bet: float = -1.0                # 베팅 사이즈 0~1. -1은 '모델 없음'(미설정)을 뜻한다
     reason: str = ""
 
     @property
@@ -98,6 +99,7 @@ class Signal:
             "symbol": self.symbol, "score": round(self.score, 4),
             "proba": round(self.model_proba, 4), "tech": round(self.tech_score, 4),
             "cs": round(self.cs_score, 4), "regime": round(self.regime, 3),
+            "bet": round(self.bet, 4),
             "price": self.price, "atr": round(self.atr, 2), "reason": self.reason,
         }
 

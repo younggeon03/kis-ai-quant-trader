@@ -110,6 +110,20 @@ class Settings(BaseSettings):
     WS_MAX_SUBSCRIPTIONS: int = Field(default=40, description="세션당 실시간 등록 한도(체결+호가 합산, KIS 41건)")
     WS_RECONNECT_MAX_DELAY: float = Field(default=30.0)
 
+    # ------------------------------------------------------------------ 토스증권 (학습 데이터 전용)
+    # 과거 일봉과 수급 데이터를 받아 모델 학습·백테스트에 쓴다. 장중 시세와 주문은 KIS로 간다.
+    # 유량(TPS): 차트 20 · 수급 10 · 인증 5. 기본값은 여유를 둔 절반 수준.
+    TOSS_CLIENT_ID: str = Field(default="")
+    TOSS_CLIENT_SECRET: str = Field(default="")
+    TOSS_BASE_URL: str = Field(default="https://openapi.tossinvest.com")
+    TOSS_CHART_TPS: float = Field(default=10.0, description="캔들 조회 초당 요청 수")
+    TOSS_FLOW_TPS: float = Field(default=5.0, description="수급 조회 초당 요청 수")
+    TOSS_TIMEOUT: float = Field(default=15.0)
+    TOSS_MAX_RETRY: int = Field(default=3)
+    DATA_CACHE_DIR: str = Field(default=str(PROJECT_ROOT / "data" / "cache"))
+    COLLECT_BARS: int = Field(default=1500, description="종목당 수집할 일봉 수")
+    COLLECT_FLOW_DAYS: int = Field(default=1500, description="종목당 수집할 수급 일수")
+
     # ------------------------------------------------------------------ 유니버스
     UNIVERSE: List[str] = Field(default_factory=lambda: list(DEFAULT_UNIVERSE))
     UNIVERSE_SIZE: int = Field(default=20, description="일봉 랭킹으로 추릴 실제 매매 대상 종목 수")
@@ -247,11 +261,19 @@ class Settings(BaseSettings):
         return SECTOR_MAP.get(symbol, "ETC")
 
     def ensure_dirs(self) -> None:
-        for d in (self.LOG_DIR, self.STATE_DIR, self.DATA_DIR, self.MODEL_DIR, self.TOKEN_CACHE_DIR):
+        for d in (self.LOG_DIR, self.STATE_DIR, self.DATA_DIR, self.MODEL_DIR,
+                  self.TOKEN_CACHE_DIR, self.DATA_CACHE_DIR, self.flow_cache_dir):
             Path(d).mkdir(parents=True, exist_ok=True)
 
     def credentials_ready(self) -> bool:
         return bool(self.KIS_APP_KEY and self.KIS_APP_SECRET and not self.cano.startswith("0000"))
+
+    def toss_ready(self) -> bool:
+        return bool(self.TOSS_CLIENT_ID and self.TOSS_CLIENT_SECRET)
+
+    @property
+    def flow_cache_dir(self) -> str:
+        return str(Path(self.DATA_CACHE_DIR) / "flow")
 
     def describe(self) -> str:
         mode = "MOCK(가상체결)" if self.USE_MOCK_MODE else ("REAL-PROD" if self.is_prod else "KIS 모의투자")

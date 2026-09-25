@@ -410,10 +410,12 @@ def test_features():
 
     for sym, f in featured.items():
         f["label"] = make_triple_barrier_labels(f, 5, 1.5, 1.0, 0.003)
-    X, y, t, cols = stack_training_matrix(featured)
+    X, y, t, cols, w = stack_training_matrix(featured)
     assert len(X) > 500 and X.shape[1] == len(cols), X.shape
     assert np.isfinite(X).all(), "학습 행렬에 NaN/Inf 존재"
     assert (np.diff(t) >= 0).all(), "시점 인덱스가 정렬되지 않음"
+    # 가중치 컬럼이 없으면 1.0으로 채워져야 한다(하위 호환)
+    assert len(w) == len(y) and abs(w.mean() - 1.0) < 1e-9, w.mean()
     return f"피처 {len(FEATURE_COLUMNS)}개, 학습샘플 {len(X):,}, 양성비율 {pos_rate:.1%}"
 
 

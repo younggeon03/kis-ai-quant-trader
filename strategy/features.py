@@ -196,6 +196,88 @@ def build_panel_features(panel: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFra
     return featured
 
 
+def neutralize_cross_section(
+    featured: Dict[str, pd.DataFrame],
+    columns: Optional[List[str]] = None,
+    sector_of=None,
+    size_col: str = "turnover",
+) -> Dict[str, pd.DataFrame]:
+    """피처에서 섹터·규모 노출을 제거하고 잔차로 치환한다.
+
+    `cs_*` 랭크 피처는 "같은 시점 다른 종목 대비 순위"를 보지만, 순위만으로는 공통요인
+    노출이 남는다. 예를 들어 반도체가 전부 오른 날 반도체 종목의 모멘텀 피처는 다 같이
+    높아지는데, 이건 종목 고유의 정보가 아니라 섹터 베팅이다.
+
+    각 시점에서 피처를 `[상수항, 섹터 더미, log(거래대금)]`에 회귀시키고 **잔차로 바꾼다.**
+    남는 값은 "같은 섹터·비슷한 규모의 종목들 대비 이 종목만의 특이값"이다.
+
+    중립화가 불가능한 시점(종목 수가 설명변수보다 적거나 행렬이 특이)은 횡단면 평균만
+    빼고 넘어간다. 원본을 훼손하지 않도록 새 딕셔너리를 돌려준다.
+    """
+    columns = columns or [c for c in BASE_FEATURES if not c.startswith("cs_")]
+    frames = []
+    for symbol, df in featured.items():
+        if df is None or df.empty:
+            continue
+        cols = [c for c in columns if c in df.columns]
+        if not cols:
+            continue
+        sub = df[["ts"] + cols].copy()
+        sub["symbol"] = symbol
+        sub["_size"] = np.log1p(df[size_col].to_numpy(dtype=float)) if size_col in df.columns else 0.0
+        sub["_sector"] = sector_of(symbol) if sector_of else "ETC"
+        frames.append(sub)
+
+    if not frames:
+        return featured
+
+    long = pd.concat(frames, ignore_index=True)
+    use_cols = [c for c in columns if c in long.columns]
+    out = {s: df.copy() for s, df in featured.items()}
+    residuals: List[pd.DataFrame] = []
+
+    for ts, group in long.groupby("ts", sort=False):
+        if len(group) < 4:
+            continue
+        sectors = pd.get_dummies(group["_sector"], drop_first=True, dtype=float)
+        size = group["_size"].to_numpy(dtype=float).reshape(-1, 1)
+        size = np.nan_to_num(size, nan=0.0, posinf=0.0, neginf=0.0)
+        design = np.hstack([np.ones((len(group), 1)), sectors.to_numpy(dtype=float), size])
+        if design.shape[0] <= design.shape[1]:
+            design = np.hstack([np.ones((len(group), 1)), size])   # 설명변수를 줄인다
+
+        values = group[use_cols].to_numpy(dtype=float)
+        mask = np.isfinite(values)
+        filled = np.where(mask, values, 0.0)
+        try:
+            coef, *_ = np.linalg.lstsq(design, filled, rcond=None)
+            resid = filled - design @ coef
+        except np.linalg.LinAlgError:
+            resid = filled - filled.mean(axis=0, keepdims=True)
+        resid = np.where(mask, resid, np.nan)
+        block = pd.DataFrame(resid, columns=use_cols)
+        block["ts"] = ts
+        block["symbol"] = group["symbol"].to_numpy()
+        residuals.append(block)
+
+    if not residuals:
+        return out
+
+    # 시점별 루프 안에서 .loc로 한 행씩 쓰면 30,000회 인덱싱이 된다.
+    # 잔차를 모아 종목별로 한 번에 매핑한다.
+    all_resid = pd.concat(residuals, ignore_index=True)
+    for symbol, block in all_resid.groupby("symbol", sort=False):
+        target = out.get(symbol)
+        if target is None:
+            continue
+        lookup = block.set_index("ts")[use_cols]
+        aligned = lookup.reindex(target["ts"].to_numpy())
+        for col in use_cols:
+            target[col] = aligned[col].to_numpy()
+
+    return out
+
+
 def latest_feature_row(df: pd.DataFrame, columns: Optional[List[str]] = None) -> Optional[np.ndarray]:
     """가장 최근 봉의 피처 벡터. 결측이 과도하면 None."""
     columns = columns or FEATURE_COLUMNS
@@ -214,19 +296,28 @@ def stack_training_matrix(
     featured: Dict[str, pd.DataFrame],
     label_col: str = "label",
     columns: Optional[List[str]] = None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, List[str]]:
-    """학습용 (X, y, 시점인덱스, 컬럼명) 생성. 시간순으로 정렬한다."""
+    weight_col: str = "sample_w",
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, List[str], np.ndarray]:
+    """학습용 (X, y, 시점인덱스, 컬럼명, 표본가중치) 생성. 시간순으로 정렬한다.
+
+    가중치 컬럼이 없으면 전부 1.0으로 채운다(가중치를 쓰지 않는 경로와 호환).
+    """
     columns = columns or FEATURE_COLUMNS
     frames = []
     for symbol, df in featured.items():
         if label_col not in df.columns:
             continue
         cols = [c for c in columns if c in df.columns]
-        sub = df[["ts"] + cols + [label_col]].copy()
+        keep = ["ts"] + cols + [label_col]
+        if weight_col in df.columns:
+            keep.append(weight_col)
+        sub = df[keep].copy()
+        if weight_col not in sub.columns:
+            sub[weight_col] = 1.0
         sub["symbol"] = symbol
         frames.append(sub)
     if not frames:
-        return np.empty((0, len(columns))), np.empty(0), np.empty(0), columns
+        return (np.empty((0, len(columns))), np.empty(0), np.empty(0), columns, np.empty(0))
 
     data = pd.concat(frames, ignore_index=True)
     data = data.dropna(subset=[label_col])
@@ -239,4 +330,10 @@ def stack_training_matrix(
     X = data[used_cols].to_numpy(dtype=np.float32)
     y = data[label_col].to_numpy(dtype=np.int8)
     t = pd.factorize(data["ts"], sort=True)[0].astype(np.int64)
-    return X, y, t, used_cols
+    w = data[weight_col].to_numpy(dtype=np.float64)
+    w = np.nan_to_num(w, nan=1.0, posinf=1.0, neginf=1.0)
+    if w.sum() > 0:
+        w = w * (len(w) / w.sum())          # 평균 1로 재정규화
+    else:
+        w = np.ones(len(y), dtype=np.float64)
+    return X, y, t, used_cols, w
