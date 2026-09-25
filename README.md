@@ -29,7 +29,15 @@ python main.py --health-only       # 연결/인증/계좌 점검만
 python scripts/run_backtest.py --no-model   # AI 기여도 비교(기술적 팩터만)
 ```
 
-## 2. 아키텍처
+## 2. 문서
+
+| 문서 | 내용 |
+|---|---|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 코드 구조, 비동기 설계, 유량 제어, 데이터 계약, 코드 읽는 순서 |
+| [docs/매매전략.md](docs/매매전략.md) | 피처 44종, 삼중배리어 라벨링, 앙상블, 포지션 사이징, 청산 규칙 |
+| [docs/architecture.html](docs/architecture.html) | 인터랙티브 구조 다이어그램 |
+
+## 3. 아키텍처
 
 ```
                     ┌──────────────── config/settings.py (.env) ───────────────┐
@@ -77,7 +85,7 @@ python scripts/run_backtest.py --no-model   # AI 기여도 비교(기술적 팩�
 | 로깅 | loguru ↔ stdlib shim | loguru 미설치 환경에서도 동일 API로 동작 |
 | 암복호 | `cryptography` | 체결통보 AES-256-CBC 복호화 |
 
-## 3. 계좌 발급 후 실전 전환
+## 4. 계좌 발급 후 실전 전환
 
 1. **`.env` 수정** — 이것이 전부다.
    ```ini
@@ -108,7 +116,7 @@ python scripts/run_backtest.py --no-model   # AI 기여도 비교(기술적 팩�
 - **체결통보**: `KIS_HTS_ID`가 없으면 WebSocket 체결통보 구독을 건너뛰고 REST 폴링으로 동작한다
   (체결 반영이 수 초 늦어질 뿐 매매는 정상).
 
-## 4. 디렉토리
+## 5. 디렉토리
 
 ```
 config/settings.py        .env 로딩, 도메인·TR_ID 환경 분기
@@ -131,7 +139,7 @@ scripts/                  selftest / train_model / run_backtest
 main.py                   엔트리포인트
 ```
 
-## 5. 파라미터 튜닝 가이드
+## 6. 파라미터 튜닝 가이드
 
 대회 심사 항목별로 조정할 `.env` 값:
 
@@ -143,3 +151,4 @@ main.py                   엔트리포인트
 | 회전율 ↓ (비용 절감) | `TAKE_PROFIT_PCT` ↑, `MAX_HOLDING_BARS` ↑, `SIGNAL_BUY_THRESHOLD` ↑ |
 
 변경 후에는 반드시 `python scripts/run_backtest.py`로 Sharpe/MDD를 재확인한다.
+자세한 튜닝 지침과 각 파라미터의 의미는 [docs/매매전략.md](docs/매매전략.md)에 있다.

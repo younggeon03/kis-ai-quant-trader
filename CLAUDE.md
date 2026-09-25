@@ -92,6 +92,12 @@ KIS 유량: 실전 20건/초, **모의투자 2건/초**. 기본값은 모의투�
   `FILL_POLL_LOOPS`(체결 폴링). Mock은 `_refresh_bars_from_sim()`으로 REST를 건너뛴다.
 - WebSocket이 건강하면(`ws.is_healthy()`) REST 시세 폴링을 생략하고, 끊기면 자동으로 폴백한다.
 
+## 문서
+
+- `docs/ARCHITECTURE.md` — 코드 구조·비동기 설계·데이터 계약. 새 모듈을 넣기 전에 읽는다.
+- `docs/매매전략.md` — 피처·라벨링·앙상블·사이징·청산 규칙. 전략 파라미터를 바꾸기 전에 읽는다.
+- 전략 로직을 고쳤으면 `docs/매매전략.md`를, 구조를 고쳤으면 `docs/ARCHITECTURE.md`를 같이 고친다.
+
 ## Conventions
 
 - 코드 주석·로그·문서는 한국어. 식별자는 영어.
