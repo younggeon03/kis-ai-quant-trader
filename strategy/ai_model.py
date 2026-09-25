@@ -694,9 +694,12 @@ class EnsembleAlphaStrategy(AbstractStrategy):
 
     name = "ensemble_alpha"
 
-    def __init__(self, settings: Optional[Settings] = None, model: Optional[AlphaModel] = None):
+    def __init__(self, settings: Optional[Settings] = None, model: Optional[AlphaModel] = None,
+                 meta=None):
         self.settings = settings or get_settings()
         self.model = model or AlphaModel(self.settings)
+        # 2차 모델(메타라벨링). 없으면 1차 확률을 그대로 쓴다.
+        self.meta = meta
         self.regime = RegimeState()
         self._last_featured: Dict[str, pd.DataFrame] = {}
         self._signal_log: List[Dict[str, Any]] = []
@@ -704,8 +707,15 @@ class EnsembleAlphaStrategy(AbstractStrategy):
     def warmup_bars(self) -> int:
         return max(MIN_HISTORY, 80)
 
-    def load_model(self) -> bool:
-        return self.model.load()
+    def load_model(self, with_meta: bool = True) -> bool:
+        loaded = self.model.load()
+        if loaded and with_meta and self.meta is None and self.settings.USE_META_MODEL:
+            from strategy.meta_model import MetaModel
+
+            meta = MetaModel(self.settings)
+            if meta.load():
+                self.meta = meta
+        return loaded
 
     # ------------------------------------------------------------------ 가중치
     def _weights(self) -> Tuple[float, float, float]:
@@ -741,6 +751,24 @@ class EnsembleAlphaStrategy(AbstractStrategy):
                 df["proba"] = 0.5
             df["tech"] = df.apply(technical_score, axis=1)
             df["cs"] = df.apply(cross_section_score, axis=1)
+
+            # 2차 모델: 1차 신호를 따를지 말지. 없으면 전부 통과(1.0)
+            if self.meta is not None and self.meta.ready:
+                neutral = getattr(self.model, "base_rate", 0.5)
+                df["primary_proba"] = df["proba"]
+                df["primary_score"] = np.clip(
+                    (df["proba"] - neutral) / max(neutral, 1.0 - neutral), -1.0, 1.0)
+                df["regime_scale"] = 1.0
+                cols = [c for c in self.meta.columns if c in df.columns]
+                M = np.zeros((len(df), len(self.meta.columns)), dtype=np.float32)
+                lookup = {c: i for i, c in enumerate(self.meta.columns)}
+                for c in cols:
+                    M[:, lookup[c]] = np.nan_to_num(
+                        df[c].to_numpy(dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
+                df["meta_proba"] = self.meta.predict(M)
+            else:
+                df["meta_proba"] = 1.0
+
             featured[symbol] = df
         self._last_featured = featured
         return featured
@@ -775,6 +803,14 @@ class EnsembleAlphaStrategy(AbstractStrategy):
         # 확률을 수량에 직접 연결하는 경로다(strategy/risk_manager.py가 이 값을 쓴다).
         if w_m > 0:
             bet = float(np.clip(bet_size(proba, threshold=neutral), 0.0, 1.0))
+            # 메타라벨링: 2차 모델이 "이 신호는 따르지 마라"고 하면 크기를 0으로 만든다.
+            # 방향은 1차가, 크기는 2차가 정한다.
+            meta_p = float(row.get("meta_proba", 1.0))
+            if self.meta is not None and self.meta.ready:
+                if meta_p < self.meta.threshold:
+                    bet = 0.0   # 2차가 막으면 진입 자체를 하지 않는다
+                else:
+                    bet *= float(np.clip(meta_p, 0.0, 1.0))
         else:
             bet = -1.0   # 콜드 스타트: 리스크 매니저가 점수 기반 선형 스케일로 폴백한다
 

@@ -20,6 +20,8 @@ from utils.logger import enable_utf8_console  # noqa: E402
 
 enable_utf8_console()
 
+import numpy as np  # noqa: E402
+
 from backtest.data import generate_synthetic_panel, load_panel_from_dir  # noqa: E402
 from config.settings import get_settings  # noqa: E402
 from strategy.ai_model import AlphaModel  # noqa: E402
@@ -33,6 +35,7 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=None, help="랜덤 시드")
     parser.add_argument("--source", type=str, default="", help="로컬 시세 디렉토리(미지정 시 합성)")
     parser.add_argument("--symbols", type=int, default=0, help="사용할 종목 수(0=전체)")
+    parser.add_argument("--no-meta", action="store_true", help="2차 모델(메타라벨링) 생략")
     args = parser.parse_args()
 
     settings = get_settings()
@@ -65,6 +68,33 @@ def main() -> int:
     print()
     print(report.pretty())
     model.save()
+
+    # --- 2차 모델(메타라벨링) ---
+    if not args.no_meta:
+        from strategy.meta_model import MetaModel
+
+        logger.info("[Train] 2차 모델(메타라벨링) 학습 중...")
+        primary: dict = {}
+        for symbol, df in featured.items():
+            cols = [c for c in model.columns if c in df.columns]
+            X = np.zeros((len(df), len(model.columns)), dtype=np.float32)
+            lookup = {c: i for i, c in enumerate(model.columns)}
+            for c in cols:
+                X[:, lookup[c]] = np.nan_to_num(df[c].to_numpy(dtype=float), nan=0.0)
+            primary[symbol] = model.predict_proba(X)
+
+        meta = MetaModel(settings)
+        try:
+            Xm, ym, tm, cm = MetaModel.build_dataset(
+                featured, primary, model.columns,
+                buy_threshold=settings.SIGNAL_BUY_THRESHOLD,
+                neutral=model.base_rate)
+            meta_report = meta.fit(Xm, ym, tm, cm, verbose=False)
+            print()
+            print(meta_report.pretty())
+            meta.save()
+        except ValueError as exc:
+            logger.warning(f"[Train] 메타 모델 생략: {exc}")
 
     if report.cv_auc < 0.52:
         logger.warning(

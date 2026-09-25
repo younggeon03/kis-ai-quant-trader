@@ -140,6 +140,10 @@ class Settings(BaseSettings):
     LABEL_HORIZON: int = Field(default=5, description="라벨 예측 지평(봉 수)")
     LABEL_PT_ATR: float = Field(default=1.5, description="삼중배리어 익절 배리어(ATR 배수)")
     LABEL_SL_ATR: float = Field(default=1.0, description="삼중배리어 손절 배리어(ATR 배수)")
+    USE_META_MODEL: bool = Field(
+        default=False,
+        description="2차 모델(메타라벨링) 사용 여부. 정밀도는 오르지만 신호의 절반을 막아 "
+                    "합성 데이터에서는 Sharpe가 떨어졌다(1.744→0.814). 실데이터에서 재평가할 것")
     CV_SPLITS: int = Field(default=5)
     CV_EMBARGO: int = Field(default=5, description="PurgedKFold embargo 봉 수")
 

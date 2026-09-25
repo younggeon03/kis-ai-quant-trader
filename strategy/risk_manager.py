@@ -274,7 +274,10 @@ class RiskManager:
         # 확률 0.51과 0.95를 같게 취급하던 이전 선형 스케일을 대체한다.
         # 신호가 임계값을 넘었는데 베팅이 0에 가까우면 최소 바닥값을 적용해
         # "진입은 하되 아주 작게" 가 되도록 한다.
-        if signal.bet >= 0.0:
+        if signal.bet == 0.0:
+            # 베팅 사이즈 0은 "들어가지 말라"는 뜻이다. 바닥값으로 덮으면 차단이 무력해진다.
+            return self._reject("베팅 사이즈 0 — 모델이 진입을 차단")
+        if signal.bet > 0.0:
             signal_scale = float(np.clip(signal.bet, self._MIN_BET, 1.0))
         else:
             # 모델 미로딩(bet=-1): 기존 점수 기반 선형 스케일로 폴백한다

@@ -9,6 +9,8 @@
   4. 유량 제어기(실측 RPS)         9. 백테스트 엔진 + 성과지표
   5. 우선순위 큐(주문 우선)       10. 이벤트 버스
                                   11. 실서버 클라이언트(오프라인)
+                                  12. 과적합 검증(CPCV·DSR·PBO)
+                                  13. 표본 가중치·베팅 사이징
 
 모든 항목이 PASS여야 실전 연동 준비가 된 것이다.
 """
@@ -560,14 +562,86 @@ async def test_live_client_offline():
     return "헤더/TR_ID/DRY_RUN 주문/차트·잔고 파싱 검증 완료"
 
 
+# ============================================================ 12. 과적합 검증 도구
+@check("12. 과적합 검증(CPCV·DSR·PBO)")
+def test_validation():
+    from backtest.validation import (CombinatorialPurgedCV, deflated_sharpe_ratio,
+                                     pbo_cscv, sharpe_ratio)
+
+    cv = CombinatorialPurgedCV(n_groups=6, n_test=2, horizon=5, embargo=5)
+    assert cv.n_splits == 15 and cv.n_paths == 5, (cv.n_splits, cv.n_paths)
+
+    splits = list(cv.split(1200))
+    assert len(splits) == 15, len(splits)
+    sp = splits[0]
+    assert len(np.intersect1d(sp.train_idx, sp.test_idx)) == 0, "학습/테스트 인덱스 중복"
+    # purge: 테스트 경계 직전 10봉(horizon+embargo)이 학습에서 빠져야 한다
+    lo, _ = sp.group_slices[sp.test_groups[0]]
+    train = set(sp.train_idx.tolist())
+    assert not any(i in train for i in range(max(0, lo - 10), lo)), "purge 미적용"
+
+    rng = np.random.default_rng(7)
+    gr = {(x.split_id, g): rng.normal(0.0005, 0.01, 40) for x in splits for g in x.test_groups}
+    paths = cv.assemble_paths(gr)
+    assert len(paths) >= cv.n_paths - 1, len(paths)
+
+    # 무작위 수익률은 유의하지 않다고 판정해야 한다
+    trials = [sharpe_ratio(rng.normal(0, 0.012, 400)) for _ in range(20)]
+    noise = deflated_sharpe_ratio(rng.normal(0, 0.012, 400), trials)
+    assert noise["dsr"] < 0.95, f"무작위인데 유의 판정 {noise['dsr']}"
+
+    # 진짜 알파는 PSR이 높아야 한다
+    real = deflated_sharpe_ratio(rng.normal(0.0012, 0.010, 400), trials)
+    assert real["psr"] > noise["psr"], (real["psr"], noise["psr"])
+
+    # PBO: 전부 무작위면 0.5 부근, 하나만 우월하면 낮아야 한다
+    flat = pbo_cscv(rng.normal(0, 0.01, (400, 10)), n_splits=8)
+    edge = rng.normal(0, 0.01, (400, 10)); edge[:, 3] += 0.0015
+    better = pbo_cscv(edge, n_splits=8)
+    assert 0.15 < flat["pbo"] < 0.85, flat["pbo"]
+    assert better["pbo"] <= flat["pbo"] + 0.1, (better["pbo"], flat["pbo"])
+
+    return (f"CPCV {cv.n_splits}분할/{cv.n_paths}경로 · 무작위 DSR {noise['dsr']:.3f} · "
+            f"PBO {flat['pbo']:.2f}→{better['pbo']:.2f}")
+
+
+# ============================================================ 13. 표본 가중치
+@check("13. 표본 가중치·베팅 사이징")
+def test_weights_and_bets():
+    from strategy.ai_model import bet_size
+    from strategy.sample_weights import average_uniqueness, compute_sample_weights
+
+    # 겹치지 않으면 고유도 1, 완전히 겹치면 1/n
+    assert np.allclose(average_uniqueness(np.array([0, 5]), np.array([4, 9]), 10), 1.0)
+    assert np.allclose(average_uniqueness(np.zeros(3, int), np.full(3, 4), 5), 1 / 3)
+
+    # 삼중배리어처럼 H봉 중첩되면 고유도가 1/(H+1) 부근
+    n, H = 200, 5
+    t0 = np.arange(n); t1 = np.minimum(t0 + H, n + H - 1)
+    w, info = compute_sample_weights(t0, t1, np.random.default_rng(0).normal(0, 0.02, n + H),
+                                     n_bars=n + H)
+    assert abs(w.mean() - 1.0) < 1e-9, w.mean()
+    assert info["effective_n"] < n, "중첩이 있는데 유효 표본이 줄지 않음"
+
+    # 베팅 사이즈: 중립점에서 0, 확신이 커질수록 단조 증가
+    assert abs(bet_size(0.5, 0.5)) < 1e-9
+    sizes = [bet_size(p, 0.5) for p in (0.55, 0.65, 0.75, 0.9)]
+    assert all(b < a for b, a in zip(sizes, sizes[1:])), sizes
+    assert 0 < sizes[-1] <= 1.0
+
+    return (f"고유도 {info['mean_uniqueness']:.3f} · 유효표본 {info['effective_n']:.0f}/{n} · "
+            f"베팅 0.9→{sizes[-1]:.3f}")
+
+
 # ============================================================ 실행
+
 async def run_all() -> int:
     setup_logging("logs", "WARNING")
     tests = [
         test_settings, test_market_rules, test_indicators,
         test_rate_limiter, test_priority, test_mock_broker,
         test_risk_manager, test_features, test_backtest, test_event_bus,
-        test_live_client_offline,
+        test_live_client_offline, test_validation, test_weights_and_bets,
     ]
     print("\n" + "=" * 86)
     print(" KIS AI Quant Trader — 셀프 테스트")
