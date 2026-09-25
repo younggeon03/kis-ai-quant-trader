@@ -12,11 +12,21 @@
 ```bash
 copy .env.example .env          # 기본값이 USE_MOCK_MODE=true
 
-python scripts/selftest.py      # 전 모듈 스모크 테스트 (11개 항목)
+python scripts/selftest.py      # 전 모듈 스모크 테스트 (13개 항목)
 python scripts/train_model.py   # AI 모델 학습 → models/alpha_gbdt.pkl
 python scripts/run_backtest.py  # 백테스트 → reports/ 에 지표·차트 저장
 python main.py                  # Mock 실시간 매매 루프 + 대시보드
 ```
+
+**성과를 확인할 때는 단일 백테스트 숫자를 믿지 않는다.** 아래 두 가지로 교차 검증한다.
+
+```bash
+python scripts/validate_strategy.py   # CPCV 경로 분포 + PSR/DSR (약 7분)
+python scripts/walkforward.py         # 분기마다 재학습하며 과거만 보고 평가 (약 8분)
+```
+
+같은 전략이 단일 백테스트에서는 Sharpe 1.71, CPCV 경로 중앙값 0.78, 워크포워드 0.91로
+나온다. 실전 기대치는 뒤의 두 숫자에 가깝다. 자세한 내용은 [docs/매매전략.md](docs/매매전략.md) 12장.
 
 대시보드: <http://127.0.0.1:8500>
 
@@ -28,6 +38,17 @@ python main.py --no-dashboard
 python main.py --health-only       # 연결/인증/계좌 점검만
 python scripts/run_backtest.py --no-model   # AI 기여도 비교(기술적 팩터만)
 ```
+
+### 실데이터 수집 (토스증권 API)
+
+```bash
+# .env 에 TOSS_CLIENT_ID / TOSS_CLIENT_SECRET 를 채운 뒤
+python scripts/collect_data.py --probe     # 연결·응답 필드명 확인 (먼저 이것부터)
+python scripts/collect_data.py             # data/cache/ 에 일봉·수급 저장
+python scripts/train_model.py --source data/cache
+```
+
+토스는 **학습 데이터 전용**이다. 장중 시세와 주문은 KIS로 간다(대회 계좌가 KIS이므로).
 
 ## 2. 문서
 

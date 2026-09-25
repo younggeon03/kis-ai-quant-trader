@@ -5,12 +5,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-python scripts/selftest.py                    # 전체 검증 (11개 항목) — 변경 후 필수로 실행
+python scripts/selftest.py                    # 전체 검증 (13개 항목) — 변경 후 필수로 실행
 python scripts/train_model.py --days 1500     # AI 모델 학습 → models/alpha_gbdt.pkl
 python scripts/run_backtest.py --days 1000    # 백테스트 → reports/
 python scripts/run_backtest.py --no-model     # AI 기여도 비교(기술적 팩터만)
 python main.py --duration 120                 # 짧게 실시간 루프 구동(스모크)
 python main.py --health-only                  # 연결/인증/계좌 점검만
+python scripts/validate_strategy.py           # CPCV + PSR/DSR 과적합 검증 (약 7분)
+python scripts/walkforward.py                 # 워크포워드 재학습 시뮬레이션 (약 8분)
+python scripts/collect_data.py --probe        # 토스 API 연결·필드명 확인
 python -m compileall -q config core api strategy backtest utils monitor scripts main.py
 ```
 
@@ -92,10 +95,29 @@ KIS 유량: 실전 20건/초, **모의투자 2건/초**. 기본값은 모의투�
   `FILL_POLL_LOOPS`(체결 폴링). Mock은 `_refresh_bars_from_sim()`으로 REST를 건너뛴다.
 - WebSocket이 건강하면(`ws.is_healthy()`) REST 시세 폴링을 생략하고, 끊기면 자동으로 폴백한다.
 
+### 7. 성과 수치는 반드시 교차 검증한다
+
+단일 백테스트 Sharpe는 실제의 두 배까지 부풀려진다(측정: 1.71 vs CPCV 0.78 / 워크포워드 0.91).
+파라미터나 전략을 바꿨으면 `scripts/validate_strategy.py`와 `scripts/walkforward.py`를 돌린다.
+
+- DSR의 `trial_sharpes`에는 **서로 다른 설정**의 Sharpe만 넣는다. CPCV 분할별 Sharpe는
+  같은 설정의 기간별 변동이므로 넣으면 안 된다(기준선만 부풀려 DSR이 무의미해진다).
+- 방법론을 바꿀 때는 **한 번에 하나씩** 넣고 백테스트로 확인한다. 여러 개를 동시에 넣으면
+  무엇이 기여했는지 알 수 없다(실제로 3개를 한 번에 넣어 Sharpe가 0.105로 붕괴한 적이 있다).
+- 기본 OFF인 것들에는 이유가 있다: `USE_META_MODEL=false`(정밀도는 오르나 신호의 53%를 막아
+  Sharpe 하락), `AlphaModel.fit(calibrate=False)`(확률 압축이 베팅 사이징과 충돌).
+
+### 8. 베팅 사이징의 중립점은 기저확률이다
+
+`bet_size(p, threshold)`의 중립점은 0.5가 아니라 라벨의 양성 비율(`AlphaModel.base_rate`)이다.
+0.5로 두면 정상 신호가 전부 음수로 읽혀 익스포저가 4%까지 붕괴한다.
+`bet == 0.0`은 "진입 금지"라는 뜻이며, `_MIN_BET` 바닥값으로 덮지 않는다.
+
 ## 문서
 
 - `docs/ARCHITECTURE.md` — 코드 구조·비동기 설계·데이터 계약. 새 모듈을 넣기 전에 읽는다.
-- `docs/매매전략.md` — 피처·라벨링·앙상블·사이징·청산 규칙. 전략 파라미터를 바꾸기 전에 읽는다.
+- `docs/매매전략.md` — 피처·라벨링·앙상블·사이징·청산 규칙, 그리고 12장의 성과 해석.
+  전략 파라미터를 바꾸기 전에 읽는다.
 - 전략 로직을 고쳤으면 `docs/매매전략.md`를, 구조를 고쳤으면 `docs/ARCHITECTURE.md`를 같이 고친다.
 
 ## Conventions

@@ -48,51 +48,9 @@ from strategy.features import build_panel_features  # noqa: E402
 from strategy.risk_manager import RiskManager  # noqa: E402
 from utils.logger import logger, setup_logging  # noqa: E402
 
-MIN_WARMUP = 120     # 피처가 안정되는 최소 봉 수
-
-
-def _slice_panel(panel: Dict[str, pd.DataFrame], end: int) -> Dict[str, pd.DataFrame]:
-    return {s: df.iloc[:end].reset_index(drop=True) for s, df in panel.items()}
-
-
-def _segment_returns(panel: Dict[str, pd.DataFrame], model: AlphaModel,
-                     settings, start: int, end: int) -> Optional[np.ndarray]:
-    """[start, end) 구간만 평가한 백테스트의 일별 수익률."""
-    if end - start < 30:
-        return None
-    strategy = EnsembleAlphaStrategy(settings, model=model)
-    engine = BacktestEngine(_slice_panel(panel, end), strategy=strategy,
-                            risk_manager=RiskManager(settings), settings=settings,
-                            initial_capital=settings.INITIAL_CAPITAL)
-    try:
-        result = engine.run(warmup=max(start, MIN_WARMUP), verbose=False)
-    except ValueError:
-        return None
-    equity = result.curve["equity"].to_numpy(dtype=float)
-    if len(equity) < 10:
-        return None
-    return np.diff(equity) / np.where(equity[:-1] > 0, equity[:-1], 1.0)
-
-
-def _train_on(panel: Dict[str, pd.DataFrame], train_idx: np.ndarray, settings) -> AlphaModel:
-    """학습 인덱스에 해당하는 봉만으로 모델을 학습한다.
-
-    purge된 구간은 인덱스에서 빠져 있으므로, 그 봉들을 제거한 패널로 학습하면
-    테스트 구간의 정보가 새지 않는다.
-    """
-    keep = set(int(i) for i in train_idx)
-    sub = {}
-    for symbol, df in panel.items():
-        mask = [i in keep for i in range(len(df))]
-        trimmed = df[pd.Series(mask, index=df.index)].reset_index(drop=True)
-        if len(trimmed) >= 200:
-            sub[symbol] = trimmed
-    if not sub:
-        raise ValueError("학습 구간이 너무 짧습니다")
-
-    model = AlphaModel(settings)
-    model.fit(build_panel_features(sub), verbose=False)
-    return model
+# 학습·구간평가 헬퍼는 워크포워드와 공용이다(중복 구현을 두지 않는다)
+from backtest.walkforward import segment_returns as _segment_returns  # noqa: E402
+from backtest.walkforward import train_on_bars as _train_on  # noqa: E402
 
 
 def run_cpcv(panel: Dict[str, pd.DataFrame], settings, n_groups: int, n_test: int,

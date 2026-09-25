@@ -132,7 +132,7 @@ _save_state()        → 상태 스냅샷을 state/engine_state.json에 저장
 
 ## 3. 블록 레퍼런스
 
-다이어그램의 12개 블록을 하나씩 본다. 각 블록은 **역할 / 사용 기술 / 입력·출력 / 핵심 함수 /
+다이어그램의 12개 블록과 이후 추가된 3개 모듈을 하나씩 본다. 각 블록은 **역할 / 사용 기술 / 입력·출력 / 핵심 함수 /
 주의점** 순서로 정리했다. 다이어그램에서 블록의 `SRC` 배지를 누르면 아래 파일의 해당 커밋으로
 바로 이동한다.
 
@@ -295,7 +295,58 @@ _save_state()        → 상태 스냅샷을 state/engine_state.json에 저장
 **주의점** 사람이 읽는 로그(`logs/trader.log`)와 목적이 다르다. 원장은 기계가 파싱해 사후 분석에
 쓴다. 기록 항목은 11장.
 
-### 3.12 관제 화면 — `monitor/app.py`
+### 3.12 토스 데이터 수집기 — `api/toss_data.py`
+
+**역할** 학습·백테스트에 쓸 과거 일봉과 수급 데이터를 받아 온다. **주문은 내지 않는다.**
+대회 계좌가 KIS이므로 장중 시세와 매매는 KIS로 가고, 토스는 KIS 모의투자 도메인이 주지
+않는 것(긴 과거 일봉, 투자자별 매매동향·공매도·신용·대차·프로그램매매)만 공급한다.
+
+**사용 기술** `httpx`(비동기 REST), OAuth 2.0 client credentials,
+`core/rate_limiter.AsyncTokenBucket`(그룹별 유량 — 차트 10 TPS, 수급 5 TPS)
+
+**입력·출력** 종목코드 → OHLCV DataFrame(`ts, open, high, low, close, volume`) + 수급 DataFrame
+
+**핵심 함수** `fetch_candles()`(`before` 페이지네이션, 최대 200봉/요청),
+`fetch_flow()`(`nextUntil` 페이지네이션), `probe()`(연결·응답 필드명 확인)
+
+**주의점** 응답 필드명이 공개 문서에 전부 나와 있지 않아, 파서가 후보 이름을 순서대로
+시도한다. 수급은 숫자 필드를 접두어와 함께 **통째로 보존**하므로 실제 필드명을 확인한 뒤에도
+재수집 없이 피처를 늘릴 수 있다. 수집 전에 `scripts/collect_data.py --probe`를 먼저 돌린다.
+
+### 3.13 표본 가중치 — `strategy/sample_weights.py`
+
+**역할** 중첩 라벨이 만드는 편향을 제거한다. 삼중배리어 라벨은 최대 H봉을 공유하므로
+연속 샘플이 서로 독립이 아니다.
+
+**사용 기술** 차분 배열 누적으로 동시성을 O(N)에 계산, 누적합으로 구간 평균을 O(1)에 조회
+
+**입력·출력** (라벨 시작/종료 인덱스, 로그수익률) → 평균 1로 정규화된 가중치 + 진단값
+
+**핵심 함수** `average_uniqueness()`, `return_attribution()`, `time_decay()`,
+`compute_sample_weights()`, `effective_sample_size()`
+
+**주의점** 가중치 합을 표본 수와 같게 정규화해야 학습률의 의미가 유지된다.
+적용 결과 유효 표본이 29,220 → 16,351로 드러났다.
+
+### 3.14 과적합 검증 — `backtest/validation.py`, `backtest/walkforward.py`
+
+**역할** 백테스트 숫자를 믿어도 되는지 판정한다. 수익률을 올리는 도구가 아니라
+**올랐다고 착각하는 것을 막는 도구**다.
+
+**사용 기술** 조합론적 분할(`itertools.combinations`), Probabilistic/Deflated Sharpe Ratio,
+CSCV 기반 PBO, 롤링 윈도우 재학습
+
+**입력·출력** 패널 + 전략 → 경로별 Sharpe 분포, PSR/DSR, PBO, 구간별 성과
+
+**핵심 함수** `CombinatorialPurgedCV.split()`/`assemble_paths()`,
+`probabilistic_sharpe_ratio()`, `deflated_sharpe_ratio()`, `pbo_cscv()`,
+`run_walkforward()`
+
+**주의점** DSR의 `trial_sharpes`에는 **서로 다른 설정**의 Sharpe를 넣어야 한다.
+CPCV 분할별 Sharpe(같은 설정의 기간별 변동)를 넣으면 기준선만 부풀려 DSR을 무의미하게
+낮춘다. 단일 설정의 유의성은 PSR로 본다.
+
+### 3.15 관제 화면 — `monitor/app.py`
 
 **역할** 현재 자산, 낙폭, 포지션, 신호, 유량 상태를 2초마다 보여준다. 화면이 죽어도 매매는
 영향받지 않도록 상태를 읽기만 한다.
