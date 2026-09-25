@@ -1,0 +1,36 @@
+# ============================================================================
+#  KIS AI Quant Trader — 의존성
+#  [필수]는 없으면 동작하지 않고, [선택]은 없으면 자동으로 대체 경로를 탄다.
+#  현재 환경(numpy/pandas/scikit-learn/httpx/websockets/pydantic-settings/
+#  fastapi/uvicorn/cryptography)만으로 전체 기능이 동작하도록 설계되어 있다.
+# ============================================================================
+
+# --- [필수] 코어 ---
+numpy>=1.26
+pandas>=2.0
+scipy>=1.11
+scikit-learn>=1.3          # GBDT(HistGradientBoosting) 기본 백엔드 + 지표/검증
+
+# --- [필수] 통신 ---
+httpx>=0.27                # 비동기 REST 클라이언트
+websockets>=12.0           # 실시간 체결/호가 스트리밍
+cryptography>=42.0         # 체결통보 AES-256-CBC 복호화
+
+# --- [필수] 설정 ---
+pydantic>=2.5
+pydantic-settings>=2.1
+python-dotenv>=1.0
+
+# --- [필수] 모니터링 대시보드 ---
+fastapi>=0.110
+uvicorn>=0.27
+
+# --- [선택] 성능/품질 업그레이드 (설치하면 자동으로 사용) ---
+lightgbm>=4.1              # 설치 시 GBDT 백엔드가 LightGBM으로 자동 승격
+loguru>=0.7                # 설치 시 컬러/회전 로깅으로 자동 승격
+matplotlib>=3.8            # 백테스트 자산곡선 PNG 리포트
+pyarrow>=14.0              # parquet 시세 캐시
+
+# --- [선택] 실데이터 수집 (계좌 발급 후 KIS API로 대체 가능) ---
+# pykrx>=1.0.45
+# finance-datareader>=0.9.50

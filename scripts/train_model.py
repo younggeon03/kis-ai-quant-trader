@@ -1,0 +1,78 @@
+"""AI 알파 모델 학습 스크립트.
+
+    python scripts/train_model.py                    # 합성 데이터 1500봉으로 학습
+    python scripts/train_model.py --days 2500        # 더 긴 기간
+    python scripts/train_model.py --source data/cache  # 로컬 CSV/Parquet 사용
+
+계좌 발급 후에는 `--source`에 KIS에서 받아 저장한 일봉 디렉토리를 지정하면
+동일한 파이프라인으로 재학습된다(코드 수정 불필요).
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from utils.logger import enable_utf8_console  # noqa: E402
+
+enable_utf8_console()
+
+from backtest.data import generate_synthetic_panel, load_panel_from_dir  # noqa: E402
+from config.settings import get_settings  # noqa: E402
+from strategy.ai_model import AlphaModel  # noqa: E402
+from strategy.features import build_panel_features  # noqa: E402
+from utils.logger import logger, setup_logging  # noqa: E402
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="AI 알파 모델 학습")
+    parser.add_argument("--days", type=int, default=1500, help="합성 데이터 봉 수")
+    parser.add_argument("--seed", type=int, default=None, help="랜덤 시드")
+    parser.add_argument("--source", type=str, default="", help="로컬 시세 디렉토리(미지정 시 합성)")
+    parser.add_argument("--symbols", type=int, default=0, help="사용할 종목 수(0=전체)")
+    args = parser.parse_args()
+
+    settings = get_settings()
+    setup_logging(settings.LOG_DIR, settings.LOG_LEVEL)
+
+    symbols = settings.UNIVERSE[: args.symbols] if args.symbols else settings.UNIVERSE
+    if args.source:
+        panel = load_panel_from_dir(args.source, symbols)
+        if not panel:
+            logger.error(f"[Train] {args.source} 에서 데이터를 찾지 못했습니다.")
+            return 1
+        logger.info(f"[Train] 로컬 시세 {len(panel)}종목 로드")
+    else:
+        panel = generate_synthetic_panel(
+            symbols,
+            n_bars=args.days,
+            seed=args.seed if args.seed is not None else settings.MOCK_SEED,
+            sector_map={s: settings.sector_of(s) for s in symbols},
+        )
+        logger.info(f"[Train] 합성 시세 생성 {len(panel)}종목 × {args.days}봉")
+
+    logger.info("[Train] 피처 생성 중...")
+    featured = build_panel_features(panel)
+    if not featured:
+        logger.error("[Train] 피처 생성 실패(데이터 길이 부족)")
+        return 1
+
+    model = AlphaModel(settings)
+    report = model.fit(featured)
+    print()
+    print(report.pretty())
+    model.save()
+
+    if report.cv_auc < 0.52:
+        logger.warning(
+            "[Train] CV AUC가 0.52 미만입니다. 라벨 지평(LABEL_HORIZON)이나 배리어 배수를 "
+            "조정하거나 학습 기간을 늘려보세요."
+        )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
