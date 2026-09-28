@@ -399,9 +399,17 @@ def test_features():
     missing = [c for c in FEATURE_COLUMNS if c not in df.columns]
     assert not missing, f"누락 피처 {missing}"
 
-    tail = df[FEATURE_COLUMNS].iloc[-50:]
+    # 수급 피처는 토스 데이터가 있을 때만 채워진다. 합성 데이터에는 없으므로
+    # 가격 기반 피처(종목 + 횡단면)만 결측률을 본다.
+    from strategy.features import BASE_FEATURES, CROSS_FEATURES
+    from strategy.flow_features import FLOW_FEATURES
+
+    price_cols = BASE_FEATURES + CROSS_FEATURES
+    tail = df[price_cols].iloc[-50:]
     nan_ratio = float(tail.isna().to_numpy().mean())
     assert nan_ratio < 0.05, f"최근 구간 결측률 과다 {nan_ratio:.1%}"
+    # 수급이 없으면 해당 컬럼은 전부 NaN이어야 한다(스키마만 맞춘 상태)
+    assert df[FLOW_FEATURES].isna().all().all(), "수급 데이터가 없는데 값이 채워졌습니다"
 
     labels = make_triple_barrier_labels(df, horizon=5, pt_atr=1.5, sl_atr=1.0, cost=0.003)
     valid = labels.dropna()
@@ -418,7 +426,8 @@ def test_features():
     assert (np.diff(t) >= 0).all(), "시점 인덱스가 정렬되지 않음"
     # 가중치 컬럼이 없으면 1.0으로 채워져야 한다(하위 호환)
     assert len(w) == len(y) and abs(w.mean() - 1.0) < 1e-9, w.mean()
-    return f"피처 {len(FEATURE_COLUMNS)}개, 학습샘플 {len(X):,}, 양성비율 {pos_rate:.1%}"
+    return (f"피처 {len(FEATURE_COLUMNS)}개(가격 {len(price_cols)} + 수급 {len(FLOW_FEATURES)}), "
+            f"학습샘플 {len(X):,}, 양성비율 {pos_rate:.1%}")
 
 
 # ============================================================ 9. 백테스트

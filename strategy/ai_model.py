@@ -315,6 +315,8 @@ class AlphaModel:
         # 라벨의 기저확률(양성 비율). 캘리브레이션된 확률은 이 값을 중심으로 분포하므로
         # 점수와 베팅 사이즈의 중립점도 0.5가 아니라 이 값이어야 한다.
         self.base_rate: float = 0.5
+        # 학습에 쓴 기간 (첫 ts, 마지막 ts). 백테스트가 이 구간과 겹치면 in-sample이다.
+        self.train_range: Tuple[str, str] = ("", "")
         self.columns: List[str] = list(FEATURE_COLUMNS)
         self.report: Optional[TrainReport] = None
         self._mean: Optional[np.ndarray] = None
@@ -355,6 +357,8 @@ class AlphaModel:
 
         self.columns = columns
         self.base_rate = float(np.clip(y.mean(), 0.05, 0.95))
+        all_ts = sorted({str(t) for df in labeled.values() for t in df["ts"]})
+        self.train_range = (all_ts[0], all_ts[-1]) if all_ts else ("", "")
         self._mean = X.mean(axis=0)
         self._std = np.where(X.std(axis=0) > 1e-9, X.std(axis=0), 1.0)
         Xs = (X - self._mean) / self._std
@@ -495,6 +499,7 @@ class AlphaModel:
                     "model": self.model,
                     "calibrated": self.calibrated,
                     "base_rate": self.base_rate,
+                    "train_range": self.train_range,
                     "columns": self.columns,
                     "mean": self._mean,
                     "std": self._std,
@@ -520,6 +525,7 @@ class AlphaModel:
             self.model = blob["model"]
             self.calibrated = bool(blob.get("calibrated", False))
             self.base_rate = float(blob.get("base_rate", 0.5))
+            self.train_range = tuple(blob.get("train_range", ("", "")))
             self.columns = blob["columns"]
             self._mean = blob.get("mean")
             self._std = blob.get("std")
@@ -727,13 +733,15 @@ class EnsembleAlphaStrategy(AbstractStrategy):
         return w_m, w_t, w_c
 
     # ------------------------------------------------------------------ 사전계산
-    def precompute(self, panel: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
+    def precompute(self, panel: Dict[str, pd.DataFrame],
+                   flow_panel: Optional[Dict[str, pd.DataFrame]] = None
+                   ) -> Dict[str, pd.DataFrame]:
         """패널 전체의 피처 + 모델확률 + 팩터점수를 한 번에 계산한다.
 
         모든 지표는 인과적(causal)이므로 전체 구간에서 한 번 계산한 값과
         매 시점 잘라서 계산한 값이 동일하다. 백테스트를 O(n²)에서 O(n)으로 낮춘다.
         """
-        featured = build_panel_features(panel)
+        featured = build_panel_features(panel, flow_panel)
         if not featured:
             return {}
         w_m, _, _ = self._weights()
@@ -845,12 +853,13 @@ class EnsembleAlphaStrategy(AbstractStrategy):
         panel: Dict[str, pd.DataFrame],
         holdings: Optional[Dict[str, Any]] = None,
         ts: Optional[dt.datetime] = None,
+        flow_panel: Optional[Dict[str, pd.DataFrame]] = None,
     ) -> List[Signal]:
         usable = {s: df for s, df in panel.items() if df is not None and len(df) >= self.warmup_bars()}
         if not usable:
             return []
 
-        featured = self.precompute(usable)
+        featured = self.precompute(usable, flow_panel)
         if not featured:
             return []
         self.regime = detect_regime(usable)

@@ -38,6 +38,7 @@ def main() -> int:
     parser.add_argument("--source", type=str, default="", help="로컬 시세 디렉토리")
     parser.add_argument("--symbols", type=int, default=0, help="사용할 종목 수(0=전체)")
     parser.add_argument("--no-model", action="store_true", help="AI 모델 없이 기술적 팩터만 사용")
+    parser.add_argument("--no-flow", action="store_true", help="수급 피처 제외(기여도 비교용)")
     parser.add_argument("--out", type=str, default="reports", help="리포트 출력 디렉토리")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
@@ -46,8 +47,15 @@ def main() -> int:
     setup_logging(settings.LOG_DIR, settings.LOG_LEVEL)
 
     symbols = settings.UNIVERSE[: args.symbols] if args.symbols else settings.UNIVERSE
+    flow_panel = {}
     if args.source:
         panel = load_panel_from_dir(args.source, symbols)
+        # 같은 디렉토리의 flow/ 하위에서 수급 데이터를 함께 읽는다
+        from strategy.flow_features import load_flow_dir
+
+        flow_panel = load_flow_dir(Path(args.source) / "flow", symbols)
+        if flow_panel:
+            logger.info(f"[Backtest] 수급 데이터 {len(flow_panel)}종목 로드")
         if not panel:
             logger.error(f"[Backtest] {args.source} 에서 데이터를 찾지 못했습니다.")
             return 1
@@ -66,12 +74,32 @@ def main() -> int:
     else:
         logger.info("[Backtest] --no-model: 기술적 팩터 + 횡단면 랭크만 사용")
 
+    if args.no_flow:
+        flow_panel = {}
+        logger.info("[Backtest] --no-flow: 수급 피처를 쓰지 않습니다")
+
+    # in-sample 백테스트 경고 — 이번 작업에서 실제로 밟은 함정이다.
+    # 학습 구간과 평가 구간이 겹치면 모델이 미래를 이미 본 것이라 Sharpe가 무의미하게 높다.
+    train_lo, train_hi = getattr(strategy.model, "train_range", ("", ""))
+    if train_lo and panel:
+        first = min(str(df["ts"].iloc[0]) for df in panel.values())
+        last = max(str(df["ts"].iloc[-1]) for df in panel.values())
+        if not (last < train_lo or first > train_hi):
+            logger.warning("=" * 78)
+            logger.warning(f"  [경고] 학습 구간({train_lo}~{train_hi})과 "
+                           f"평가 구간({first}~{last})이 겹칩니다.")
+            logger.warning("  이 백테스트는 in-sample이며 성과가 크게 부풀려집니다.")
+            logger.warning("  실제 성과는 scripts/walkforward.py 또는 "
+                           "scripts/validate_strategy.py 로 측정하세요.")
+            logger.warning("=" * 78)
+
     engine = BacktestEngine(
         panel,
         strategy=strategy,
         risk_manager=RiskManager(settings),
         settings=settings,
         initial_capital=args.capital,
+        flow_panel=flow_panel,
     )
     result = engine.run(verbose=not args.quiet)
 

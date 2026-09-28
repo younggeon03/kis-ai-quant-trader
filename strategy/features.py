@@ -48,7 +48,11 @@ BASE_FEATURES: List[str] = [
 # 횡단면(종목 간 비교) 피처
 CROSS_FEATURES: List[str] = ["cs_mom", "cs_rev", "cs_turnover", "cs_vol", "cs_rsi"]
 
-FEATURE_COLUMNS: List[str] = BASE_FEATURES + CROSS_FEATURES
+# 수급 피처 — 토스 수급 데이터가 있을 때만 채워지고, 없으면 NaN으로 남는다.
+# 가격·거래량만으로는 잡히지 않는 국내 시장 고유의 정보다(strategy/flow_features.py).
+from strategy.flow_features import FLOW_FEATURES  # noqa: E402
+
+FEATURE_COLUMNS: List[str] = BASE_FEATURES + CROSS_FEATURES + FLOW_FEATURES
 
 MIN_HISTORY = 80  # 피처가 안정적으로 생성되는 최소 봉 수
 
@@ -60,8 +64,12 @@ def _log_return(close: np.ndarray, periods: int) -> np.ndarray:
     return out
 
 
-def build_features(df: pd.DataFrame) -> pd.DataFrame:
-    """단일 종목 OHLCV → 피처 DataFrame (원본 컬럼 유지)."""
+def build_features(df: pd.DataFrame, flow: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+    """단일 종목 OHLCV → 피처 DataFrame (원본 컬럼 유지).
+
+    `flow`가 주어지면 수급 피처를 `ts` 기준으로 붙인다. 없으면 해당 컬럼을 NaN으로 채워
+    스키마만 맞춘다. 수급이 있는 종목과 없는 종목을 같은 학습 행렬에 넣기 위해서다.
+    """
     if df is None or len(df) < 5:
         return pd.DataFrame(columns=list(df.columns) + BASE_FEATURES if df is not None else BASE_FEATURES)
 
@@ -151,6 +159,11 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     out["dist_high_60"] = safe_div(close - hh60, hh60, fill=np.nan)
     out["dist_low_60"] = safe_div(close - ll60, ll60, fill=np.nan)
 
+    # --- 수급 (토스 데이터가 있을 때만) ---
+    from strategy.flow_features import merge_flow
+
+    out = merge_flow(out, flow)
+
     out["symbol_len"] = n  # 디버깅 편의
     return out
 
@@ -163,13 +176,19 @@ def _rank_pct(series: pd.Series) -> pd.Series:
     return series.rank(pct=True, na_option="keep").fillna(0.5) - 0.5
 
 
-def build_panel_features(panel: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
+def build_panel_features(panel: Dict[str, pd.DataFrame],
+                         flow_panel: Optional[Dict[str, pd.DataFrame]] = None
+                         ) -> Dict[str, pd.DataFrame]:
     """여러 종목의 피처를 만들고 횡단면 랭크 피처를 추가한다.
 
     횡단면 피처는 "같은 시점의 다른 종목 대비 상대 위치"이므로,
     시장 전체가 오르내릴 때 생기는 공통 변동을 제거해 순수 알파를 남긴다.
+
+    `flow_panel`({종목: 수급 DataFrame})을 주면 수급 피처도 함께 만든다.
     """
-    featured = {s: build_features(df) for s, df in panel.items() if df is not None and len(df) >= MIN_HISTORY}
+    flow_panel = flow_panel or {}
+    featured = {s: build_features(df, flow_panel.get(s))
+                for s, df in panel.items() if df is not None and len(df) >= MIN_HISTORY}
     if not featured:
         return {}
 
@@ -323,7 +342,12 @@ def stack_training_matrix(
     data = data.dropna(subset=[label_col])
     used_cols = [c for c in columns if c in data.columns]
     data[used_cols] = data[used_cols].replace([np.inf, -np.inf], np.nan)
-    data = data.dropna(thresh=int(len(used_cols) * 0.8), subset=used_cols)
+
+    # 통째로 비어 있는 피처군(예: 수급 데이터가 없는 경우)은 결측 임계 계산에서 제외한다.
+    # 그러지 않으면 "60개 중 80% 이상 채워질 것"이라는 조건에 걸려 전 행이 버려진다.
+    populated = [c for c in used_cols if data[c].notna().any()]
+    if populated:
+        data = data.dropna(thresh=int(len(populated) * 0.8), subset=populated)
     data[used_cols] = data[used_cols].fillna(0.0)
     data = data.sort_values("ts").reset_index(drop=True)
 

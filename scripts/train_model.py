@@ -42,8 +42,15 @@ def main() -> int:
     setup_logging(settings.LOG_DIR, settings.LOG_LEVEL)
 
     symbols = settings.UNIVERSE[: args.symbols] if args.symbols else settings.UNIVERSE
+    flow_panel = {}
     if args.source:
         panel = load_panel_from_dir(args.source, symbols)
+        # 같은 디렉토리의 flow/ 하위에서 수급 데이터를 함께 읽는다
+        from strategy.flow_features import load_flow_dir
+
+        flow_panel = load_flow_dir(Path(args.source) / "flow", symbols)
+        if flow_panel:
+            logger.info(f"[Train] 수급 데이터 {len(flow_panel)}종목 로드")
         if not panel:
             logger.error(f"[Train] {args.source} 에서 데이터를 찾지 못했습니다.")
             return 1
@@ -58,7 +65,7 @@ def main() -> int:
         logger.info(f"[Train] 합성 시세 생성 {len(panel)}종목 × {args.days}봉")
 
     logger.info("[Train] 피처 생성 중...")
-    featured = build_panel_features(panel)
+    featured = build_panel_features(panel, flow_panel)
     if not featured:
         logger.error("[Train] 피처 생성 실패(데이터 길이 부족)")
         return 1

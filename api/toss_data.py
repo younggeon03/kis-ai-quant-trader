@@ -104,6 +104,29 @@ def _pick(row: Dict[str, Any], *names: str) -> Any:
     return None
 
 
+def _flatten(obj: Any, prefix: str = "", out: Optional[Dict[str, float]] = None
+             ) -> Dict[str, float]:
+    """중첩 dict를 평탄화해 숫자 필드만 뽑는다.
+
+    토스 수급 응답은 중첩 구조다.
+        {"institution": {"netBuyVolume": ..., "breakdown": {"pensionFund": {...}}}}
+    → institution_netBuyVolume, institution_breakdown_pensionFund_netBuyVolume
+
+    기관 세부 7종(연기금·금융투자·투신·보험·사모·은행·기타)까지 이렇게 살아남는다.
+    """
+    out = {} if out is None else out
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            if key in ("date", "updatedAt", "currency"):
+                continue
+            _flatten(value, f"{prefix}_{key}" if prefix else str(key), out)
+    else:
+        num = _num(obj)
+        if num == num and prefix:      # NaN이 아니면 숫자 필드
+            out[prefix] = num
+    return out
+
+
 def _num(value: Any) -> float:
     try:
         if value is None or value == "":
@@ -281,12 +304,18 @@ class TossDataClient:
                 break
 
             page: List[Dict[str, Any]] = []
+            oldest_raw: Optional[str] = None
             for row in rows:
-                ts = _to_yyyymmdd(_pick(row, "timestamp", "dateTime", "datetime", "time",
-                                        "date", "tradeDate", "candleDateTime"))
+                raw_ts = _pick(row, "timestamp", "dateTime", "datetime", "time",
+                               "date", "tradeDate", "candleDateTime")
+                ts = _to_yyyymmdd(raw_ts)
                 close = _num(_pick(row, "close", "closePrice", "c", "trade_price"))
                 if not ts or close != close or close <= 0:
                     continue
+                # `before` 커서는 원본 타임스탬프 형식 그대로여야 한다.
+                # YYYY-MM-DD로 자르면 토스가 typeMismatch로 거부한다.
+                if isinstance(raw_ts, str) and (oldest_raw is None or raw_ts < oldest_raw):
+                    oldest_raw = raw_ts
                 if ts in seen:
                     continue
                 seen.add(ts)
@@ -303,11 +332,17 @@ class TossDataClient:
                 break
             collected.extend(page)
 
+            # 다음 페이지 커서: 응답이 주면 그것을, 없으면 이번 페이지에서 가장 오래된
+            # 봉의 **원본 타임스탬프**를 그대로 쓴다
             cursor = _next_cursor(payload)
-            oldest = min(r["ts"] for r in page)
-            # 커서가 없으면 가장 오래된 봉의 날짜를 다음 `before`로 쓴다
-            before = cursor or f"{oldest[:4]}-{oldest[4:6]}-{oldest[6:8]}"
-            if len(page) < params["count"]:
+            next_before = cursor or oldest_raw
+            if not next_before or next_before == before:
+                break   # 커서가 진전되지 않으면 더 받을 것이 없다
+            before = next_before
+            # 종료 판정은 **중복 제거 전 원본 개수**로 한다.
+            # `before` 커서가 경계 봉을 다시 포함시키므로 page는 보통 1개 적다.
+            # 이를 "더 받을 게 없다"로 오인하면 200봉에서 수집이 멈춘다.
+            if len(rows) < params["count"]:
                 break   # 더 이상 과거 데이터가 없다
 
         if not collected:
@@ -356,12 +391,9 @@ class TossDataClient:
                     continue
                 seen.add(ts)
                 record: Dict[str, Any] = {"ts": ts}
-                for key, value in row.items():
-                    if key in ("date", "tradeDate", "baseDate", "timestamp", "dt"):
-                        continue
-                    num = _num(value)
-                    if num == num:            # NaN이 아니면 숫자형 필드
-                        record[f"{prefix}_{key}"] = num
+                # 응답이 중첩 dict이므로 평탄화해서 숫자 필드를 모두 살린다
+                for flat_key, num in _flatten(row).items():
+                    record[f"{prefix}_{flat_key}"] = num
                 rows.append(record)
                 added += 1
 
@@ -430,7 +462,7 @@ class TossDataClient:
                 payload = await self._get(f"/api/v1/stocks/{symbol}/{endpoint}",
                                           {"count": 2}, self._flow_bucket)
                 rows = _rows_of(payload)
-                out[f"{prefix}_fields"] = sorted(rows[0].keys()) if rows else []
+                out[f"{prefix}_fields"] = sorted(_flatten(rows[0]).keys()) if rows else []
             except Exception as exc:
                 out[f"{prefix}_error"] = str(exc)[:120]
 

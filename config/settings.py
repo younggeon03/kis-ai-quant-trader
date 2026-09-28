@@ -144,6 +144,11 @@ class Settings(BaseSettings):
         default=False,
         description="2차 모델(메타라벨링) 사용 여부. 정밀도는 오르지만 신호의 절반을 막아 "
                     "합성 데이터에서는 Sharpe가 떨어졌다(1.744→0.814). 실데이터에서 재평가할 것")
+    FLOW_LAG_DAYS: int = Field(
+        default=1,
+        description="수급 피처를 며칠 늦춰 쓸지. 토스 응답의 updatedAt을 보면 T일 수급은 "
+                    "T일 저녁~T+4에 확정된다. T일 종가로 판단하는 시점에는 존재하지 않으므로 "
+                    "최소 1일은 늦춰야 한다. 0으로 두면 룩어헤드가 생긴다")
     CV_SPLITS: int = Field(default=5)
     CV_EMBARGO: int = Field(default=5, description="PurgedKFold embargo 봉 수")
 

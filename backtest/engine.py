@@ -105,9 +105,11 @@ class BacktestEngine:
         risk_manager: Optional[RiskManager] = None,
         settings: Optional[Settings] = None,
         initial_capital: Optional[float] = None,
+        flow_panel: Optional[Dict[str, pd.DataFrame]] = None,
     ):
         self.s = settings or get_settings()
         self.panel = align_panel(panel)
+        self.flow_panel = flow_panel or {}
         self.strategy = strategy or EnsembleAlphaStrategy(self.s)
         self.risk = risk_manager or RiskManager(self.s)
         self.initial_capital = float(initial_capital or self.s.INITIAL_CAPITAL)
@@ -169,7 +171,7 @@ class BacktestEngine:
         if verbose:
             logger.info(f"[Backtest] 피처 사전계산 시작 ({len(self.panel)}종목 × {n}봉)")
         featured = (
-            self.strategy.precompute(self.panel)
+            self.strategy.precompute(self.panel, self.flow_panel)
             if hasattr(self.strategy, "precompute")
             else {}
         )
