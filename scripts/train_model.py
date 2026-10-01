@@ -36,6 +36,9 @@ def main() -> int:
     parser.add_argument("--source", type=str, default="", help="로컬 시세 디렉토리(미지정 시 합성)")
     parser.add_argument("--symbols", type=int, default=0, help="사용할 종목 수(0=전체)")
     parser.add_argument("--no-meta", action="store_true", help="2차 모델(메타라벨링) 생략")
+    parser.add_argument(
+        "--no-flow", action="store_true",
+        help="수급 피처 제외(기술 피처만). 수급 단독 효과를 측정할 때 쓴다")
     args = parser.parse_args()
 
     settings = get_settings()
@@ -45,12 +48,28 @@ def main() -> int:
     flow_panel = {}
     if args.source:
         panel = load_panel_from_dir(args.source, symbols)
-        # 같은 디렉토리의 flow/ 하위에서 수급 데이터를 함께 읽는다
-        from strategy.flow_features import load_flow_dir
+        # 같은 디렉토리의 flow/ 하위에서 수급 데이터를 함께 읽는다.
+        #
+        # `--no-flow`는 **측정용 스위치다.** 수급 피처의 단독 효과를 보려면 같은
+        # 유니버스에서 on/off 두 번을 돌려 AUC를 비교해야 한다. 유니버스가 다른 두
+        # 모델의 AUC는 라벨 모집단이 달라 비교할 수 없으므로, 축을 하나만 움직인다.
+        #
+        # 실전 배포 모델은 **반드시 수급을 켜고 학습한다.** 추론은 수급이 채워진
+        # 상태로 들어오므로, 끈 채로 배포하면 train/serve 불일치가 된다
+        # (`walkforward.py::train_on_bars`가 `flow_panel`을 빼먹어 수급 중요도가
+        #  16종 전부 0으로 측정된 버그와 같은 종류다).
+        if args.no_flow:
+            logger.info("[Train] --no-flow — 수급 피처 제외(기술 피처만)")
+        else:
+            from strategy.flow_features import load_flow_dir
 
-        flow_panel = load_flow_dir(Path(args.source) / "flow", symbols)
-        if flow_panel:
-            logger.info(f"[Train] 수급 데이터 {len(flow_panel)}종목 로드")
+            flow_panel = load_flow_dir(Path(args.source) / "flow", symbols)
+            if flow_panel:
+                logger.info(f"[Train] 수급 데이터 {len(flow_panel)}종목 로드")
+            else:
+                logger.warning(
+                    f"[Train] {args.source}/flow 에서 수급 데이터를 찾지 못했습니다 "
+                    "— 기술 피처만으로 학습합니다")
         if not panel:
             logger.error(f"[Train] {args.source} 에서 데이터를 찾지 못했습니다.")
             return 1

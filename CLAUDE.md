@@ -7,6 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 python scripts/selftest.py                    # 전체 검증 (16개 항목) — 변경 후 필수로 실행
 python scripts/train_model.py --days 1500     # AI 모델 학습 → models/alpha_gbdt.pkl
+python scripts/train_model.py --source data/cache --no-flow   # 수급 피처 제외(측정용)
 python scripts/run_backtest.py --days 1000    # 백테스트 → reports/
 python scripts/run_backtest.py --no-model     # AI 기여도 비교(기술적 팩터만)
 python main.py --duration 120                 # 짧게 실시간 루프 구동(스모크)
@@ -50,6 +51,11 @@ python -m compileall -q config core api strategy backtest utils monitor scripts 
   그 뒤 종목/섹터/총익스포저 상한과 가용현금으로 클립.
   **켈리는 상한이 아니라 배수다** — 상한으로 쓰면 표본이 적을 때 상수가 항상 이겨
   변동성 타게팅이 무력화된다(과거에 실제로 발생한 버그).
+  **단 익스포저를 묶는 것은 사이징이 아니다.** 사이징 배수를 7배 올려도 익스포저는
+  1.2배만 움직이고(38.4%→46.6%), 종목당 상한을 2.5배 올리면 익스포저는 그대로인 채
+  집중도만 오른다(측정 완료). 실제 제약은 **`SIGNAL_BUY_THRESHOLD` 절대 임계값을
+  넘는 종목 수**이며, 8슬롯 중 1~2개만 찬다. 익스포저를 올리려면 `USE_TOP_K`로
+  슬롯을 채워야 한다 — 사이징 파라미터를 건드리는 것은 효과가 없다.
 - 상태 기계: `NORMAL → DERISK`(소프트 MDD: 신규 진입 차단 + 익스포저 축소)
   `→ HALT`(하드 MDD 또는 일일 손실 한도: 전량 청산 + 쿨다운). `update()`를 매 루프 1회 호출해야
   날짜 롤오버(`Portfolio.start_new_day()` → `bars_held` 증가)가 동작한다.
@@ -100,6 +106,11 @@ KIS 유량: 실전 20건/초, **모의투자 2건/초**. 기본값은 모의투�
 단일 백테스트 Sharpe는 실제의 두 배까지 부풀려진다(측정: 1.71 vs CPCV 0.78 / 워크포워드 0.91).
 파라미터나 전략을 바꿨으면 `scripts/validate_strategy.py`와 `scripts/walkforward.py`를 돌린다.
 
+- **다른 유니버스의 AUC를 비교하지 않는다.** 종목 집합·표본 수·삼중배리어 양성비율이
+  달라져 라벨 모집단 자체가 다르다. 유효한 비교는 같은 유니버스에서 피처 축 하나만
+  움직이는 것이고, 유니버스 효과는 같은 실행 내 수익률로만 판정한다.
+  `.env`가 `UNIVERSE_FILE`을 주입하므로 기본 40종목으로 돌리려면 `UNIVERSE_FILE=`을
+  앞에 붙여야 한다(`--symbols 40`은 284 중 앞 40개를 집어 교집합이 6개뿐이다).
 - DSR의 `trial_sharpes`에는 **서로 다른 설정**의 Sharpe만 넣는다. CPCV 분할별 Sharpe는
   같은 설정의 기간별 변동이므로 넣으면 안 된다(기준선만 부풀려 DSR이 무의미해진다).
 - 방법론을 바꿀 때는 **한 번에 하나씩** 넣고 백테스트로 확인한다. 여러 개를 동시에 넣으면

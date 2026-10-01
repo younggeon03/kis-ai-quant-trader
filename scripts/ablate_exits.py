@@ -147,18 +147,56 @@ SIZING_CONFIGS: List[Dict[str, Any]] = [
 ]
 
 # ---------------------------------------------------------------- Top-K 설정군
-# 레짐 이중 적용 버그를 고친 뒤 Top-K 자체를 다시 본다. 이전 측정(−0.813)은
-# 버그를 측정한 것이었다. `MIN_HOLDING_BARS`(슬롯 잠금)와 `MAX_POSITIONS`를 교차한다.
+#
+# **이 실험이 익스포저 질문의 답이다.** 사이징 실험에서 두 가지가 드러났다.
+#
+#  - `TARGET_VOLATILITY` 3.1배 × `KELLY_COLD_START_MULT` 2.25배 = 공식상 7배인데
+#    익스포저는 38.4% → 46.6%, 즉 1.2배만 움직였다.
+#  - 종목당 상한을 18%→45%(2.5배)로 올렸더니 익스포저는 46.6% → 46.0%로 **안 움직이고**
+#    거래가 −37%, MDD가 23.1%→31.4%로 뛰었다. 집중도만 올랐다.
+#
+# 즉 익스포저를 묶는 것은 사이징이 아니라 **신호 개수**다(`SIGNAL_BUY_THRESHOLD=0.22`
+# 절대 임계값 + `USE_TOP_K=False`). 익스포저를 종목당 상한으로 나누면 동시 보유 하한이
+# 나오는데, 상한 18%에서 2.1종목·45%에서 1.0종목으로 8슬롯 중 1~2개만 찬다.
+#
+# 이전 Top-K 측정(−0.813)은 레짐 이중 적용 버그를 측정한 것이었다. 버그는 고쳤고
+# 여기서 처음으로 유효하게 잰다.
+#
+# **종목당 상한 상향은 단독으로는 무효이므로**(위 2번) Top-K와 묶은 변이를 따로 둔다.
+# "한 번에 하나씩" 규칙과 충돌하지만, 단독 변이를 같은 실행에 함께 넣어 기여를 분리한다.
 TOPK_CONFIGS: List[Dict[str, Any]] = [
     {"name": "기준선(임계값 방식)", "delta": {}},
-    {"name": "Top-K 8종목 · 잠금 없음",
-     "delta": {"USE_TOP_K": True, "MAX_POSITIONS": 8, "MIN_HOLDING_BARS": 0}},
-    {"name": "Top-K 8종목 · 잠금 3봉",
-     "delta": {"USE_TOP_K": True, "MAX_POSITIONS": 8, "MIN_HOLDING_BARS": 3}},
+    # --- Top-K 단독: 버그 수정이 −0.813을 되돌렸는지 ---
     {"name": "Top-K 5종목 · 잠금 없음",
      "delta": {"USE_TOP_K": True, "MAX_POSITIONS": 5, "MIN_HOLDING_BARS": 0}},
     {"name": "Top-K 5종목 · 잠금 3봉",
      "delta": {"USE_TOP_K": True, "MAX_POSITIONS": 5, "MIN_HOLDING_BARS": 3}},
+    {"name": "Top-K 2종목 · 잠금 없음",
+     "delta": {"USE_TOP_K": True, "MAX_POSITIONS": 2, "MIN_HOLDING_BARS": 0}},
+    # --- 비중 상한 단독: 측정으로 무효가 확인됐지만 이 기준선에서 재확인 ---
+    {"name": "비중 45% 단독", "delta": {"MAX_POSITION_WEIGHT": 0.45}},
+    # --- 묶음: 대회 정책 후보. 2종목 × 45% = 익스포저 90% ---
+    {"name": "Top-K 2종목 + 비중 45%",
+     "delta": {"USE_TOP_K": True, "MAX_POSITIONS": 2, "MIN_HOLDING_BARS": 0,
+               "MAX_POSITION_WEIGHT": 0.45}},
+    # --- 핵심 가설: 선정·타이밍을 빼면 나아지는가 ---
+    #
+    # 익스포저당 수익이 벤치마크 0.62 대 전략 0.34이고 승구간이 8/21(38%)이다.
+    # 격차가 "덜 담아서"가 아니라 **"잘못 골라서"** 생겼다는 의심이고, 이것이 그 검증이다.
+    #
+    # 구간 시작에 점수 상위 2종목을 90%로 사서 30봉 동안 손절 외에는 손대지 않는다.
+    # `MIN_HOLDING_BARS=30`이 순위 교체를 잠그고, `MAX_HOLDING_BARS`를 평가창보다 크게
+    # 둬 시간손절을 비활성화한다. 모델의 역할이 "언제 사고 팔까"에서 **"어느 종목이
+    # 30일간 가장 많이 오를까"**로 바뀐다.
+    #
+    # 주의: 익절·트레일링 제거는 회전 전략에서 각각 −0.163·−0.089로 해로웠다.
+    # 여기서는 "손대지 않는다"가 가설의 일부이므로 같이 끈다. 그래서 이 변이는
+    # **단일 변수가 아니다** — 이기면 어느 요소가 기여했는지 후속 분해가 필요하다.
+    {"name": "집중 매수보유 (2종목 90% · 손절만)",
+     "delta": {"USE_TOP_K": True, "MAX_POSITIONS": 2,
+               "MAX_POSITION_WEIGHT": 0.45, "MIN_HOLDING_BARS": 30,
+               "MAX_HOLDING_BARS": 999,
+               "TAKE_PROFIT_PCT": 0.0, "TRAILING_ACTIVATE_PCT": 0.0}},
 ]
 
 # ---------------------------------------------------------------- 수급 설정군
@@ -196,6 +234,55 @@ CONFIG_SETS: Dict[str, List[Dict[str, Any]]] = {
     "sizing": SIZING_CONFIGS,
     "topk": TOPK_CONFIGS,
 }
+
+
+def build_summary(variants, pieces, trades, expo, seg_rows) -> Dict[str, Any]:
+    """지금까지 끝난 구간만으로 설정별 집계를 만든다. 체크포인트와 최종 저장이 공용한다."""
+    summary: Dict[str, Any] = {}
+    for name, _sv, _uf in variants:
+        arr = np.concatenate(pieces[name]) if pieces[name] else np.array([])
+        if not len(arr):
+            continue
+        summary[name] = {
+            "sharpe": sharpe_ratio(arr),
+            "total_return": float(np.prod(1.0 + arr) - 1.0),
+            "mdd": max_drawdown_from_returns(arr),
+            "trades": trades[name],
+            "exposure": float(np.mean(expo[name])) if expo[name] else float("nan"),
+            "positive_segments": sum(1 for r in seg_rows if r.get(name, 0.0) > 0),
+            "segments": len(seg_rows),
+        }
+    return summary
+
+
+def write_report(out_path: Path, seg_rows, summary, fp, cfg,
+                 complete: bool, planned: int = 0) -> None:
+    """부분 결과라도 디스크에 남긴다.
+
+    ## 왜 구간마다 쓰는가 (겪은 일)
+
+    예전에는 모든 구간이 끝난 뒤에만 JSON을 썼다. 가용 메모리가 2.4GB인 환경에서 측정이
+    **세 번 중단됐고**(8/31 · 5/28 · 14/31) 매번 수 시간이 전손됐다. 진행 로그에도
+    첫·마지막 설정만 찍혀 중간 설정은 복구할 수 없었다.
+
+    장시간 측정에서 중단은 예외가 아니라 정상 경로다. 그래서 구간마다 덮어쓰고
+    `complete` 플래그로 완주 여부를 구분한다. **`complete: false`인 파일의 수치는
+    구간 수가 다르므로 완주한 실행과 직접 비교하면 안 된다.**
+    """
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "complete": bool(complete),
+        "segments_done": len(seg_rows),
+        "segments_planned": int(planned) or len(seg_rows),
+        "segments": seg_rows,
+        "summary": summary,
+        "data_fingerprint": fp,
+        "config": cfg,
+    }
+    tmp = out_path.with_suffix(out_path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str),
+                   encoding="utf-8")
+    tmp.replace(out_path)   # 쓰는 중에 죽어도 기존 체크포인트가 깨지지 않는다
 
 
 def variant_settings(base, delta: Dict[str, Any]):
@@ -357,6 +444,13 @@ def main() -> int:
     started = time.monotonic()
     index = 0
     test_start = max(args.train_window, MIN_WARMUP)
+    # 체크포인트를 쓰려면 저장 경로와 설정 메타를 루프 진입 전에 확정해야 한다.
+    out_path = Path(args.out)
+    run_cfg = {"train_window": args.train_window, "step": args.step,
+               "symbols": len(panel), "n_bars": n_bars,
+               "config_set": args.config_set, "flow_symbols": len(flow_panel)}
+    planned = max(0, (n_bars - test_start) // args.step)
+    logger.info(f"[Ablate] 구간 {planned}개 예정 · 체크포인트 → {out_path}")
     while test_start + args.step <= n_bars:
         if args.max_segments and index >= args.max_segments:
             break
@@ -403,15 +497,19 @@ def main() -> int:
             row[name] = float(np.prod(1.0 + rets) - 1.0)
 
         seg_rows.append(row)
-        # 진행 로그는 설정군의 첫(기준선)·마지막(누적) 항목을 보여준다.
-        # 상수 이름을 쓰면 설정군을 바꿀 때 키가 어긋나 0.00%로 찍힌다.
-        first_name, last_name = chosen[0]["name"], chosen[-1]["name"]
+        # **모든 설정을 찍는다.** 예전에는 첫·마지막만 찍어서, 측정이 중단되면 중간
+        # 설정의 결과를 로그로도 복구할 수 없었다(수급 실험에서 핵심 비교를 잃었다).
+        detail = " · ".join(
+            f"{name} {row.get(name, 0.0) * 100:+.2f}%" for name, _sv, _uf in variants)
         logger.info(
-            f"[Ablate] 구간 {index} {row['from']}~{row['to']} "
-            f"벤치 {row.get('benchmark', 0.0) * 100:+.2f}% · "
-            f"{first_name} {row.get(first_name, 0.0) * 100:+.2f}% · "
-            f"{last_name} {row.get(last_name, 0.0) * 100:+.2f}% "
+            f"[Ablate] 구간 {index}/{planned} {row['from']}~{row['to']} "
+            f"벤치 {row.get('benchmark', 0.0) * 100:+.2f}% · {detail} "
             f"({time.monotonic() - started:.0f}s)")
+
+        # 구간마다 부분 결과를 남긴다. 중단되어도 여기까지는 보존된다.
+        write_report(out_path, seg_rows,
+                     build_summary(variants, pieces, trades, expo, seg_rows),
+                     fp, run_cfg, complete=False, planned=planned)
         test_start += args.step
 
     # ------------------------------------------------------------------ 집계
@@ -433,34 +531,20 @@ def main() -> int:
               f"{'거래':>6} {'익스포저':>9} {'양수구간':>9}")
     print(header)
     print("-" * 98)
-    summary: Dict[str, Any] = {}
+    summary = build_summary(variants, pieces, trades, expo, seg_rows)
     for name, _sv, _uf in variants:
-        arr = np.concatenate(pieces[name]) if pieces[name] else np.array([])
-        if not len(arr):
+        s = summary.get(name)
+        if s is None:
             continue
-        seg_pos = sum(1 for r in seg_rows if r.get(name, 0.0) > 0)
-        sh = sharpe_ratio(arr)
-        tot = float(np.prod(1.0 + arr) - 1.0)
-        mdd = max_drawdown_from_returns(arr)
-        ex = float(np.mean(expo[name])) if expo[name] else float("nan")
-        summary[name] = {"sharpe": sh, "total_return": tot, "mdd": mdd,
-                         "trades": trades[name], "exposure": ex,
-                         "positive_segments": seg_pos, "segments": len(seg_rows)}
-        print(f" {name:<30} {sh:>7.3f} {tot * 100:>+9.1f}% {mdd * 100:>6.1f}% "
-              f"{trades[name]:>6d} {ex * 100:>8.1f}% {seg_pos:>5d}/{len(seg_rows)}")
+        print(f" {name:<30} {s['sharpe']:>7.3f} {s['total_return'] * 100:>+9.1f}% "
+              f"{s['mdd'] * 100:>6.1f}% {s['trades']:>6d} "
+              f"{s['exposure'] * 100:>8.1f}% "
+              f"{s['positive_segments']:>5d}/{len(seg_rows)}")
     print("=" * 98)
 
-    out_path = Path(args.out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(
-        {"segments": seg_rows, "summary": summary,
-         "data_fingerprint": fp,
-         "config": {"train_window": args.train_window, "step": args.step,
-                    "symbols": len(panel), "n_bars": n_bars,
-                    "config_set": args.config_set,
-                    "flow_symbols": len(flow_panel)}},
-        ensure_ascii=False, indent=2, default=str), encoding="utf-8")
-    logger.success(f"[Ablate] 저장 → {out_path.resolve()}")
+    write_report(out_path, seg_rows, summary, fp, run_cfg,
+                 complete=True, planned=planned)
+    logger.success(f"[Ablate] 저장 → {out_path.resolve()} (완주 {len(seg_rows)}구간)")
     return 0
 
 
