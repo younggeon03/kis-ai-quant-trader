@@ -82,17 +82,48 @@ class SurgeEvent:
 
 
 def find_trigger(minute: pd.DataFrame, prev_close: float,
-                 trigger: float = 0.10) -> Optional[int]:
-    """전일종가 대비 `trigger`를 처음 넘긴 분봉의 인덱스.
+                 trigger: float = 0.03,
+                 prev_volume: float = 0.0,
+                 vol_mult: float = 1.5) -> Optional[int]:
+    """가격과 거래량을 **동시에** 만족하는 첫 분봉의 인덱스.
 
-    고가로 판정한다 — 그 분봉 안에서 가격이 돌파선을 지났다는 뜻이다. 종가로
-    판정하면 분봉 안에서 찍고 되돌아온 돌파를 놓치는데, 실거래에서는 그 순간에
-    주문이 나간다.
+    ```
+    ① 고가 ≥ 전일종가 × (1 + trigger)
+    ② 그 1분봉 거래량 ≥ vol_mult × (전일 거래량 ÷ 391)
+    ```
+
+    ## 왜 고가로 판정하는가
+
+    그 분봉 안에서 가격이 돌파선을 지났다는 뜻이다. 종가로 판정하면 분봉 안에서
+    찍고 되돌아온 돌파를 놓치는데, 실거래에서는 그 순간에 주문이 나간다.
+
+    ## 왜 거래량 조건이 필요한가
+
+    가격만 보면 **거래 없이 호가 몇 번에 뛴 것까지 발동한다.** 트리거를 +10%에서
+    +3%로 낮추면 그런 사건이 급격히 늘어난다(+3% 도달일 88,275일 vs +10% 13,099일).
+    거래량 조건이 그중 "실제로 거래가 붙은" 것만 남긴다.
+
+    ## 왜 돌파 봉 거래량만 보는가 (사용자 결정)
+
+    누적 거래량으로 판정하려면 시점 보정이 필요하다. 실측 장중 프로파일이 U자형이라
+    10분 경과 시점에 이미 하루 거래량의 **9.7%**(균등 가정 2.6%의 3.8배)가 돌아간다.
+    보정 없이 누적으로 판정하면 아침 돌파가 거의 전부 탈락하고 오후 돌파만 남는데,
+    측정에서는 **아침 돌파(62분)가 오후 돌파(106분)보다 좋았다** — 신호를 거꾸로
+    거르게 된다. 돌파 봉 하나만 보면 시점 보정이 필요 없고 "지금 거래가 붙었는가"를
+    직접 본다. 하루 누적 유입은 `turnover_vs_prev` 피처가 따로 잰다.
+
+    기준선을 전일 분당 평균(전일 거래량 ÷ 391)으로 잡는다. 전일 거래량을 모르면
+    (`prev_volume <= 0`) 거래량 조건을 건너뛴다 — 상장 직후 등에서 가격 조건만으로
+    판정하는 것이 전부 탈락시키는 것보다 낫다.
     """
     if minute is None or minute.empty or not np.isfinite(prev_close) or prev_close <= 0:
         return None
     level = prev_close * (1.0 + trigger)
-    hits = np.flatnonzero(minute["high"].to_numpy(float) >= level)
+    ok = minute["high"].to_numpy(float) >= level
+    if prev_volume and prev_volume > 0 and vol_mult > 0:
+        floor = vol_mult * (prev_volume / SESSION_MINUTES)
+        ok &= minute["volume"].to_numpy(float) >= floor
+    hits = np.flatnonzero(ok)
     if not len(hits):
         return None
     idx = int(hits[0])
@@ -241,15 +272,16 @@ def label_event(h: np.ndarray, l: np.ndarray, c: np.ndarray,
 
 def events_for_day(symbol: str, day: str, minute: pd.DataFrame,
                    prev_close: float, prev_turnover: float,
-                   trigger: float = 0.10, target: float = 0.10,
-                   stop: float = 0.0) -> Optional[Dict[str, float]]:
+                   trigger: float = 0.03, target: float = 0.10,
+                   stop: float = 0.0, prev_volume: float = 0.0,
+                   vol_mult: float = 1.5) -> Optional[Dict[str, float]]:
     """하루치 분봉 → 피처 + 라벨 한 행. 돌파가 없으면 `None`.
 
     하루에 돌파를 **한 번만** 센다. 같은 날 여러 번 돌파선을 넘나드는 종목에서
     사건을 여러 개 만들면 서로 거의 같은 정보를 담아 표본이 중복되고, 검증
     점수가 부풀려진다(일봉 라벨 중첩에 가중치를 주는 것과 같은 이유다).
     """
-    idx = find_trigger(minute, prev_close, trigger)
+    idx = find_trigger(minute, prev_close, trigger, prev_volume, vol_mult)
     if idx is None:
         return None
     o = minute["open"].to_numpy(float)
@@ -277,10 +309,11 @@ def events_for_day(symbol: str, day: str, minute: pd.DataFrame,
 
 def build_event_table(daily: Dict[str, pd.DataFrame],
                       minute_dir: str,
-                      trigger: float = 0.10,
+                      trigger: float = 0.03,
                       target: float = 0.10,
                       stop: float = 0.0,
-                      min_bars: int = 200) -> pd.DataFrame:
+                      min_bars: int = 200,
+                      vol_mult: float = 1.5) -> pd.DataFrame:
     """분봉 디렉토리 전체 → 학습용 사건 테이블.
 
     `daily`에서 전일종가와 전일 거래대금을 가져온다. 분봉만으로는 "전일 대비"를
@@ -301,6 +334,7 @@ def build_event_table(daily: Dict[str, pd.DataFrame],
         prev_c = dict(zip(d["ts"].astype(str), d["close"].astype(float).shift(1)))
         prev_t = dict(zip(d["ts"].astype(str),
                           (d["close"].astype(float) * d["volume"].astype(float)).shift(1)))
+        prev_v = dict(zip(d["ts"].astype(str), d["volume"].astype(float).shift(1)))
         try:
             mdf = pd.read_csv(path, dtype={"ts": str})
         except Exception:
@@ -314,7 +348,8 @@ def build_event_table(daily: Dict[str, pd.DataFrame],
             if pc is None or not np.isfinite(pc) or pc <= 0:
                 continue
             row = events_for_day(sym, str(day), grp.reset_index(drop=True),
-                                 float(pc), float(pt or 0.0), trigger, target, stop)
+                                 float(pc), float(pt or 0.0), trigger, target, stop,
+                                 float(prev_v.get(day) or 0.0), vol_mult)
             if row is not None:
                 rows.append(row)
     if not rows:

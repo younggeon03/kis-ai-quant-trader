@@ -248,7 +248,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="급등일 1분봉 수집")
     ap.add_argument("--source", default="data/cache", help="일봉 디렉토리(분봉은 그 아래 minute/)")
     ap.add_argument("--symbols", type=int, default=0, help="앞 N종목만(0=전체)")
-    ap.add_argument("--trigger", type=float, default=0.10, help="장중 돌파 트리거(고가/전일종가−1)")
+    ap.add_argument("--trigger", type=float, default=0.03,
+                    help="장중 돌파 트리거(고가/전일종가−1). 거래량 조건은 수집 단계에서 "
+                         "판정할 수 없다(분봉이 있어야 안다) — 가격 조건으로 넓게 받고 "
+                         "트리거 시점 판정은 strategy/minute_features.py 가 한다")
     ap.add_argument("--since", default="20220103", help="이 날짜 이후만(토스 한계 2022-01-03)")
     ap.add_argument("--probe", action="store_true", help="대상 규모만 보고 종료")
     args = ap.parse_args()

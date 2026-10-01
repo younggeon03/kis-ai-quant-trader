@@ -133,7 +133,8 @@ def simulate_rule(h: np.ndarray, l: np.ndarray, c: np.ndarray, entry: float,
 
 
 def collect_outcomes(daily: Dict[str, pd.DataFrame], minute_dir: str,
-                     trigger: float, min_bars: int) -> Dict[str, np.ndarray]:
+                     trigger: float, min_bars: int,
+                     vol_mult: float = 1.5) -> Dict[str, np.ndarray]:
     """규칙별 사건 수익률 배열. 분봉을 종목 단위로 흘려보내 메모리를 묶지 않는다."""
     acc: Dict[str, List[float]] = {name: [] for name, *_ in RULES}
     mdir = Path(minute_dir)
@@ -144,6 +145,7 @@ def collect_outcomes(daily: Dict[str, pd.DataFrame], minute_dir: str,
             continue
         d = ddf.reset_index(drop=True)
         prev_c = dict(zip(d["ts"].astype(str), d["close"].astype(float).shift(1)))
+        prev_v = dict(zip(d["ts"].astype(str), d["volume"].astype(float).shift(1)))
         try:
             mdf = pd.read_csv(path, dtype={"ts": str})
         except Exception:
@@ -157,7 +159,8 @@ def collect_outcomes(daily: Dict[str, pd.DataFrame], minute_dir: str,
             if pc is None or not np.isfinite(pc) or pc <= 0:
                 continue
             g = grp.reset_index(drop=True)
-            idx = find_trigger(g, float(pc), trigger)
+            idx = find_trigger(g, float(pc), trigger,
+                               float(prev_v.get(str(day)) or 0.0), vol_mult)
             if idx is None:
                 continue
             o = g["open"].to_numpy(float)
@@ -198,7 +201,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="분봉 청산 규칙 격자")
     ap.add_argument("--source", default="data/cache")
     ap.add_argument("--minute-dir", default="data/cache/minute")
-    ap.add_argument("--trigger", type=float, default=0.10)
+    ap.add_argument("--trigger", type=float, default=0.03)
+    ap.add_argument("--vol-mult", type=float, default=1.5,
+                    help="돌파 봉 거래량 / 전일 분당 평균 하한")
     ap.add_argument("--min-bars", type=int, default=200)
     ap.add_argument("--trials", type=int, default=40000)
     ap.add_argument("--days", type=int, default=30, help="대회 거래일 수")
@@ -215,9 +220,11 @@ def main() -> int:
         logger.error(f"[Grid] {args.minute_dir} 에 분봉이 없습니다")
         return 1
     daily = load_panel_from_dir(args.source, have)
-    logger.info(f"[Grid] 분봉 {len(have)}종목 · 트리거 +{args.trigger:.0%}")
+    logger.info(f"[Grid] 분봉 {len(have)}종목 · 트리거 +{args.trigger:.0%} "
+                f"· 돌파봉 거래량 ≥ 전일분당×{args.vol_mult}")
 
-    pools = collect_outcomes(daily, args.minute_dir, args.trigger, args.min_bars)
+    pools = collect_outcomes(daily, args.minute_dir, args.trigger, args.min_bars,
+                             args.vol_mult)
     cost = s.round_trip_cost
     rng = np.random.default_rng(16)
     skills = [float(x) for x in args.skills.split(",")]
