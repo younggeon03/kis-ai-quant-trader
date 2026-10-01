@@ -207,13 +207,14 @@ TOPK_CONFIGS: List[Dict[str, Any]] = [
 # (실제로 이 경로가 끊겨 있어서 수급 피처가 계속 죽어 있었다.)
 #
 # 그래서 이 설정군은 수급 모드마다 모델을 따로 학습한다. 학습 비용이 2배다.
+#
+# 손절 3.5% 교차는 **기각됐으므로 뺐다.** 14구간까지 돌린 부분 결과에서
+# "수급 사용 + 손절 3.5%"가 누적 −3.3%(평균 −0.21%)였다 — 수급은 좁은 손절을
+# 구제하지 못한다. 설정을 4개에서 2개로 줄이면 학습은 수급 모드당 1회라 그대로지만
+# 구간별 평가가 절반이 된다.
 FLOW_CONFIGS: List[Dict[str, Any]] = [
     {"name": "수급 없음 (현재)", "delta": {USE_FLOW_KEY: False}},
     {"name": "수급 사용", "delta": {USE_FLOW_KEY: True}},
-    {"name": "수급 없음 + 손절 3.5%",
-     "delta": {USE_FLOW_KEY: False, "STOP_LOSS_PCT": 0.035}},
-    {"name": "수급 사용 + 손절 3.5%",
-     "delta": {USE_FLOW_KEY: True, "STOP_LOSS_PCT": 0.035}},
 ]
 
 # ------------------------------------------------------- 유니버스 비교용(경량)
@@ -234,6 +235,48 @@ CONFIG_SETS: Dict[str, List[Dict[str, Any]]] = {
     "sizing": SIZING_CONFIGS,
     "topk": TOPK_CONFIGS,
 }
+
+
+def stratified_sample(symbols, n: int, settings, seed: int = 16) -> List[str]:
+    """지수 소속/비소속 비율을 유지해 n종목을 뽑는다.
+
+    ## 왜 층화인가
+
+    284종목 전량 측정은 36종목의 약 6배이고 28구간이라 **15시간대**다. 가용 메모리가
+    2.4GB인 환경에서 이미 한 번 중단됐다(5/28).
+
+    그냥 앞에서 n개를 자르면(`--symbols`) `universe.json`의 정렬 순서에 따라 한쪽
+    집단으로 쏠린다. 유니버스 확장의 요지가 **지수 외 종목의 꼬리**(변동성 1.38배,
+    30봉 P(+100%) 1.13%→2.92%)이므로, 그 집단이 빠지면 측정할 대상 자체가 사라진다.
+    그래서 두 집단의 비율을 유지한 채 각각에서 뽑는다.
+
+    ## 한계
+
+    **다른 유니버스의 절대 수치와 비교할 수 없다**(지문이 다르다). 판정은 같은 실행
+    안의 벤치마크 대비 거리로만 한다. 시드를 고정해 재현은 보장한다.
+    """
+    members: set = set()
+    for lst in settings.index_members().values():
+        members.update(lst)
+    inside = [s for s in symbols if s in members]
+    outside = [s for s in symbols if s not in members]
+    if not members:
+        # 지수 정보가 없으면 층화할 근거가 없다. 단순 무작위로 떨어진다.
+        rng = np.random.default_rng(seed)
+        picked = sorted(rng.choice(list(symbols), size=n, replace=False).tolist())
+        logger.warning(f"[Ablate] 지수 멤버십 정보 없음 — 단순 무작위 {len(picked)}종목")
+        return picked
+
+    share = len(inside) / len(symbols)
+    n_in = min(len(inside), max(1, round(n * share)))
+    n_out = min(len(outside), max(1, n - n_in))
+    rng = np.random.default_rng(seed)
+    picked = sorted(rng.choice(inside, size=n_in, replace=False).tolist()
+                    + rng.choice(outside, size=n_out, replace=False).tolist())
+    logger.info(
+        f"[Ablate] 층화 추출 {len(picked)}종목 — 지수 소속 {n_in}/{len(inside)} · "
+        f"지수 외 {n_out}/{len(outside)} (전체 비율 {share:.1%}, 시드 {seed})")
+    return picked
 
 
 def build_summary(variants, pieces, trades, expo, seg_rows) -> Dict[str, Any]:
@@ -375,6 +418,11 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="출구 규칙 절제 실험")
     ap.add_argument("--source", type=str, default="")
     ap.add_argument("--days", type=int, default=1500)
+    ap.add_argument("--sample", type=int, default=0,
+                    help="유니버스에서 N종목을 지수 소속/비소속 비율을 유지해 층화 추출"
+                         "(284종목 전량이 시간상 불가할 때 쓴다)")
+    ap.add_argument("--sample-seed", type=int, default=16,
+                    help="층화 추출 시드. 같은 시드면 같은 종목이 뽑힌다")
     ap.add_argument("--symbols", type=int, default=0,
                     help="앞에서 N종목만. 0=전체. 기본이 40이면 유니버스를 284로 "
                          "설정해 뒀는데도 조용히 40종목만 측정된다")
@@ -395,6 +443,8 @@ def main() -> int:
     base = get_settings()
     setup_logging(base.LOG_DIR, base.LOG_LEVEL)
     symbols = base.UNIVERSE[: args.symbols] if args.symbols else base.UNIVERSE
+    if args.sample and args.sample < len(symbols):
+        symbols = stratified_sample(symbols, args.sample, base, args.sample_seed)
 
     flow_panel: Dict[str, Any] = {}
     if args.source:
