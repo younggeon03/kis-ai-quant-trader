@@ -52,7 +52,17 @@ CROSS_FEATURES: List[str] = ["cs_mom", "cs_rev", "cs_turnover", "cs_vol", "cs_rs
 # 가격·거래량만으로는 잡히지 않는 국내 시장 고유의 정보다(strategy/flow_features.py).
 from strategy.flow_features import FLOW_FEATURES  # noqa: E402
 
-FEATURE_COLUMNS: List[str] = BASE_FEATURES + CROSS_FEATURES + FLOW_FEATURES
+# 소재(촉매) 흔적 피처 — 거래대금 폭증·급등 신선도·테마 동반 상승.
+# 기존 피처는 추세와 평균회귀만 보므로 "지금 무언가가 돌고 있다"를 잡지 못한다.
+# 30봉 +100%는 거의 소형주의 소재 장세이고, 그것이 이 묶음의 존재 이유다
+# (strategy/catalyst_features.py).
+from strategy.catalyst_features import (  # noqa: E402
+    CATALYST_FEATURES,
+    THEME_FEATURES,
+)
+
+FEATURE_COLUMNS: List[str] = (BASE_FEATURES + CROSS_FEATURES + FLOW_FEATURES
+                              + CATALYST_FEATURES + THEME_FEATURES)
 
 MIN_HISTORY = 80  # 피처가 안정적으로 생성되는 최소 봉 수
 
@@ -159,6 +169,13 @@ def build_features(df: pd.DataFrame, flow: Optional[pd.DataFrame] = None) -> pd.
     out["dist_high_60"] = safe_div(close - hh60, hh60, fill=np.nan)
     out["dist_low_60"] = safe_div(close - ll60, ll60, fill=np.nan)
 
+    # --- 소재 흔적 (가격·거래량만으로 계산, 외부 데이터 불필요) ---
+    from strategy.catalyst_features import build_catalyst_features
+
+    cat = build_catalyst_features(out)
+    for col in cat.columns:
+        out[col] = cat[col].to_numpy()
+
     # --- 수급 (토스 데이터가 있을 때만) ---
     from strategy.flow_features import merge_flow
 
@@ -212,6 +229,14 @@ def build_panel_features(panel: Dict[str, pd.DataFrame],
         for col in CROSS_FEATURES:
             df[col] = df["ts"].map(sub[col]).astype(float)
         featured[symbol] = df
+
+    # --- 테마 동반 상승 ---
+    # 소재는 한 종목이 아니라 떼로 움직인다. 섹터 13개는 테마보다 거칠어서
+    # 수익률 상관으로 군집을 유도한다. 군집은 블록마다 직전 구간만 보고 다시
+    # 계산하므로 인과적이다(strategy/catalyst_features.py::theme_clusters).
+    from strategy.catalyst_features import add_theme_features
+
+    featured = add_theme_features(featured)
     return featured
 
 

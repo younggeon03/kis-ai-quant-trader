@@ -106,6 +106,60 @@ def make_triple_barrier_labels(
     return pd.Series(labels, index=df.index)
 
 
+def make_magnitude_labels(
+    df: pd.DataFrame,
+    horizon: int = 30,
+    threshold: float = 0.50,
+    cost: float = 0.003,
+) -> pd.Series:
+    """크기 라벨 — "`horizon`봉 안에 `threshold` 이상 오르는가".
+
+    ## 왜 방향 라벨로는 안 되는가
+
+    삼중배리어 라벨은 **방향**을 가르친다(상단 먼저 닿으면 1). 그래서 모델은 상승확률
+    0.7인 +5% 종목을 0.5인 +150% 종목보다 높게 평가한다. 대회 심사가 절대수익 top10
+    (지난 대회 +100%)이면 그 선택이 정확히 반대다.
+
+    실측이 이를 뒷받침한다. 30봉 창마다 '그 창의 최고 종목'을 100% 들었을 때 확장
+    284종목의 최고 종목 중앙값이 **+124%**였다. 재료는 있고, 문제는 고르는 일이다.
+    그리고 급등 포착 연구(`scripts/surge_study.py`)에서 모든 소재 조건의 **중앙값이
+    음수**인데 `P(+100%)`는 1.6~3.1배였다 — 평균을 기준으로 배우면 전부 버린다.
+
+    ## 종점 수익률을 쓰는 이유
+
+    구간 내 최대값이 아니라 **봉 t+horizon 종가**를 쓴다. 대회 성적은 11/20 시점의
+    계좌 수익률이고, 꼬리 모드에서는 익절·트레일링을 끄기로 했으므로(사용자 결정)
+    중간 고점은 실현되지 않는다. 익절 규칙을 다시 넣는다면 라벨도 최대값으로
+    바꿔야 한다 — **라벨과 청산 규칙은 같은 것을 가정해야 한다.**
+
+    체결 가정은 삼중배리어와 같다(봉 t+1 시가 진입). 비용을 차감한 뒤 문턱과 비교한다.
+
+    ## 표본 불균형
+
+    `threshold=0.50`, `horizon=30`의 양성비율은 실측 **약 3.9%**다(삼중배리어 43.2%).
+    `bet_size()`의 중립점이 `AlphaModel.base_rate`이므로 사이징은 자동으로 맞지만,
+    `SIGNAL_BUY_THRESHOLD`는 0.5 기준으로 잡힌 값이라 다시 정해야 한다.
+    """
+    n = len(df)
+    labels = np.full(n, np.nan)
+    if n < horizon + 2:
+        return pd.Series(labels, index=df.index)
+
+    close = df["close"].to_numpy(dtype=float)
+    open_ = df["open"].to_numpy(dtype=float)
+    for t in range(n - horizon - 1):
+        entry = open_[t + 1]
+        exit_idx = t + 1 + horizon
+        if exit_idx >= n:
+            break
+        exit_px = close[exit_idx]
+        if not np.isfinite(entry) or entry <= 0 or not np.isfinite(exit_px):
+            continue
+        ret = exit_px / entry - 1.0 - cost
+        labels[t] = 1.0 if ret >= threshold else 0.0
+    return pd.Series(labels, index=df.index)
+
+
 def label_panel(
     featured: Dict[str, pd.DataFrame], settings: Optional[Settings] = None,
     with_weights: bool = True,
@@ -116,15 +170,27 @@ def label_panel(
     중첩이 심한 구간이 과대 대표되고 검증 점수도 부풀려진다(strategy/sample_weights.py 참고).
     """
     settings = settings or get_settings()
-    horizon = settings.LABEL_HORIZON
+    magnitude = str(getattr(settings, "LABEL_MODE", "triple_barrier")) == "magnitude"
+    # 크기 라벨은 대회 길이(30봉)를 지평으로 쓴다. 방향 라벨의 5봉과 다르므로
+    # 지평을 라벨 방식에 묶는다 — 5봉 안에 +50%는 사실상 일어나지 않는다.
+    horizon = (int(settings.LABEL_MAGNITUDE_HORIZON) if magnitude
+               else int(settings.LABEL_HORIZON))
     for symbol, df in featured.items():
-        df["label"] = make_triple_barrier_labels(
-            df,
-            horizon=horizon,
-            pt_atr=settings.LABEL_PT_ATR,
-            sl_atr=settings.LABEL_SL_ATR,
-            cost=settings.round_trip_cost,
-        )
+        if magnitude:
+            df["label"] = make_magnitude_labels(
+                df,
+                horizon=horizon,
+                threshold=float(settings.LABEL_MAGNITUDE_THRESHOLD),
+                cost=settings.round_trip_cost,
+            )
+        else:
+            df["label"] = make_triple_barrier_labels(
+                df,
+                horizon=horizon,
+                pt_atr=settings.LABEL_PT_ATR,
+                sl_atr=settings.LABEL_SL_ATR,
+                cost=settings.round_trip_cost,
+            )
         if with_weights:
             from strategy.sample_weights import compute_sample_weights
 

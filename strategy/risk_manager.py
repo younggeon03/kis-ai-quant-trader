@@ -291,9 +291,27 @@ class RiskManager:
         sector = self.s.sector_of(signal.symbol)
         sector_w = portfolio.sector_weights().get(sector, 0.0)
         sector_w += sum(v for s_, v in pending.items() if self.s.sector_of(s_) == sector) / equity
-        sector_room = self.s.MAX_SECTOR_WEIGHT - sector_w
-        if sector_room <= 0.01:
-            return self._reject(f"섹터({sector}) 비중 상한 도달 {sector_w:.1%}")
+        # 고정 비중(꼬리) 모드에서는 섹터 상한을 적용하지 않는다.
+        #
+        # 두 가지 이유다. 첫째, **대회 규정에 섹터 제한이 없다** — 단일 종목 50%만
+        # 있다. 섹터 상한은 우리가 넣은 리스크 통제이고, 꼬리 전략에서는 그 통제가
+        # 목표와 충돌한다.
+        #
+        # 둘째, **지금 섹터 분류는 신뢰할 수 없다.** `sector_of()`는 `SECTOR_MAP`에
+        # 없는 종목을 시장명으로 폴백하는데, 284종목 유니버스에서 **242종목(85.2%)이
+        # "KOSPI"/"KOSDAQ" 하나로 묶인다.** 상한 35%를 적용하면 그 242종목 합계가
+        # 35%에서 잘려 익스포저가 구조적으로 35%를 못 넘는다. 그 상태로 측정하면
+        # "유니버스 확장이 효과 없다"는 틀린 결론이 나온다.
+        #
+        # 대가는 분명하다 — 같은 테마 두 종목에 90%가 들어가면 테마가 꺾일 때
+        # 전량이 함께 맞는다. 30거래일에 회복 시간은 없다. 그것이 꼬리를 사는 값이다.
+        # (업종 정보를 `universe.json`에 채우는 것은 대회 후 작업으로 남겼다.)
+        if self.s.SIZING_MODE == "fixed":
+            sector_room = float("inf")
+        else:
+            sector_room = self.s.MAX_SECTOR_WEIGHT - sector_w
+            if sector_room <= 0.01:
+                return self._reject(f"섹터({sector}) 비중 상한 도달 {sector_w:.1%}")
 
         # --- 단일 종목 여유 (미체결 포함) ---
         current_w = (open_positions[signal.symbol].market_value / equity) if already else 0.0
@@ -325,7 +343,28 @@ class RiskManager:
                                      max(1e-6, 1.0 - self.s.SIGNAL_BUY_THRESHOLD), 0.0, 1.0))
             signal_scale = 0.6 + 0.4 * strength
 
-        target_w = vol_w * kelly_mult * signal_scale * signal.regime
+        # --- 고정 비중 모드 (꼬리 전략) ---
+        #
+        # 변동성 타게팅은 **위험을 고르게 나누는** 설계다. 대회 심사는 절대수익
+        # top10이라 보상이 계단함수이고, 그때 최적화 대상은 `E[R]`이 아니라
+        # `P(R > 임계)`다. 두 목적의 최적해는 다르다.
+        #
+        # 실측으로 드러난 문제: Top-K 2종목 설정에서 평균 익스포저가 **5.8%**였다.
+        # 역산하면 `vol_w(0.34) × kelly(0.40) × 신호(~0.3) × 레짐(~0.8) ≈ 3.3%`,
+        # 두 종목이면 6.6%로 관측값과 맞는다. **상한 18%·섹터 35%는 닿지도 않았다.**
+        # 즉 "2종목에 50%씩"을 `TARGET_VOLATILITY`를 올려 만들려면 그 값이 2.5 같은
+        # 비현실적 숫자가 되어야 한다. 공식과 싸우는 대신 모드를 따로 둔다.
+        #
+        # 고정 모드는 종목당 `FIXED_POSITION_WEIGHT`를 목표로 하고, 규정·섹터·총
+        # 익스포저·가용현금 상한만 적용한다. 변동성·켈리·레짐을 곱하지 않는다 —
+        # 그것들이 곱해지는 순간 다시 3%가 된다.
+        if self.s.SIZING_MODE == "fixed":
+            target_w = float(self.s.FIXED_POSITION_WEIGHT)
+            # 베팅 사이즈 0(= 모델의 진입 차단)은 위에서 이미 걸렀으므로 여기서는
+            # 신호 강도를 비중에 반영하지 않는다. 꼬리를 노릴 때 "조금 덜 확신하니
+            # 조금만 담는다"는 중간 지대가 기대값은 지키지만 꼬리를 깎는다.
+        else:
+            target_w = vol_w * kelly_mult * signal_scale * signal.regime
         target_w = min(target_w, weight_cap, symbol_room, sector_room, gross_room)
         if target_w <= 0.005:
             return self._reject(f"산출 비중 과소 {target_w:.3%}")

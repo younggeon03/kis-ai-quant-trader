@@ -227,6 +227,74 @@ UNIVERSE_CONFIGS: List[Dict[str, Any]] = [
     {"name": "손절12 + 익절제거", "delta": {"TAKE_PROFIT_PCT": 0.0}},
 ]
 
+# ------------------------------------------------------------- 익스포저 설정군
+#
+# **`topk` 실험이 앞선 진단을 반박해서 만든 설정군이다.**
+#
+# 나는 "익스포저를 올리는 유일한 구조적 레버는 Top-K"라고 판단했다. 측정은 반대였다
+# (14구간, 지문 `1fd2cda54cd1aa77`):
+#
+# | 설정 | 익스포저 | 누적 |
+# |---|---|---|
+# | 비중 45% 단독 | **44.4%** | **+19.9%** |
+# | 기준선(임계값 방식) | 40.5% | +10.2% |
+# | Top-K 5종목 · 잠금 3봉 | 14.5% | +0.9% |
+# | Top-K 2종목 · 잠금 없음 | **5.8%** | +2.1% |
+#
+# **Top-K는 익스포저를 올리는 게 아니라 무너뜨린다.** 목표 보유 수를 K로 묶고 순위에서
+# 밀린 종목을 매 봉 청산하므로, 임계값 방식이 8슬롯까지 쌓아 들고 가던 포지션이
+# 강제로 회전한다. 레짐 이중 적용 버그를 고친 뒤에도 그렇다 — 그 버그가 유일한
+# 원인이 아니었다.
+#
+# 그리고 7개 설정에서 **익스포저와 누적수익의 상관이 +0.902**다. 익스포저 자체가
+# 지배 변수다.
+#
+# `sizing` 실험이 "비중 상한 상향은 무효"라고 결론 낸 것은 **단독으로 재지 않았기
+# 때문이다** — `VOL 0.55 + KELLY 0.90 + 비중 45%` 묶음으로만 쟀고, 해로운 배수 두 개가
+# 비중의 기여를 덮었다. "한 번에 하나씩" 규칙을 어긴 대가를 또 치렀다.
+#
+# 그래서 여기서는 Top-K를 쓰지 않고 익스포저를 직접 올리는 두 레버를 각각 본다.
+#  - `MAX_POSITION_WEIGHT`: 종목당 더 크게 (규정 상한 50%)
+#  - `SIGNAL_BUY_THRESHOLD`: 문턱을 낮춰 **더 많은 종목이 통과**하게
+EXPOSURE_CONFIGS: List[Dict[str, Any]] = [
+    {"name": "기준선", "delta": {}},
+    # 섹터 상한을 함께 올리지 않으면 종목당 상한은 35%에서 잘린다.
+    # 이 변이는 그 사실의 확인용이다 — "비중 45%"와 수치가 같게 나와야 한다.
+    {"name": "비중 45% (섹터 35% 유지)", "delta": {"MAX_POSITION_WEIGHT": 0.45}},
+    # --- 실효 상한을 올리는 변이: 비중과 섹터를 함께 올린다 ---
+    {"name": "비중 45% + 섹터 45%",
+     "delta": {"MAX_POSITION_WEIGHT": 0.45, "MAX_SECTOR_WEIGHT": 0.45}},
+    {"name": "비중 50% + 섹터 50%",
+     "delta": {"MAX_POSITION_WEIGHT": 0.50, "MAX_SECTOR_WEIGHT": 0.50}},
+    # --- 보유 종목 수 레버: 문턱을 낮춰 더 많은 종목이 통과하게 한다 ---
+    # Top-K와 달리 강제 회전이 없다. Top-K는 순위에서 밀린 종목을 매 봉 청산해
+    # 익스포저를 5.8~14.5%로 무너뜨렸다.
+    {"name": "임계값 0.15", "delta": {"SIGNAL_BUY_THRESHOLD": 0.15}},
+    {"name": "임계값 0.10", "delta": {"SIGNAL_BUY_THRESHOLD": 0.10}},
+    # --- 두 레버가 독립인지 ---
+    {"name": "비중50+섹터50 + 임계값 0.15",
+     "delta": {"MAX_POSITION_WEIGHT": 0.50, "MAX_SECTOR_WEIGHT": 0.50,
+               "SIGNAL_BUY_THRESHOLD": 0.15}},
+    {"name": "비중50+섹터50 + 임계값 0.10",
+     "delta": {"MAX_POSITION_WEIGHT": 0.50, "MAX_SECTOR_WEIGHT": 0.50,
+               "SIGNAL_BUY_THRESHOLD": 0.10}},
+    # --- 집중 보유 가설, Top-K 없이 재설계 ---
+    #
+    # `topk` 실험의 "집중 매수보유"는 **측정 수단이 오염돼 있었다.** 2종목을 Top-K로
+    # 강제했는데 Top-K 자체가 익스포저를 무너뜨려, "2종목 90%로 들고 버틴다"는 가설이
+    # 실제로는 13.0%만 들고 있었다. 가설이 아니라 수단을 측정한 셈이다.
+    #
+    # 그래서 Top-K를 쓰지 않고 실효 상한만 규정 한도까지 올린 뒤 **청산을 손절로만**
+    # 제한한다. 익절·트레일링·시간손절·신호반전을 모두 끈다(`MAX_HOLDING_BARS`를
+    # 평가창 30봉보다 크게, `SIGNAL_SELL_THRESHOLD`를 도달 불가능한 값으로).
+    # 위 "비중 50% + 섹터 50%"와 **청산 규칙만** 다르므로, 둘을 비교하면
+    # "손대지 않는다"의 기여가 단독으로 분리된다.
+    {"name": "비중50+섹터50 + 손절만(집중 보유)",
+     "delta": {"MAX_POSITION_WEIGHT": 0.50, "MAX_SECTOR_WEIGHT": 0.50,
+               "TAKE_PROFIT_PCT": 0.0, "TRAILING_ACTIVATE_PCT": 0.0,
+               "MAX_HOLDING_BARS": 999, "SIGNAL_SELL_THRESHOLD": -9.9}},
+]
+
 CONFIG_SETS: Dict[str, List[Dict[str, Any]]] = {
     "flow": FLOW_CONFIGS,
     "universe": UNIVERSE_CONFIGS,
@@ -234,6 +302,7 @@ CONFIG_SETS: Dict[str, List[Dict[str, Any]]] = {
     "structure": STRUCTURE_CONFIGS,
     "sizing": SIZING_CONFIGS,
     "topk": TOPK_CONFIGS,
+    "exposure": EXPOSURE_CONFIGS,
 }
 
 
@@ -279,6 +348,42 @@ def stratified_sample(symbols, n: int, settings, seed: int = 16) -> List[str]:
     return picked
 
 
+# 꼬리 지표를 판정할 임계값. 지난 대회 10위권이 +100%였다.
+TAIL_THRESHOLDS = (0.20, 0.50, 1.00)
+
+
+def tail_stats(seg_returns: np.ndarray) -> Dict[str, Any]:
+    """구간 수익률의 **분포**를 요약한다.
+
+    ## 왜 누적수익과 Sharpe로는 안 되는가
+
+    `total_return`은 31구간을 이어붙여 복리로 누적한 값이고 `sharpe`는 평균/분산이다.
+    둘 다 **평균 성과**를 재는데, 대회는 **단 한 창(30거래일)**이고 심사는 절대수익
+    top10이다. 보상이 계단함수이므로 최적화 대상은 `E[R]`이 아니라 `P(R > 임계)`다.
+
+    **Sharpe는 방향이 반대다.** 분산을 벌점하는데 꼬리 전략은 분산을 사려고 한다.
+    실측으로도 드러났다 — 19구간 측정에서 8개 설정 전부 구간 최대가 +14.1% 이하였고
+    +20%를 넘긴 구간이 **0/19**였다. 누적수익으로는 설정 간 순위가 갈렸지만, 목표
+    기준으로는 전부 똑같이 실패였다. 그 사실이 누적수익·Sharpe에는 보이지 않는다.
+
+    그래서 구간 하나를 **대회 1회**로 보고 그 분포의 오른쪽을 본다.
+    """
+    r = np.asarray(seg_returns, dtype=float)
+    r = r[np.isfinite(r)]
+    if not len(r):
+        return {}
+    out: Dict[str, Any] = {
+        "seg_median": float(np.median(r)),
+        "seg_p75": float(np.percentile(r, 75)),
+        "seg_p90": float(np.percentile(r, 90)),
+        "seg_max": float(r.max()),
+        "seg_min": float(r.min()),
+    }
+    for th in TAIL_THRESHOLDS:
+        out[f"hits_{int(th * 100)}"] = int((r >= th).sum())
+    return out
+
+
 def build_summary(variants, pieces, trades, expo, seg_rows) -> Dict[str, Any]:
     """지금까지 끝난 구간만으로 설정별 집계를 만든다. 체크포인트와 최종 저장이 공용한다."""
     summary: Dict[str, Any] = {}
@@ -286,6 +391,8 @@ def build_summary(variants, pieces, trades, expo, seg_rows) -> Dict[str, Any]:
         arr = np.concatenate(pieces[name]) if pieces[name] else np.array([])
         if not len(arr):
             continue
+        # 구간별 수익률 = 대회 1회의 결과. 꼬리 판정의 표본이다.
+        per_seg = np.array([r.get(name, np.nan) for r in seg_rows], dtype=float)
         summary[name] = {
             "sharpe": sharpe_ratio(arr),
             "total_return": float(np.prod(1.0 + arr) - 1.0),
@@ -294,6 +401,7 @@ def build_summary(variants, pieces, trades, expo, seg_rows) -> Dict[str, Any]:
             "exposure": float(np.mean(expo[name])) if expo[name] else float("nan"),
             "positive_segments": sum(1 for r in seg_rows if r.get(name, 0.0) > 0),
             "segments": len(seg_rows),
+            **tail_stats(per_seg),
         }
     return summary
 
@@ -570,25 +678,52 @@ def main() -> int:
           f"({fp['ts_from']}~{fp['ts_to']}) · 수급 {len(flow_panel)}종목")
     print(" 지문이 다른 실행의 수치와는 비교할 수 없다.")
     print("=" * 98)
+    summary = build_summary(variants, pieces, trades, expo, seg_rows)
+    bench_seg = np.array([r.get("benchmark", np.nan) for r in seg_rows], dtype=float)
+
+    # ---- 꼬리 기준 (대회 판정) ----
+    # 구간 하나 = 대회 1회(30거래일)다. 심사가 절대수익 top10이므로 이 분포의
+    # 오른쪽이 판정 기준이고, 아래 평균 기준은 참고용으로만 찍는다.
+    print(f" [꼬리 기준] 구간 1개 = 대회 1회. 지난 대회 10위권 +100%")
+    print(f" {'설정':<30} {'중앙값':>8} {'p75':>8} {'p90':>8} {'최대':>9} "
+          f"{'+20%':>6} {'+50%':>6} {'+100%':>6} {'익스포저':>9}")
+    print("-" * 98)
+    bt = tail_stats(bench_seg)
+    if bt:
+        print(f" {'벤치마크(동일가중)':<30} {bt['seg_median'] * 100:>+7.1f}% "
+              f"{bt['seg_p75'] * 100:>+7.1f}% {bt['seg_p90'] * 100:>+7.1f}% "
+              f"{bt['seg_max'] * 100:>+8.1f}% {bt['hits_20']:>6d} "
+              f"{bt['hits_50']:>6d} {bt['hits_100']:>6d} {'100.0%':>9}")
+    # 꼬리가 두꺼운 순으로 정렬한다 — p90이 1차, 최대가 2차 기준.
+    ranked = sorted((n for n, _s, _u in variants if n in summary),
+                    key=lambda n: (summary[n].get("seg_p90", -9),
+                                   summary[n].get("seg_max", -9)), reverse=True)
+    for name in ranked:
+        s = summary[name]
+        print(f" {name:<30} {s.get('seg_median', 0) * 100:>+7.1f}% "
+              f"{s.get('seg_p75', 0) * 100:>+7.1f}% {s.get('seg_p90', 0) * 100:>+7.1f}% "
+              f"{s.get('seg_max', 0) * 100:>+8.1f}% {s.get('hits_20', 0):>6d} "
+              f"{s.get('hits_50', 0):>6d} {s.get('hits_100', 0):>6d} "
+              f"{s['exposure'] * 100:>8.1f}%")
+    print("=" * 98)
+
+    # ---- 평균 기준 (참고) ----
     bench_all = np.concatenate(bench) if bench else np.array([])
+    print(" [평균 기준 — 참고용] Sharpe는 분산을 벌점하므로 꼬리 목표와 방향이 반대다")
     if len(bench_all):
-        print(f" 동일가중 매수보유(벤치마크)          "
-              f"Sharpe {sharpe_ratio(bench_all):>6.3f}  "
+        print(f" {'벤치마크(동일가중)':<30} Sharpe {sharpe_ratio(bench_all):>6.3f}  "
               f"누적 {(float(np.prod(1.0 + bench_all)) - 1.0) * 100:>+8.1f}%  "
               f"MDD {max_drawdown_from_returns(bench_all) * 100:>5.1f}%")
     print("-" * 98)
-    header = (f" {'설정':<30} {'Sharpe':>7} {'누적수익':>10} {'MDD':>7} "
-              f"{'거래':>6} {'익스포저':>9} {'양수구간':>9}")
-    print(header)
+    print(f" {'설정':<30} {'Sharpe':>7} {'누적수익':>10} {'MDD':>7} "
+          f"{'거래':>6} {'양수구간':>9}")
     print("-" * 98)
-    summary = build_summary(variants, pieces, trades, expo, seg_rows)
     for name, _sv, _uf in variants:
         s = summary.get(name)
         if s is None:
             continue
         print(f" {name:<30} {s['sharpe']:>7.3f} {s['total_return'] * 100:>+9.1f}% "
               f"{s['mdd'] * 100:>6.1f}% {s['trades']:>6d} "
-              f"{s['exposure'] * 100:>8.1f}% "
               f"{s['positive_segments']:>5d}/{len(seg_rows)}")
     print("=" * 98)
 

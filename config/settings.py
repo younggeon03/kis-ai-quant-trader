@@ -158,6 +158,23 @@ class Settings(BaseSettings):
     W_TECHNICAL: float = Field(default=0.30, description="기술적 팩터 가중치")
     W_CROSS_SECTION: float = Field(default=0.20, description="횡단면 랭크 가중치")
     LABEL_HORIZON: int = Field(default=5, description="라벨 예측 지평(봉 수)")
+
+    # --- 라벨 방식 ---
+    # "triple_barrier": 방향 — 상단/하단 배리어 중 어디에 먼저 닿는가 (기본)
+    # "magnitude":      크기 — 30봉 안에 +50% 이상 오르는가 (대회 꼬리 전략)
+    #
+    # 방향 라벨은 상승확률 0.7인 +5% 종목을 0.5인 +150% 종목보다 높게 평가한다.
+    # 심사가 절대수익 top10이면 그 선택이 반대다. 급등 포착 연구에서 모든 소재
+    # 조건의 중앙값이 음수인데 P(+100%)는 1.6~3.1배였다 — 평균 기준으로 배우면
+    # 쓸 만한 조건을 전부 버린다(strategy/ai_model.py::make_magnitude_labels).
+    LABEL_MODE: str = Field(
+        default="triple_barrier",
+        description="라벨 방식 — triple_barrier(방향) | magnitude(크기)")
+    LABEL_MAGNITUDE_HORIZON: int = Field(
+        default=30, description="크기 라벨 지평(봉). 대회 거래일 수와 맞춘다")
+    LABEL_MAGNITUDE_THRESHOLD: float = Field(
+        default=0.50,
+        description="크기 라벨 문턱. 실측 양성비율 — +50%에서 3.9%, +100%에서 1.0%")
     LABEL_PT_ATR: float = Field(default=1.5, description="삼중배리어 익절 배리어(ATR 배수)")
     LABEL_SL_ATR: float = Field(default=1.0, description="삼중배리어 손절 배리어(ATR 배수)")
     USE_META_MODEL: bool = Field(
@@ -178,6 +195,23 @@ class Settings(BaseSettings):
     MAX_SECTOR_WEIGHT: float = Field(default=0.35, description="섹터별 최대 비중")
     MAX_GROSS_EXPOSURE: float = Field(default=0.90, description="총 익스포저 상한(현금 제외 비중)")
     TARGET_VOLATILITY: float = Field(default=0.18, description="연율 목표 변동성(포지션 사이징 기준)")
+
+    # --- 사이징 모드 ---
+    # "vol_target": 변동성 타게팅 × 켈리 × 신호 × 레짐 (위험 분산 설계, 기본값)
+    # "fixed":      종목당 FIXED_POSITION_WEIGHT 고정 (꼬리 전략)
+    #
+    # 대회 심사는 절대수익 top10이고 보상이 계단함수다. 그때 최적화 대상은 E[R]이
+    # 아니라 P(R > 임계)이고, 두 목적의 최적해가 다르다. 실측에서 Top-K 2종목이
+    # 평균 익스포저 5.8%였는데 역산하면 vol_w(0.34) × kelly(0.40) × 신호(0.3) ×
+    # 레짐(0.8) ≈ 3.3%로 공식 자체가 만든 값이었다(상한 18%는 닿지도 않았다).
+    # 파라미터로 90%에 도달하려면 TARGET_VOLATILITY가 2.5 같은 값이 되어야 하므로
+    # 모드를 분리한다. `strategy/risk_manager.py::evaluate_entry()`가 분기한다.
+    SIZING_MODE: str = Field(
+        default="vol_target",
+        description="포지션 사이징 방식 — vol_target(변동성 타게팅) | fixed(고정 비중)")
+    FIXED_POSITION_WEIGHT: float = Field(
+        default=0.45,
+        description="고정 비중 모드의 종목당 목표 비중. 규정 상한 50% 아래로 여유를 둔다")
     KELLY_FRACTION: float = Field(default=0.25, description="Fractional Kelly 계수(1/4 Kelly)")
     KELLY_MAX_WEIGHT: float = Field(default=0.20)
     STOP_LOSS_PCT: float = Field(
