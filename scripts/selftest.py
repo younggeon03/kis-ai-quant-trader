@@ -3,14 +3,14 @@
     python scripts/selftest.py
 
 검증 항목
-  1. 설정/TR_ID 환경 분기          6. Mock 체결 엔진(부분체결·거부·취소)
-  2. 호가단위·가격제한폭 규칙      7. 리스크 매니저(사이징·손절·킬스위치)
-  3. 기술적 지표 정확성/인과성     8. 피처·라벨 파이프라인
-  4. 유량 제어기(실측 RPS)         9. 백테스트 엔진 + 성과지표
-  5. 우선순위 큐(주문 우선)       10. 이벤트 버스
-                                  11. 실서버 클라이언트(오프라인)
-                                  12. 과적합 검증(CPCV·DSR·PBO)
-                                  13. 표본 가중치·베팅 사이징
+  1. 설정/TR_ID 환경 분기          9. 백테스트 엔진 + 성과지표
+  2. 호가단위·가격제한폭 규칙     10. 이벤트 버스
+  3. 기술적 지표 정확성/인과성    11. 실서버 클라이언트(오프라인)
+  4. 유량 제어기(실측 RPS)        12. 과적합 검증(CPCV·DSR·PBO)
+  5. 우선순위 큐(주문 우선)       13. 표본 가중치·베팅 사이징
+  6. Mock 체결 엔진               14. 대회 규정 필터·요건 추적
+  7. 리스크 매니저                15. 종목 선정·대회 국면
+  8. 피처·라벨 파이프라인         16. 패널 정렬 이력 하한
 
 모든 항목이 PASS여야 실전 연동 준비가 된 것이다.
 """
@@ -315,20 +315,40 @@ def test_risk_manager():
     weak = Signal(symbol="000660", score=0.05, price=100_000, atr=2_000, volatility=0.3)
     assert not risk.evaluate_entry(weak, pf).approved
 
-    # 변동성이 크면 수량이 줄어야 한다
-    calm = Signal(symbol="A", score=0.6, price=70_000, atr=700, volatility=0.15)
-    wild = Signal(symbol="B", score=0.6, price=70_000, atr=4_000, volatility=0.75)
+    # 변동성이 크면 수량이 줄어야 한다.
+    # 가짜 종목코드("A"/"B")를 쓰면 대회 규정 관문(`strategy/eligibility.py`)이
+    # "유니버스 제외 종목"으로 거부해 수량이 0이 된다. 실제 유니버스 종목을 쓴다.
+    sym_calm, sym_wild = s.UNIVERSE[0], s.UNIVERSE[1]
+    calm = Signal(symbol=sym_calm, score=0.6, price=70_000, atr=700, volatility=0.15)
+    wild = Signal(symbol=sym_wild, score=0.6, price=70_000, atr=4_000, volatility=0.75)
     q_calm = risk.evaluate_entry(calm, pf).qty
     q_wild = risk.evaluate_entry(wild, pf).qty
     assert q_calm > q_wild, f"변동성 타게팅 미작동 ({q_calm} vs {q_wild})"
 
-    # 최대 보유 종목 수 제한
-    for i, code in enumerate(["100000", "100001", "100002"]):
-        pos = Position(symbol=code, qty=100, avg_price=10_000, last_price=10_000,
-                       sector=f"S{i}")
-        pf.positions[code] = pos
+    # 대회 규정 관문: 1,000원 미만 매수 불가
+    cheap = Signal(symbol=s.UNIVERSE[0], score=0.6, price=900, atr=30, volatility=0.3)
+    cheap_dec = risk.evaluate_entry(cheap, pf)
+    assert not cheap_dec.approved and "1,000원" in cheap_dec.reason, cheap_dec.reason
+
+    # 대회 규정 관문: 유니버스 외 종목 차단 (유니버스 파일이 있을 때만 의미 있다)
+    from strategy.eligibility import is_buyable, position_weight_cap
+    if s._universe_blob():
+        assert not is_buyable("999999", 50_000, s)[0], "유니버스 외 종목이 통과했다"
+    # 단일 종목 한도는 규정 50%를 넘지 못한다
+    s_over = s.model_copy(deep=True)
+    s_over.MAX_POSITION_WEIGHT = 0.80
+    assert position_weight_cap(s_over) == 0.50, position_weight_cap(s_over)
+
+    # 최대 보유 종목 수 제한.
+    # 진입 후보는 규정 관문을 먼저 통과해야 하므로 실제 유니버스 종목을 쓴다
+    # (가짜 코드는 "유니버스 제외 종목"으로 먼저 거부되어 이 검사에 닿지 못한다).
+    held = s.UNIVERSE[2:5]
+    for i, code in enumerate(held):
+        pf.positions[code] = Position(symbol=code, qty=100, avg_price=10_000,
+                                      last_price=10_000, sector=f"S{i}")
     pf.cash = capital - 3_000_000
-    blocked = risk.evaluate_entry(Signal(symbol="200000", score=0.9, price=10_000,
+    fresh = next(c for c in s.UNIVERSE if c not in pf.positions)
+    blocked = risk.evaluate_entry(Signal(symbol=fresh, score=0.9, price=10_000,
                                          atr=200, volatility=0.2), pf)
     assert not blocked.approved and "최대 보유" in blocked.reason, blocked.reason
 
@@ -350,9 +370,21 @@ def test_risk_manager():
     exits = risk3.evaluate_exits(pf3, {"005930": 67_000}, {"005930": 1_400})
     assert exits and exits[0].reason is ExitReason.STOP_LOSS, exits
 
-    # 익절 트리거
-    exits = risk3.evaluate_exits(pf3, {"005930": 78_000}, {"005930": 1_400})
-    assert exits and exits[0].reason in (ExitReason.TAKE_PROFIT, ExitReason.TRAILING_STOP), exits
+    # 익절 — 0이면 비활성화, 양수면 작동해야 한다.
+    # 기본값은 0(익절 없음)이다. 실데이터 21구간 절제 실험에서 9% 익절은 상위 20%
+    # 종목의 10봉 상승폭 +16.1% 중 +8.9%만 실현해 45%를 버렸고, 제거하니 Sharpe가
+    # -0.348 → 0.523으로 바뀌었다. 그래서 켠 경로와 끈 경로를 모두 검증한다.
+    s_tp = s.model_copy(deep=True)
+    s_tp.TAKE_PROFIT_PCT = 0.09
+    s_tp.TRAILING_ACTIVATE_PCT = 0.0      # 트레일링을 끄고 익절만 본다
+    exits = RiskManager(s_tp).evaluate_exits(pf3, {"005930": 78_000}, {"005930": 1_400})
+    assert exits and exits[0].reason is ExitReason.TAKE_PROFIT, exits
+
+    s_off = s.model_copy(deep=True)
+    s_off.TAKE_PROFIT_PCT = 0.0
+    s_off.TRAILING_ACTIVATE_PCT = 0.0
+    exits_off = RiskManager(s_off).evaluate_exits(pf3, {"005930": 78_000}, {"005930": 1_400})
+    assert not exits_off, f"익절 0인데 청산이 나왔다: {exits_off}"
 
     # 하드 MDD → 킬스위치 + 전량 청산
     risk4 = RiskManager(s)
@@ -379,7 +411,8 @@ def test_risk_manager():
     assert risk5.update(pf5) == RiskState.DERISK, risk5.state
     derisk = risk5.evaluate_exits(pf5, {"005930": 82_000})
     assert any(e.reason is ExitReason.DERISK for e in derisk), derisk
-    return f"사이징({q_calm}주 vs {q_wild}주) · 손절 · 익절 · 킬스위치 · 디리스킹 모두 작동"
+    return (f"사이징({q_calm}주 vs {q_wild}주) · 손절 · 익절(on/off) · "
+            f"킬스위치 · 디리스킹 · 대회 규정 관문 모두 작동")
 
 
 # ============================================================ 8. 피처/라벨
@@ -642,6 +675,197 @@ def test_weights_and_bets():
             f"베팅 0.9→{sizes[-1]:.3f}")
 
 
+# ============================================================ 14. 대회 규정
+@check("14. 대회 규정 필터·요건 추적")
+def test_competition_rules():
+    """매매 가능 판정과 최소 자격 요건 집계.
+
+    규정 위반 주문은 거부되거나 실격 사유가 되므로, 전략 성과와 무관하게 반드시
+    작동해야 한다.
+    """
+    from strategy.compliance import evaluate
+    from strategy.eligibility import (MAX_SINGLE_WEIGHT, MIN_BUY_PRICE, MIN_SHARES,
+                                      index_membership_count, is_buyable, is_sellable,
+                                      position_weight_cap)
+
+    s = make_settings()
+
+    # 1,000원 미만은 매수 불가, 매도는 가능해야 한다(손절을 막으면 더 위험하다)
+    sym = s.UNIVERSE[0]
+    assert not is_buyable(sym, MIN_BUY_PRICE - 1, s)[0]
+    assert is_buyable(sym, MIN_BUY_PRICE, s)[0], is_buyable(sym, MIN_BUY_PRICE, s)
+    assert is_sellable(sym, s)[0], "매도가 막히면 손절이 불가능하다"
+
+    # 단일 종목 한도는 규정 50%를 넘지 못한다
+    over = s.model_copy(deep=True)
+    over.MAX_POSITION_WEIGHT = 0.90
+    assert position_weight_cap(over) == MAX_SINGLE_WEIGHT, position_weight_cap(over)
+
+    # 유니버스 파일이 있으면 목록 외 종목을 차단한다
+    blob = s._universe_blob()
+    if blob.get("tradable"):
+        assert not is_buyable("999999", 50_000, s)[0]
+        # 규정 필터가 실제로 적용됐는지 산출물로 확인
+        for code in blob["tradable"][:50]:
+            assert s.shares_of(code) >= MIN_SHARES or s.shares_of(code) == 0, code
+
+    # 최소 자격 요건: "코스피200·코스닥150 중 5종목"은 지수 멤버십으로 센다
+    members = {x for lst in s.index_members().values() for x in lst}
+    s_req = s.model_copy(deep=True)
+    s_req.MIN_TRADE_COUNT = 5
+    s_req.MIN_TRADE_AMOUNT = 500_000_000
+    s_req.MIN_TRADE_DAYS = 5
+    s_req.MIN_TRADE_SYMBOLS = 5
+
+    def make_fills(codes):
+        out = []
+        for day in (12, 13, 14, 15, 16):
+            for code in codes:
+                for side in ("BUY", "SELL"):
+                    out.append({"event": "fill", "symbol": code, "side": side,
+                                "qty": 100, "price": 120_000,
+                                "ts": f"2026-10-{day:02d}T09:05:00+09:00"})
+        return out
+
+    if members:
+        inside = [c for c in s.UNIVERSE if c in members][:5]
+        outside = [c for c in s.UNIVERSE if c not in members][:5]
+        assert index_membership_count(inside, s) == len(inside)
+        assert index_membership_count(outside, s) == 0
+        if len(inside) == 5:
+            assert evaluate(make_fills(inside), s_req, 20).all_met
+        if len(outside) == 5:
+            # 지수 외 종목만 거래하면 종목수 요건 미달로 잡혀야 한다
+            st = evaluate(make_fills(outside), s_req, 20)
+            assert not st.all_met, st.describe()
+
+    # 거래가 전혀 없으면 4개 요건 모두 미충족
+    empty = evaluate([], s_req, 20)
+    assert len(empty.unmet) == 4, empty.describe()
+    return (f"매수/매도 판정 · 한도 {MAX_SINGLE_WEIGHT:.0%} 클립 · "
+            f"지수 멤버십 {len(members)}종목 · 요건 4항목 집계")
+
+
+# ============================================================ 15. 선정·국면
+@check("15. 종목 선정·대회 국면")
+def test_selection_and_phase():
+    """Top-K 선정과 날짜 기반 국면 전환.
+
+    레짐을 종목 수에 곱하지 않는 것이 핵심이다. 예전에 리스크 매니저가 비중에
+    곱하는 것과 겹쳐 익스포저가 37% → 12%로 붕괴한 적이 있다.
+    """
+    import datetime as dt
+
+    from strategy.phase import PHASE1, PHASE2, PHASE_OFF, current_phase, phase_config, \
+        reset_recommendation, trading_days_remaining
+    from strategy.risk_manager import RiskManager, RiskState
+    from strategy.selection import (_REGIME_CUT, desired_holdings, locked_symbols,
+                                    select_entries, select_rotation_exits, target_count)
+
+    s = make_settings()
+    s.MAX_POSITIONS = 5
+    s.MIN_HOLDING_BARS = 3
+    s.SIGNAL_SELL_THRESHOLD = -0.15
+
+    # --- 레짐은 종목 수에 곱하지 않는다(문턱값으로만 축소) ---
+    assert target_count(s, 5, 1.00) == 5
+    assert target_count(s, 5, 0.80) == 5, "레짐 중앙값에서 종목 수가 줄었다(이중 적용 버그)"
+    assert target_count(s, 5, _REGIME_CUT) == 5
+    assert target_count(s, 5, _REGIME_CUT - 0.01) == 2, "극단 레짐에서 절반으로 줄어야 한다"
+    assert target_count(s, 8, 1.0) == 5, "MAX_POSITIONS 상한을 넘었다"
+
+    # make_settings()가 UNIVERSE를 6종목으로 자르므로 원본 목록에서 8개를 가져온다.
+    from config.settings import DEFAULT_UNIVERSE
+    pool = s.UNIVERSE if len(s.UNIVERSE) >= 8 else DEFAULT_UNIVERSE
+    codes = list(pool[:8])
+    signals = [Signal(symbol=c, score=0.9 - 0.1 * i, price=10_000)
+               for i, c in enumerate(codes)]
+    pf = Portfolio(cash=100_000_000.0, initial_capital=100_000_000.0)
+    assert [x.symbol for x in select_entries(signals, pf, s, top_k=4)] == codes[:4]
+
+    # 매도 신호 종목은 담지 않는다
+    bad = Signal(symbol=codes[0], score=-0.4, price=10_000)
+    assert codes[0] not in desired_holdings([bad] + signals[1:], pf, s, top_k=8)
+
+    # 최소 보유 기간 잠금 — 순위 밖이어도 유지하고, 잠금 해제분만 교체한다
+    pf2 = Portfolio(cash=100_000_000.0, initial_capital=100_000_000.0)
+    pf2.positions[codes[7]] = Position(symbol=codes[7], qty=10, avg_price=10_000,
+                                       last_price=10_000, bars_held=1)
+    pf2.positions[codes[6]] = Position(symbol=codes[6], qty=10, avg_price=10_000,
+                                       last_price=10_000, bars_held=9)
+    want = desired_holdings(signals, pf2, s, top_k=3)
+    assert codes[7] in want and codes[6] not in want, want
+    assert locked_symbols(pf2, s) == {codes[7]}
+    assert select_rotation_exits(signals, pf2, s, top_k=3) == [codes[6]]
+
+    # --- 국면은 날짜만 보고 전환한다 ---
+    s.COMP_START, s.COMP_END, s.PHASE1_END = "2026-10-12", "2026-11-20", "2026-10-16"
+    s.PHASE1_TOP_K, s.PHASE2_TOP_K = 2, 4
+    cases = {"2026-10-09": PHASE_OFF, "2026-10-12": PHASE1, "2026-10-16": PHASE1,
+             "2026-10-19": PHASE2, "2026-11-20": PHASE2, "2026-11-23": PHASE_OFF}
+    for day, want_phase in cases.items():
+        got = current_phase(dt.date.fromisoformat(day), s)
+        assert got == want_phase, f"{day}: {got} != {want_phase}"
+    assert trading_days_remaining(dt.date(2026, 10, 12), s) == 30
+
+    # 1단계는 손절·MDD 게이트를 끄고, 2단계는 켠다
+    c1 = phase_config(settings=s, now=dt.date(2026, 10, 13))
+    c2 = phase_config(settings=s, now=dt.date(2026, 10, 20))
+    assert c1.top_k == 2 and not c1.use_stop_loss and not c1.use_mdd_gate
+    assert c2.top_k == 4 and c2.use_stop_loss and c2.use_mdd_gate
+
+    # 1단계에서 MDD 30%여도 HALT되지 않고, 2단계에서는 된다
+    deep = Portfolio(cash=70_000_000.0, initial_capital=100_000_000.0)
+    deep.peak_equity = 100_000_000.0
+    deep.day_start_equity = 100_000_000.0
+    r1 = RiskManager(s)
+    r1.set_phase(c1)
+    assert r1.update(deep, dt.datetime(2026, 10, 13, 15, 30)) == RiskState.NORMAL
+    r2 = RiskManager(s)
+    r2.set_phase(c2)
+    assert r2.update(deep, dt.datetime(2026, 10, 20, 15, 30)) == RiskState.HALT
+
+    # 초기화는 마지막 날에만 권고하고, 이익이면 권고하지 않는다
+    loss = Portfolio(cash=90_000_000.0, initial_capital=100_000_000.0)
+    gain = Portfolio(cash=108_000_000.0, initial_capital=100_000_000.0)
+    assert not reset_recommendation(loss, dt.date(2026, 10, 13), s).should_reset
+    assert reset_recommendation(loss, dt.date(2026, 10, 16), s).should_reset
+    assert not reset_recommendation(gain, dt.date(2026, 10, 16), s).should_reset
+    assert not reset_recommendation(loss, dt.date(2026, 10, 19), s).should_reset
+    return "레짐 단일 적용 · 잠금/교체 · 국면 6일자 · 초기화 권고 모두 작동"
+
+
+# ============================================================ 16. 패널 정렬
+@check("16. 패널 정렬 이력 하한")
+def test_panel_min_bars():
+    """상장이 늦은 종목이 전체 백테스트 구간을 잘라내지 않는지.
+
+    `align_panel`은 공통 날짜의 교집합을 잡으므로, 이력이 짧은 종목 하나가 패널
+    전체를 그만큼으로 줄인다. 실제로 신규 상장이 섞인 유니버스에서 수십 봉으로
+    붕괴할 수 있어 `MIN_HISTORY_BARS`로 막는다.
+    """
+    from backtest.data import generate_synthetic_panel
+    from backtest.engine import align_panel
+
+    s = make_settings()
+    panel = generate_synthetic_panel(s.UNIVERSE[:4], n_bars=400, seed=3,
+                                     sector_map={c: s.sector_of(c) for c in s.UNIVERSE[:4]})
+    # 한 종목만 최근 30봉으로 잘라 '신규 상장'을 흉내낸다
+    late = s.UNIVERSE[3]
+    panel[late] = panel[late].iloc[-30:].reset_index(drop=True)
+
+    without = align_panel(panel, min_bars=0)
+    assert len(next(iter(without.values()))) == 30, \
+        f"하한이 없으면 30봉으로 잘려야 한다: {len(next(iter(without.values())))}"
+
+    # 하한은 중앙값의 90%로 자동 완화되므로(짧은 패널 보호) 400봉 기준 360봉이 적용된다.
+    with_floor = align_panel(panel, min_bars=400)
+    assert late not in with_floor, "이력 부족 종목이 제외되지 않았다"
+    kept = len(next(iter(with_floor.values())))
+    assert kept == 400, f"나머지 종목은 온전해야 한다: {kept}"
+    return (f"하한 없음 {len(without)}종목x30봉 → 하한 적용 {len(with_floor)}종목x{kept}봉 (상대 하한으로 짧은 패널 보호)")
+
+
 # ============================================================ 실행
 
 async def run_all() -> int:
@@ -651,6 +875,7 @@ async def run_all() -> int:
         test_rate_limiter, test_priority, test_mock_broker,
         test_risk_manager, test_features, test_backtest, test_event_bus,
         test_live_client_offline, test_validation, test_weights_and_bets,
+        test_competition_rules, test_selection_and_phase, test_panel_min_bars,
     ]
     print("\n" + "=" * 86)
     print(" KIS AI Quant Trader — 셀프 테스트")

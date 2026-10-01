@@ -5085,8 +5085,8 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
       </div>
     </div>
 
-    <script id="archify-guided-views-data" type="application/json">[{"id":"market-in","label":"시세 수집","focus":["kis-ws","kis-rest","limiter","client","engine"],"note":"실시간 스트림과 REST 폴링이 브로커를 거쳐 엔진으로 들어오는 경로."},{"id":"decide","label":"판단 체인","focus":["engine","features","alpha","risk"],"note":"피처 44종에서 앙상블 점수를 거쳐 리스크 관문까지."},{"id":"gate","label":"리스크·유량 방어","focus":["risk","limiter","auth","engine"],"note":"주문을 막는 두 관문: 수량을 정하는 리스크, 속도를 정하는 유량."},{"id":"switch","label":"Mock 전환","focus":["client","mock","engine"],"note":"두 구현이 같은 JSON 스키마를 반환해 .env 한 줄로 교체된다."}]</script>
-    <script id="archify-source-evidence-data" type="application/json">{"schemaVersion":1,"verified":true,"repository":{"url":"https://github.com/younggeon03/kis-ai-quant-trader","revision":"cf3e494f388907216db2f54c81acd9a25be5712c","shortRevision":"cf3e494","label":"younggeon03/kis-ai-quant-trader","href":"https://github.com/younggeon03/kis-ai-quant-trader/tree/cf3e494f388907216db2f54c81acd9a25be5712c"},"referenceCount":13,"nodes":{"kis-ws":[{"path":"core/websocket_client.py","label":"구독·재연결·복호화","href":"https://github.com/younggeon03/kis-ai-quant-trader/blob/cf3e494f388907216db2f54c81acd9a25be5712c/core/websocket_client.py"}],"auth":[{"path":"core/auth.py","label":"토큰 수명주기","href":"https://github.com/younggeon03/kis-ai-quant-trader/blob/cf3e494f388907216db2f54c81acd9a25be5712c/core/auth.py"}],"limiter":[{"path":"core/rate_limiter.py","label":"우선순위 큐","href":"https://github.com/younggeon03/kis-ai-quant-trader/blob/cf3e494f388907216db2f54c81acd9a25be5712c/core/rate_limiter.py"}],"client":[{"path":"api/client.py","label":"실서버 호출","href":"https://github.com/younggeon03/kis-ai-quant-trader/blob/cf3e494f388907216db2f54c81acd9a25be5712c/api/client.py"},{"path":"api/base.py","label":"공통 인터페이스","href":"https://github.com/younggeon03/kis-ai-quant-trader/blob/cf3e494f388907216db2f54c81acd9a25be5712c/api/base.py"}],"mock":[{"path":"api/mock_client.py","label":"가상 체결 엔진","href":"https://github.com/younggeon03/kis-ai-quant-trader/blob/cf3e494f388907216db2f54c81acd9a25be5712c/api/mock_client.py"}],"engine":[{"path":"main.py","label":"TradingEngine._tick","href":"https://github.com/younggeon03/kis-ai-quant-trader/blob/cf3e494f388907216db2f54c81acd9a25be5712c/main.py"}],"features":[{"path":"strategy/features.py","label":"피처 조립","href":"https://github.com/younggeon03/kis-ai-quant-trader/blob/cf3e494f388907216db2f54c81acd9a25be5712c/strategy/features.py"},{"path":"utils/indicators.py","label":"지표 구현","href":"https://github.com/younggeon03/kis-ai-quant-trader/blob/cf3e494f388907216db2f54c81acd9a25be5712c/utils/indicators.py"}],"alpha":[{"path":"strategy/ai_model.py","label":"라벨링·학습·앙상블","href":"https://github.com/younggeon03/kis-ai-quant-trader/blob/cf3e494f388907216db2f54c81acd9a25be5712c/strategy/ai_model.py"}],"risk":[{"path":"strategy/risk_manager.py","label":"진입 심사·청산 규칙","href":"https://github.com/younggeon03/kis-ai-quant-trader/blob/cf3e494f388907216db2f54c81acd9a25be5712c/strategy/risk_manager.py"}],"ledger":[{"path":"utils/logger.py","label":"JsonLedger","href":"https://github.com/younggeon03/kis-ai-quant-trader/blob/cf3e494f388907216db2f54c81acd9a25be5712c/utils/logger.py"}],"dashboard":[{"path":"monitor/app.py","label":"관제 화면","href":"https://github.com/younggeon03/kis-ai-quant-trader/blob/cf3e494f388907216db2f54c81acd9a25be5712c/monitor/app.py"}]}}</script>
+    <script id="archify-guided-views-data" type="application/json">[{"id":"data-in","label":"데이터 적재","focus":["toss","universe","features"],"note":"토스는 학습 데이터 전용이고 KRX CSV는 규정 필터용 참조 데이터다. 둘 다 장중에 호출하지 않는다."},{"id":"decide","label":"판단","focus":["features","alpha","select"],"note":"피처 60종에서 점수를 내고, 절대 임계값이 아니라 점수 순위로 보유 종목을 고른다."},{"id":"gate","label":"주문 관문","focus":["select","rules","limiter","broker"],"note":"전략이 아무리 좋은 점수를 내도 대회 규정과 리스크 한도를 통과하지 못하면 주문이 나가지 않는다."},{"id":"record","label":"기록과 관제","focus":["broker","ledger","dash"],"note":"체결은 전부 원장에 남는다. 최소 자격 요건 충족 현황이 여기서 계산된다."},{"id":"verify","label":"검증 루프","focus":["features","alpha","verify"],"note":"같은 전략·리스크 객체를 백테스트에 주입한다. 30봉 구간 워크포워드가 대회에 가장 가까운 측정이다."}]</script>
+
     <script id="archify-i18n-data" type="application/json">{"locale":"en","messages":{"viewer.kind.frontend":"Frontend","viewer.kind.backend":"Backend","viewer.kind.database":"Database","viewer.kind.cloud":"Cloud","viewer.kind.security":"Security","viewer.kind.messagebus":"Message bus","viewer.kind.external":"External","viewer.kind.neutral":"Neutral","viewer.kind.node":"Node","viewer.kind.start":"Start","viewer.kind.active":"Active","viewer.kind.waiting":"Waiting","viewer.kind.decision":"Decision","viewer.kind.success":"Success","viewer.kind.failure":"Failure","viewer.toolbar.actions":"Diagram actions","viewer.theme.toggle.title":"Toggle theme (T)","viewer.theme.toggle":"Toggle color theme","viewer.theme.dark":"Dark","viewer.theme.light":"Light","viewer.preset.choose.title":"Choose visual style (S cycles)","viewer.preset.choose":"Choose visual style","viewer.preset.style":"Style","viewer.preset.menu":"Visual style","viewer.preset.identity":"Visual identity","viewer.preset.cycles":"S cycles","viewer.preset.classic":"Classic","viewer.preset.classic.short":"Classic","viewer.preset.classic.hint":"Stable technical default","viewer.preset.flow":"Signal Flow","viewer.preset.flow.short":"Flow","viewer.preset.flow.hint":"Motion-forward presentation","viewer.preset.blueprint":"Blueprint","viewer.preset.blueprint.hint":"Engineering review","viewer.preset.editorial":"Editorial","viewer.preset.editorial.hint":"Publication and launch notes","viewer.preset.badge.signalFlow":"SIGNAL FLOW","viewer.preset.badge.blueprint":"BLUEPRINT / REV 01","viewer.preset.badge.editorial":"EDITORIAL / FIELD NOTE","viewer.preset.badge.editorialPlate":"ARCHIFY / PLATE 04","viewer.preset.current":"Visual style: {style}. Choose visual style","viewer.motion.live":"Live","viewer.motion.still":"Still","viewer.motion.pause":"Pause motion","viewer.motion.resume":"Resume motion","viewer.motion.reduced":"Motion paused by reduced-motion preference","viewer.motion.hidden":"Motion paused while this page is hidden","viewer.motion.yielding":"Pause motion; currently yielding to {owner}","viewer.motion.yielding.title":"Live preview enabled · yielding to {owner}","viewer.owner.story":"the guided story","viewer.owner.chapter":"the active chapter","viewer.owner.chapterPreview":"the chapter delta preview","viewer.owner.handoff":"the chapter handoff","viewer.owner.route":"Route Probe","viewer.owner.lens":"Semantic Lens","viewer.owner.relationship":"Relationship Preview","viewer.owner.intent":"Intent Trace","viewer.owner.focus":"semantic focus","viewer.owner.legend":"legend preview","viewer.owner.reader":"reader interaction","viewer.present.enter":"Enter presentation stage","viewer.present.enter.title":"Presentation stage (F)","viewer.present.exit":"Exit presentation stage","viewer.present.exit.title":"Exit presentation stage (F or Escape)","viewer.present.present":"Present","viewer.present.exit.label":"Exit","viewer.export.button":"Export","viewer.export.button.title":"Export diagram (E)","viewer.export.diagram":"Export diagram","viewer.export.menu":"Export","viewer.export.subtitle":"Portable, clean outputs","viewer.export.share":"Share","viewer.export.shareCard":"Share Card","viewer.export.routeShareCard":"Route Share Card","viewer.export.reachShareCard":"Reach Share Card","viewer.export.copyShareCard":"Copy Share Card","viewer.export.copyDiagram":"Copy diagram","viewer.export.clipboardPng":"PNG to clipboard","viewer.export.raster":"Raster images","viewer.export.image":"Image","viewer.export.lossless":"Lossless image","viewer.export.compact":"Compact image","viewer.export.modern":"Modern image","viewer.export.vectorMotion":"Vector and motion","viewer.export.vectorMotion.heading":"Vector \u0026 motion","viewer.export.editable":"Editable vector","viewer.export.motion6s":"6s motion","viewer.export.unsupported":"Not supported by this browser","viewer.export.clipboardUnsupported":"Clipboard image write not supported by this browser","viewer.export.clipboardUnsupported.period":"Clipboard image write not supported by this browser.","viewer.export.clipboardUnsupported.short":"Clipboard image write not supported in this browser.","viewer.export.motionUnavailable":"Motion capture unavailable in this browser","viewer.export.webmUnavailable":"WebM unavailable in this browser","viewer.export.failed":"Export failed: {message}","viewer.export.unknownVariant":"Unknown Share Card variant: {variant}","viewer.export.routeRequired":"Trace a route before exporting a Route Share Card","viewer.export.reachRequired":"Trace authored reach before exporting a Reach Share Card","viewer.export.unknown":"unknown","viewer.export.routeFailed":"Route Share Card export failed: {message}","viewer.export.reachFailed":"Reach Share Card export failed: {message}","viewer.export.copyFailed":"Copy failed: {message}","viewer.export.copiedPng":"Copied PNG to clipboard","viewer.export.copiedShare":"Copied Share Card","viewer.export.downloadedShare":"Downloaded Share Card","viewer.export.downloadedRoute":"Downloaded Route Share Card","viewer.export.downloadedReach":"Downloaded Reach Share Card","viewer.export.downloadedWebm":"Downloaded WebM","viewer.export.recording":"Recording 6 seconds of motion…","viewer.export.card.routeSummary.one":"Route: {source} → {target} · {count} directed hop","viewer.export.card.routeSummary.other":"Route: {source} → {target} · {count} directed hops","viewer.export.card.reachSummary":"Authored {direction} from {origin} · {nodes} · {links} · max {hops}","viewer.export.card.node.one":"{count} node","viewer.export.card.node.other":"{count} nodes","viewer.export.card.link.one":"{count} link","viewer.export.card.link.other":"{count} links","viewer.export.card.hop.one":"{count} hop","viewer.export.card.hop.other":"{count} hops","viewer.export.card.routeBadge":"ARCHIFY · ROUTE · {hops}","viewer.export.card.reachBadge":"ARCHIFY · {direction} REACH","viewer.export.card.defaultBadge":"ARCHIFY · {preset} · {theme}","viewer.export.direction.upstream":"Upstream","viewer.export.direction.downstream":"Downstream","viewer.export.error.canvasUnavailable":"Canvas unavailable for {label}","viewer.export.error.contextUnavailable":"2D canvas context unavailable for {label}","viewer.export.error.toBlobUnavailable":"canvas.toBlob unavailable for {label}","viewer.export.error.toBlobNull":"canvas.toBlob returned no data for {label}","viewer.export.error.variantsCombined":"Share Card variants cannot be combined","viewer.export.error.viewerState":"Share Card export could not remove temporary viewer state","viewer.export.error.routeState":"Route Card export could not preserve the resolved route safely","viewer.export.error.reachState":"Reach Card export could not preserve authored reach safely","viewer.export.error.webmRequirements":"WebM motion export requires a trace animation and browser MediaRecorder support","viewer.export.error.mediaRecorder":"MediaRecorder failed","viewer.export.error.emptyWebm":"MediaRecorder produced an empty WebM","viewer.export.error.webmBackground":"SVG background could not be loaded for WebM export","viewer.guided.region":"Guided diagram views","viewer.guided.previous":"Previous guided view","viewer.guided.previous.title":"Previous guided view ([)","viewer.guided.next":"Next guided view","viewer.guided.next.title":"Next guided view (])","viewer.guided.views":"Guided views","viewer.guided.explore":"Explore this system","viewer.guided.intro":"Step through curated paths without changing the source diagram.","viewer.guided.trail":"Story trail","viewer.guided.beat":"Beat","viewer.guided.nextBeat":"Next","viewer.guided.play":"Play guided story","viewer.guided.play.title":"Play guided story (P)","viewer.guided.pause":"Pause guided story","viewer.guided.pause.title":"Pause guided story (P)","viewer.guided.replay":"Replay guided story","viewer.guided.replay.title":"Replay guided story (P)","viewer.guided.playStory":"Play story","viewer.guided.pauseStory":"Pause","viewer.guided.replayStory":"Replay story","viewer.guided.motionUnavailable":"Story playback unavailable while motion is Still","viewer.guided.enableMotion":"Switch motion to Live to play the guided story","viewer.guided.selectBeatLink":"Select a Story Beat to copy its exact link","viewer.guided.copyMoment":"Copy moment","viewer.guided.momentCopied":"Moment link copied","viewer.guided.momentCopyFailed":"Could not copy story moment link","viewer.guided.copied":"Copied","viewer.guided.copyFailed":"Copy failed","viewer.guided.showAll":"Show all","viewer.guided.showAll.aria":"Show entire diagram","viewer.guided.chapters":"Story chapters","viewer.guided.storyTrail":"Story trail for {label}: {count} beats","viewer.guided.chapter.open":"Open chapter {index} of {total}: {label}, {count} stops","viewer.guided.chapter.current":"Current chapter {index} of {total}: {label}, {count} stops","viewer.guided.chapter.selectedNodes":"{count} selected nodes","viewer.guided.chapter.stops":"{count} stops","viewer.guided.chapter.stop.one":"{count} stop","viewer.guided.chapter.stop.other":"{count} stops","viewer.guided.chapter.current.title":"{label} — current chapter, {count} stops","viewer.guided.chapter.delta.expanded":"{stay} stay, {enter} enter, {leave} leave","viewer.guided.chapter.delta.aria":"Open chapter {index} of {total}: {label}. Chapter focus delta: {delta}","viewer.guided.chapter.delta.title":"{label} — {delta} chapter focus","viewer.guided.handoff":"{from} → {to} · via {label}","viewer.guided.share.chapter":"Chapter {index} / {total}","viewer.guided.share.initial":"Chapter 01 / 01","viewer.guided.share.default":"Guided chapter","viewer.guided.state.ready":"Ready","viewer.guided.state.playing":"Playing","viewer.guided.state.settled":"Settled","viewer.guided.state.paused":"Paused","viewer.guided.state.pinned":"Pinned","viewer.guided.state.still":"Still","viewer.guided.share.step":"Step {index} / {total} · {label}","viewer.guided.share.staticMoment":"{step} · Static moment","viewer.guided.share.complete":"{count} steps complete · {note}","viewer.guided.share.settled":"Path settled for reading.","viewer.guided.share.staticPath":"{count} steps · Static path","viewer.guided.share.ready":"{count} steps · Ready","viewer.guided.share.aria":"{state} chapter {index} of {total}: {label}. {beat}. {route}","viewer.guided.beat.start":"Beat {index} / {total} · {label} · starting point","viewer.guided.beat.forward":"Beat {index} / {total} · {from} → {to}","viewer.guided.beat.reverse":"Beat {index} / {total} · {from} → {to} · reverse authored link","viewer.guided.beat.multiple":"Beat {index} / {total} · {from} ⇄ {to} · {count} authored links","viewer.guided.beat.group":"Beat {index} / {total} · {from} · {to} · grouped · no direct link","viewer.guided.beat.aria.prefix":"Story beat {index} of {total}: {label}. ","viewer.guided.beat.aria.start":"Starting point.","viewer.guided.beat.aria.forward":"From {from} through one authored forward relationship.","viewer.guided.beat.aria.reverse":"From {from}; the authored relationship points from {to} to {from}.","viewer.guided.beat.aria.multiple":"From {from} through {count} authored relationships; shown without arbitrary motion.","viewer.guided.beat.aria.group":"Grouped from {from} with no direct authored relationship.","viewer.guided.caption.start":"Starting point","viewer.guided.caption.grouped":"Grouped transition · no direct authored link","viewer.guided.caption.more":" +{count} more","viewer.guided.caption.reverse":"Reverse authored relationship","viewer.guided.caption.relationships":"{count} authored relationships","viewer.guided.caption.relationship":"Authored relationship","viewer.guided.caption.direction":"authored direction: {from} → {to}","viewer.guided.caption.starting":"Authored starting point","viewer.guided.beatLink":"Copy link to current story moment: Beat {index} of {total}: {label}","viewer.guided.noStory":"This diagram has no authored guided story.","viewer.guide.eyebrow":"Diagram guide","viewer.guide.close":"Close diagram guide","viewer.guide.inspecting":"Inspecting compiled semantics","viewer.guide.actions":"Diagram exploration actions","viewer.guide.find":"Find any node","viewer.guide.find.hint":"Search labels, responsibilities, kinds, and stable IDs.","viewer.guide.route":"Trace a route","viewer.guide.route.aria":"Trace a directed route","viewer.guide.route.hint":"Ask how two semantic nodes connect in authored direction.","viewer.guide.map":"See the whole system","viewer.guide.map.hint":"Open Semantic Radar with a live viewport and stable nodes.","viewer.guide.lens":"Compare semantic kinds","viewer.guide.lens.hint":"Count roles, reveal their traffic, and compare direct authored links.","viewer.guide.story":"Play the guided story","viewer.guide.story.hint":"Walk the authored chapters and real relationships.","viewer.guide.present":"Enter Presentation Stage","viewer.guide.present.hint":"Give the live diagram the viewport without changing export.","viewer.guide.shortcuts":"Additional keyboard shortcuts","viewer.guide.shortcut.export":"Export","viewer.guide.shortcut.theme":"Theme","viewer.guide.shortcut.style":"Style","viewer.guide.shortcut.reset":"Reset","viewer.guide.shortcut.zoomIn":"Zoom in","viewer.guide.shortcut.zoomOut":"Zoom out","viewer.guide.shortcut.close":"Close","viewer.guide.facts":"{nodes} · {relationships} · {views}","viewer.guide.fact.node.one":"{count} semantic node","viewer.guide.fact.node.other":"{count} semantic nodes","viewer.guide.fact.relationship.one":"{count} relationship","viewer.guide.fact.relationship.other":"{count} relationships","viewer.guide.fact.view.one":"{count} guided view","viewer.guide.fact.view.other":"{count} guided views","viewer.guide.story.available.one":"Walk {count} authored chapter and its real relationships.","viewer.guide.story.available.other":"Walk {count} authored chapters and their real relationships.","viewer.guide.story.unavailable":"No authored guided story in this diagram.","viewer.guide.open":"Open diagram guide","viewer.guide.noStory":"This diagram has no authored guided story.","viewer.finder.title":"Find a node","viewer.finder.close":"Close node finder","viewer.finder.placeholder":"Search labels or IDs","viewer.finder.search":"Search diagram nodes","viewer.finder.results":"Diagram nodes","viewer.finder.empty":"No matching nodes","viewer.finder.result.focus":"Focus {label}","viewer.finder.result.routeStart":"Choose {label} as route start","viewer.finder.result.routeTarget":"Choose {label} as route destination, {links}","viewer.finder.status.empty":"No matching nodes","viewer.finder.status.count.one":"{count} matching node","viewer.finder.status.count.other":"{count} matching nodes","viewer.finder.noun.nodes":"nodes","viewer.finder.link.one":"{count} link","viewer.finder.link.other":"{count} links","viewer.finder.result.focus.one":"Focus {label}, {count} related connection","viewer.finder.result.focus.other":"Focus {label}, {count} related connections","viewer.finder.status.filtered":"{visible} of {available} {noun}","viewer.finder.status.all":"{available} {noun}","viewer.passport.eyebrow":"Semantic passport","viewer.passport.metadata":"Node metadata","viewer.passport.evidence":"Verified source evidence","viewer.passport.verified":"Verified source","viewer.passport.verificationScope":"Verified against local Git at the pinned revision. Remote access has not been checked.","viewer.passport.reach":"Authored reach","viewer.passport.reach.trace":"Trace authored reachability","viewer.passport.upstream":"Upstream","viewer.passport.downstream":"Downstream","viewer.passport.upstream.trace":"Trace upstream authored reachability","viewer.passport.downstream.trace":"Trace downstream authored reachability","viewer.passport.close":"Close semantic passport","viewer.passport.copy":"Copy link","viewer.passport.copy.focus":"Copy link to focused node","viewer.passport.relations":"Relations","viewer.passport.relations.show":"Show connected relationships","viewer.passport.relations.hide":"Hide connected relationships","viewer.passport.relations.list":"Connected relationships","viewer.passport.copyRelation":"Copy relation","viewer.passport.copyNode":"Copy node","viewer.passport.copyPinned":"Copy link to pinned relationship","viewer.passport.copySource":"Copy link to source node","viewer.passport.copy.focused.success":"Focused node link copied","viewer.passport.copy.pinned.success":"Pinned relationship link copied","viewer.passport.copy.focused.failed":"Could not copy focused node link","viewer.passport.copy.pinned.failed":"Could not copy pinned relationship link","viewer.passport.relationship.none":"No connected relationships","viewer.passport.relationship.count.one":"{count} relation","viewer.passport.relationship.count.other":"{count} relations","viewer.passport.relationship.show.one":"Show {count} connected relationship","viewer.passport.relationship.show.other":"Show {count} connected relationships","viewer.passport.relationship.summary":"{out} outgoing · {in} incoming{loops}","viewer.passport.relationship.loops":" · {count} loop","viewer.passport.relationship.explorer":"Direct relationship explorer","viewer.passport.relationship.help":"Use arrow keys to explore relationships. Press Enter or Space to pin details; Escape clears.","viewer.passport.relationship.loopsBack":"loops back","viewer.passport.relationship.connectsTo":"connects to","viewer.passport.relationship.connectsFrom":"connects from","viewer.passport.relationship.pinned":"Pinned relationship · {from} → {to} · {label}","viewer.passport.relationship.inspect":"Inspect relationship {index} of {total}: {from} to {to}, {label}. Press Enter for details.","viewer.passport.relationship.group.out":"Outgoing","viewer.passport.relationship.group.in":"Incoming","viewer.passport.relationship.group.loop":"Self loops","viewer.passport.relationship.row":"{group}: {relationship}, {neighbor}","viewer.passport.relationship.direction.out":"OUT →","viewer.passport.relationship.direction.in":"← IN","viewer.passport.relationship.direction.loop":"LOOP","viewer.passport.sourceCount.one":"{count} verified source reference","viewer.passport.sourceCount.other":"{count} verified source references","viewer.passport.sourceMarker":"SRC","viewer.passport.beacon.one":"{count} verified source; focus this node to inspect","viewer.passport.beacon.other":"{count} verified sources; focus this node to inspect","viewer.passport.repository.open":"Open verified repository revision {revision}","viewer.passport.source.open":"Open verified source {path} at revision {revision}","viewer.passport.source.openLink":"Open ↗","viewer.passport.reach.upstream.one":"Trace {count} upstream authored node","viewer.passport.reach.upstream.other":"Trace {count} upstream authored nodes","viewer.passport.reach.downstream.one":"Trace {count} downstream authored node","viewer.passport.reach.downstream.other":"Trace {count} downstream authored nodes","viewer.passport.reach.noUpstream":"No upstream authored nodes","viewer.passport.reach.noDownstream":"No downstream authored nodes","viewer.passport.reach.status":"{direction} · {nodes} nodes · {links} links · max {hops} hops","viewer.route.eyebrow":"Route probe","viewer.route.start":"Choose a start node","viewer.route.start.find":"Find start","viewer.route.start.find.aria":"Find a route start","viewer.route.copy":"Copy link","viewer.route.copy.aria":"Copy link to traced route","viewer.route.clear":"Clear","viewer.route.clear.aria":"Clear route probe","viewer.route.traced":"Traced route","viewer.route.pickTwo":"Pick two semantic nodes on the diagram","viewer.route.pickOne":"Pick a semantic node on the diagram","viewer.route.controls":"Route journey controls","viewer.route.previous":"Previous route position","viewer.route.play":"Play route journey","viewer.route.pause":"Pause route journey","viewer.route.replay":"Replay route journey","viewer.route.next":"Next route position","viewer.route.journey":"Journey","viewer.route.pause.label":"Pause","viewer.route.replay.label":"Replay","viewer.route.overview":"Overview","viewer.route.overview.aria":"Show complete route overview","viewer.route.instructions":"Choose the source, then the destination. Direction matters.","viewer.route.destination":"Choose a destination from {label}","viewer.route.destination.find":"Find target","viewer.route.destination.find.aria":"Find a reachable route destination","viewer.route.differentDestination":"Choose a different destination","viewer.route.distinct":"A route needs two distinct semantic nodes.","viewer.route.unreachable":"No directed route to {label}","viewer.route.unreachable.detail":"{target} is not reachable from {source}. Pick a highlighted destination.","viewer.route.start.instructions":"Select the source. The next step will reveal only directed destinations.","viewer.route.copy.success":"Traced route link copied","viewer.route.copy.failed":"Could not copy traced route link","viewer.route.position":"Route position {index} of {total}: {label}","viewer.route.step":"Step {index} of {total} · {phase} · {label}","viewer.route.motionRequired":"Automatic journey requires Live motion","viewer.route.trigger.clear":"Clear traced route","viewer.route.overview.status":"{nodes} · {hops} · shortest authored route","viewer.route.overview.node.one":"{count} node","viewer.route.overview.node.other":"{count} nodes","viewer.route.overview.hop.one":"{count} directed hop","viewer.route.overview.hop.other":"{count} directed hops","viewer.route.phase.playing":"Playing","viewer.route.phase.complete":"Complete","viewer.route.phase.inspecting":"Inspecting","viewer.route.destination.count.one":"{count} directed destination available. Pick a highlighted node.","viewer.route.destination.count.other":"{count} directed destinations available. Pick a highlighted node.","viewer.route.noOutgoing":"No outgoing route starts here. Clear and choose another source.","viewer.route.result.title":"{source} to {target}","viewer.route.finder.source.title":"Choose route start","viewer.route.finder.source.placeholder":"Search route sources","viewer.route.finder.source.empty":"No matching route sources","viewer.route.finder.source.results":"Nodes that can start a route","viewer.route.finder.source.noun":"route sources","viewer.route.finder.source.badge":"start","viewer.route.finder.target.title":"Destination from {label}","viewer.route.finder.target.placeholder":"Search reachable destinations","viewer.route.finder.target.empty":"No matching reachable destinations","viewer.route.finder.target.results":"Reachable route destinations","viewer.route.finder.target.noun":"reachable destinations","viewer.route.hop.one":"{count} hop","viewer.route.hop.other":"{count} hops","viewer.lens.eyebrow":"Semantic lens","viewer.lens.title":"Compare system roles","viewer.lens.close":"Close semantic lens","viewer.lens.instruction":"Choose up to two semantic kinds. One reveals its real traffic; two compare only direct authored relationships.","viewer.lens.kinds":"Semantic kinds","viewer.lens.choose":"Choose a kind to inspect its nodes and touching relationships.","viewer.lens.copy":"Copy link to semantic lens","viewer.lens.clear":"Clear semantic lens","viewer.lens.open":"Open semantic lens","viewer.lens.openActive":"Open active semantic lens","viewer.lens.legend":"Semantic legend","viewer.lens.legend.inspect.one":"Inspect {label}, {count} node","viewer.lens.legend.inspect.other":"Inspect {label}, {count} nodes","viewer.lens.kind.count.one":"{label}, {count} node","viewer.lens.kind.count.other":"{label}, {count} nodes","viewer.lens.compare.one":"{first} → {second}: {forward} · {second} → {first}: {reverse} · {count} direct relationship","viewer.lens.compare.other":"{first} → {second}: {forward} · {second} → {first}: {reverse} · {count} direct relationships","viewer.lens.single":"{nodes} · {relationships} · connected peers remain visible","viewer.lens.node.one":"{count} {label} node","viewer.lens.node.other":"{count} {label} nodes","viewer.lens.relationship.one":"{count} touching relationship","viewer.lens.relationship.other":"{count} touching relationships","viewer.radar.title":"Semantic radar","viewer.radar.building":"Building overview","viewer.radar.openFull":"Open full semantic radar","viewer.radar.open":"Open radar","viewer.radar.close":"Close semantic radar","viewer.radar.surface":"Diagram overview. Click a node to focus it, or use arrow keys to pan.","viewer.radar.click":"Click node","viewer.radar.drag":"Drag to pan","viewer.radar.space":"Semantic radar needs more MAP space.","viewer.radar.nodes":"Semantic diagram radar nodes","viewer.radar.focus":"Focus {label} from Semantic Radar","viewer.radar.status":"{count} nodes · {viewport}","viewer.radar.fullMap":"{count} nodes · full map","viewer.radar.compacted":"Radar compacted to avoid covering the Semantic Passport or MAP controls.","viewer.radar.cancelWaiting":"Cancel semantic radar waiting for more MAP space","viewer.radar.needsSpace":"Semantic radar needs more visible MAP space","viewer.radar.viewport.full":"full map","viewer.radar.viewport.width":"{percent}% width","viewer.radar.viewport.scale":"{percent}% viewport","viewer.nav.controls":"Diagram view controls","viewer.nav.route":"Trace a directed route","viewer.nav.route.title":"Trace route (R)","viewer.nav.route.short":"PATH","viewer.nav.radar":"Open semantic radar","viewer.nav.radar.title":"Semantic radar (M)","viewer.nav.radar.short":"MAP","viewer.nav.lens":"Open semantic lens","viewer.nav.lens.title":"Semantic lens (L)","viewer.nav.lens.short":"LENS","viewer.nav.find":"Find a node","viewer.nav.find.title":"Find a node (/)","viewer.nav.guide":"Open diagram guide","viewer.nav.guide.title":"Diagram guide (?)","viewer.nav.zoomOut":"Zoom out","viewer.nav.zoomOut.title":"Zoom out (-)","viewer.nav.reset":"Reset diagram view","viewer.nav.reset.title":"Reset view (0)","viewer.nav.read":"READ","viewer.nav.zoomIn":"Zoom in","viewer.nav.zoomIn.title":"Zoom in (+)","viewer.nav.camera":"{hint}. Reset diagram view","viewer.nav.camera.title":"{semantic}{hint} · reset view (0)","viewer.nav.camera.semantic":"Semantic camera active · ","viewer.nav.level.map":"MAP","viewer.nav.level.read":"READ","viewer.nav.level.full":"FULL","viewer.nav.level.auto":"AUTO","viewer.nav.detail.map":"Zoom in to reveal relationship labels and node context","viewer.nav.detail.read":"Zoom in again to reveal tags and annotations","viewer.nav.detail.full":"Full diagram detail","viewer.intent.summary":"{label}. {out} outgoing, {in} incoming{loops}. {total} connections. Press Enter for details.","viewer.intent.loops":", {count} self loop","viewer.common.copied":"Copied","viewer.common.copyFailed":"Copy failed","viewer.common.copyLink":"Copy link","viewer.common.clear":"Clear","viewer.common.close":"Close"}}</script>
     <div class="guided-views no-print" id="guided-views" hidden aria-label="Guided diagram views">
       <button id="guided-view-prev" type="button" aria-label="Previous guided view" title="Previous guided view ([)">&#8592;</button>
@@ -5130,7 +5130,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
     <!-- Main Diagram -->
     <div class="diagram-container" data-detail-level="read"
          data-preset-badge-editorial-plate="ARCHIFY / PLATE 04">
-      <svg viewBox="0 0 1300 690" role="img" lang="en" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+      <svg viewBox="0 0 1340 660" role="img" lang="en" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
         <title id="archify-diagram-title">KIS AI Quant Trader 시스템 아키텍처</title>
         <desc id="archify-diagram-description">An architecture diagram generated by Archify.</desc>
         <!-- Definitions -->
@@ -5156,268 +5156,237 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <rect width="100%" height="100%" fill="url(#grid)" />
 
         <!-- Boundaries (behind everything) -->
-        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-composition-frame-label="브로커 계층 · USE_MOCK_MODE 로 교체" x="450" y="200" width="230" height="334" rx="12" class="c-region" stroke-width="1"/>
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-composition-frame-label="로컬 프로세스 — asyncio 단일 이벤트 루프" x="278" y="60" width="1024" height="566" rx="12" class="c-region" stroke-width="1"/>
 
-        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" data-composition-frame-label="전략 · 리스크 계층" x="670" y="40" width="550" height="324" rx="12" class="c-region" stroke-width="1"/>
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="security-group" data-composition-frame-id="1" data-composition-frame-label="주문 관문 — 우회 불가" x="536" y="500" width="766" height="126" rx="8" class="c-security-group" stroke-width="1"/>
 
         <!-- Connection paths (before components for correct z-order) -->
-        <path data-edge-from="kis-ws" data-edge-to="client" data-edge-label="실시간 체결·호가" data-edge-key="0" data-edge-id="stream-in" data-composition-points="210,152;345,152;345,248;480,248" d="M 210 152 L 337 152 Q 345 152 345 160 L 345 240 Q 345 248 353 248 L 480 248" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path data-edge-from="auth" data-edge-to="client" data-edge-label="Bearer 토큰" data-edge-key="1" data-edge-id="token" data-composition-points="210,312;345,312;345,262;480,262" d="M 210 312 L 337 312 Q 345 312 345 304 L 345 270 Q 345 262 353 262 L 480 262" class="a-security" stroke-width="1.5" marker-end="url(#arrowhead-security)"/>
-        <path data-edge-from="client" data-edge-to="limiter" data-edge-label="모든 REST 호출" data-edge-key="2" data-edge-id="gate-rest" data-composition-points="480,276;355,276;355,450" d="M 480 276 L 363 276 Q 355 276 355 284 L 355 450" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="limiter" data-edge-to="kis-rest" data-edge-label="주문 P0 우선" data-edge-key="3" data-edge-id="to-kis" data-composition-points="270,482;210,482" d="M 270 482 L 210 482" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path data-edge-from="client" data-edge-to="engine" data-edge-label="시세 · 잔고" data-edge-key="4" data-edge-id="market-to-engine" data-composition-points="650,262;675,262;675,312;700,312" d="M 650 262 L 667 262 Q 675 262 675 270 L 675 304 Q 675 312 683 312 L 700 312" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="mock" data-edge-to="engine" data-edge-label="동일 JSON 스키마" data-edge-key="5" data-edge-id="mock-to-engine" data-composition-points="650,482;675,482;675,312;700,312" d="M 650 482 L 667 482 Q 675 482 675 474 L 675 320 Q 675 312 683 312 L 700 312" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
-        <path data-edge-from="engine" data-edge-to="features" data-edge-label="OHLCV 패널" data-edge-key="6" data-edge-id="engine-to-features" data-composition-points="785,280;785,134" d="M 785 280 L 785 134" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="features" data-edge-to="alpha" data-edge-label="피처 벡터" data-edge-key="7" data-edge-id="features-to-alpha" data-composition-points="870,102;1020,102" d="M 870 102 L 1020 102" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="alpha" data-edge-to="risk" data-edge-label="앙상블 점수 −1~1" data-edge-key="8" data-edge-id="alpha-to-risk" data-composition-points="1105,134;1105,280" d="M 1105 134 L 1105 280" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="risk" data-edge-to="engine" data-edge-label="승인 수량 또는 거부" data-edge-key="9" data-edge-id="risk-to-engine" data-composition-points="1020,305;870,305" d="M 1020 305 L 870 305" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path data-edge-from="engine" data-edge-to="client" data-edge-label="주문 제출" data-edge-key="10" data-edge-id="order-out" data-composition-points="778,344;778,368;565,368;565,294" d="M 778 344 L 778 360 Q 778 368 770 368 L 573 368 Q 565 368 565 360 L 565 294" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="engine" data-edge-to="ledger" data-edge-label="판정 · 주문 · 체결 기록" data-edge-key="11" data-edge-id="to-ledger" data-composition-points="792,344;792,540" d="M 792 344 L 792 540" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="engine" data-edge-to="dashboard" data-edge-label="상태 스냅샷 2초" data-edge-key="12" data-edge-id="to-dashboard" data-composition-points="870,319;945,319;945,572;1020,572" d="M 870 319 L 937 319 Q 945 319 945 327 L 945 564 Q 945 572 953 572 L 1020 572" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="toss" data-edge-to="universe" data-edge-label="수집" data-edge-key="0" data-edge-id="collect" data-composition-points="240,128;308,128" d="M 240 128 L 308 128" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="universe" data-edge-to="features" data-edge-label="284종목" data-edge-key="1" data-edge-id="panel" data-composition-points="498,128;566,128" d="M 498 128 L 566 128" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="features" data-edge-to="alpha" data-edge-label="피처 60종" data-edge-key="2" data-edge-id="feat" data-composition-points="756,128;824,128" d="M 756 128 L 824 128" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="alpha" data-edge-to="select" data-edge-label="점수 −1~1" data-edge-key="3" data-edge-id="score" data-composition-points="1014,128;1082,128" d="M 1014 128 L 1082 128" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="select" data-edge-to="rules" data-edge-label="진입 후보" data-edge-key="4" data-edge-id="cand" data-composition-points="1177,166;1177,530" d="M 1177 166 L 1177 530" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="rules" data-edge-to="limiter" data-edge-label="승인 주문" data-edge-key="5" data-edge-id="approved" data-composition-points="1082,568;756,568" d="M 1082 568 L 756 568" class="a-security" stroke-width="1.5" marker-end="url(#arrowhead-security)"/>
+        <path data-edge-from="limiter" data-edge-to="broker" data-edge-label="우선순위" data-edge-key="6" data-edge-id="queued" data-composition-points="566,568;498,568" d="M 566 568 L 498 568" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="broker" data-edge-to="kis" data-edge-label="REST · WS" data-edge-key="7" data-edge-id="order" data-composition-points="308,568;240,568" d="M 308 568 L 240 568" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="broker" data-edge-to="ledger" data-edge-label="체결 기록" data-edge-key="8" data-edge-id="fill" data-composition-points="403,530;403,386" d="M 403 530 L 403 386" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="ledger" data-edge-to="dash" data-edge-label="상태" data-edge-key="9" data-edge-id="state" data-composition-points="498,348;566,348" d="M 498 348 L 566 348" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="alpha" data-edge-to="verify" data-edge-label="구간별 재학습" data-edge-key="10" data-edge-id="walkforward" data-composition-points="919,166;919,310" d="M 919 166 L 919 310" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
 
         <!-- Components -->
-        <g id="node-kis-ws" data-node-id="kis-ws" data-node-label="KIS 실시간 스트림" tabindex="0" role="button" aria-label="Focus KIS 실시간 스트림, WebSocket · 체결 수신, Architecture component" aria-pressed="false" data-node-kind="external" data-node-sublabel="WebSocket · 체결 수신" data-node-tag="H0STCNT0 · AES 복호화" data-node-context="Architecture component">
-          <title>KIS 실시간 스트림 · WebSocket · 체결 수신 · Architecture component · H0STCNT0 · AES 복호화</title>
-          <rect x="40" y="120" width="170" height="64" rx="6" class="c-mask"/>
-          <rect x="40" y="120" width="170" height="64" rx="6" class="c-external" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(46 126) scale(0.6875)">
+        <g id="node-toss" data-node-id="toss" data-node-label="토스증권 Open API" tabindex="0" role="button" aria-label="Focus 토스증권 Open API, 일봉 · 수급 65컬럼, Architecture component" aria-pressed="false" data-node-kind="external" data-node-sublabel="일봉 · 수급 65컬럼" data-node-tag="학습 데이터 전용" data-node-context="Architecture component">
+          <title>토스증권 Open API · 일봉 · 수급 65컬럼 · Architecture component · 학습 데이터 전용</title>
+          <rect x="50" y="90" width="190" height="76" rx="6" class="c-mask"/>
+          <rect x="50" y="90" width="190" height="76" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(56 96) scale(0.6875)">
             <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
             <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="125" y="150" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">KIS 실시간 스트림</text>
-        <text data-detail="context" x="125" y="166" class="t-muted" font-size="9" text-anchor="middle">WebSocket · 체결 수신</text>
-        <text data-detail="fine" x="125" y="176" class="t-external" font-size="7" text-anchor="middle">H0STCNT0 · AES 복호화</text>
+          <text data-node-label="" data-detail-anchor="" x="145" y="126" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">토스증권 Open API</text>
+        <text data-detail="context" x="145" y="142" class="t-muted" font-size="9" text-anchor="middle">일봉 · 수급 65컬럼</text>
+        <text data-detail="fine" x="145" y="158" class="t-external" font-size="7" text-anchor="middle">학습 데이터 전용</text>
         </g>
 
-        <g id="node-auth" data-node-id="auth" data-node-label="인증 토큰 관리" tabindex="0" role="button" aria-label="Focus 인증 토큰 관리, OAuth 2.0 · 토큰 관리, Architecture component" aria-pressed="false" data-node-kind="security" data-node-sublabel="OAuth 2.0 · 토큰 관리" data-node-tag="24h 캐시 · 선제 재발급" data-node-context="Architecture component">
-          <title>인증 토큰 관리 · OAuth 2.0 · 토큰 관리 · Architecture component · 24h 캐시 · 선제 재발급</title>
-          <rect x="40" y="280" width="170" height="64" rx="6" class="c-mask"/>
-          <rect x="40" y="280" width="170" height="64" rx="6" class="c-security" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(46 286) scale(0.6875)">
+        <g id="node-universe" data-node-id="universe" data-node-label="유니버스 · 수집" tabindex="0" role="button" aria-label="Focus 유니버스 · 수집, 284종목 · 규정 필터, 로컬 프로세스 — asyncio 단일 이벤트 루프" aria-pressed="false" data-node-kind="backend" data-node-sublabel="284종목 · 규정 필터" data-node-tag="KRX CSV 참조" data-node-context="로컬 프로세스 — asyncio 단일 이벤트 루프">
+          <title>유니버스 · 수집 · 284종목 · 규정 필터 · 로컬 프로세스 — asyncio 단일 이벤트 루프 · KRX CSV 참조</title>
+          <rect x="308" y="90" width="190" height="76" rx="6" class="c-mask"/>
+          <rect x="308" y="90" width="190" height="76" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(314 96) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="403" y="126" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">유니버스 · 수집</text>
+        <text data-detail="context" x="403" y="142" class="t-muted" font-size="9" text-anchor="middle">284종목 · 규정 필터</text>
+        <text data-detail="fine" x="403" y="158" class="t-backend" font-size="7" text-anchor="middle">KRX CSV 참조</text>
+        </g>
+
+        <g id="node-features" data-node-id="features" data-node-label="피처 파이프라인" tabindex="0" role="button" aria-label="Focus 피처 파이프라인, 가격 44 + 수급 16, 로컬 프로세스 — asyncio 단일 이벤트 루프" aria-pressed="false" data-node-kind="backend" data-node-sublabel="가격 44 + 수급 16" data-node-tag="전부 인과적" data-node-context="로컬 프로세스 — asyncio 단일 이벤트 루프">
+          <title>피처 파이프라인 · 가격 44 + 수급 16 · 로컬 프로세스 — asyncio 단일 이벤트 루프 · 전부 인과적</title>
+          <rect x="566" y="90" width="190" height="76" rx="6" class="c-mask"/>
+          <rect x="566" y="90" width="190" height="76" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(572 96) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="661" y="126" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">피처 파이프라인</text>
+        <text data-detail="context" x="661" y="142" class="t-muted" font-size="9" text-anchor="middle">가격 44 + 수급 16</text>
+        <text data-detail="fine" x="661" y="158" class="t-backend" font-size="7" text-anchor="middle">전부 인과적</text>
+        </g>
+
+        <g id="node-alpha" data-node-id="alpha" data-node-label="AI 앙상블" tabindex="0" role="button" aria-label="Focus AI 앙상블, GBDT + 팩터 + 횡단면, 로컬 프로세스 — asyncio 단일 이벤트 루프" aria-pressed="false" data-node-kind="backend" data-node-sublabel="GBDT + 팩터 + 횡단면" data-node-tag="삼중배리어" data-node-context="로컬 프로세스 — asyncio 단일 이벤트 루프">
+          <title>AI 앙상블 · GBDT + 팩터 + 횡단면 · 로컬 프로세스 — asyncio 단일 이벤트 루프 · 삼중배리어</title>
+          <rect x="824" y="90" width="190" height="76" rx="6" class="c-mask"/>
+          <rect x="824" y="90" width="190" height="76" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(830 96) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="919" y="126" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">AI 앙상블</text>
+        <text data-detail="context" x="919" y="142" class="t-muted" font-size="9" text-anchor="middle">GBDT + 팩터 + 횡단면</text>
+        <text data-detail="fine" x="919" y="158" class="t-backend" font-size="7" text-anchor="middle">삼중배리어</text>
+        </g>
+
+        <g id="node-select" data-node-id="select" data-node-label="종목 선정" tabindex="0" role="button" aria-label="Focus 종목 선정, 점수 상위 Top-K, 로컬 프로세스 — asyncio 단일 이벤트 루프" aria-pressed="false" data-node-kind="backend" data-node-sublabel="점수 상위 Top-K" data-node-tag="백테스트 공유" data-node-context="로컬 프로세스 — asyncio 단일 이벤트 루프">
+          <title>종목 선정 · 점수 상위 Top-K · 로컬 프로세스 — asyncio 단일 이벤트 루프 · 백테스트 공유</title>
+          <rect x="1082" y="90" width="190" height="76" rx="6" class="c-mask"/>
+          <rect x="1082" y="90" width="190" height="76" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(1088 96) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="1177" y="126" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">종목 선정</text>
+        <text data-detail="context" x="1177" y="142" class="t-muted" font-size="9" text-anchor="middle">점수 상위 Top-K</text>
+        <text data-detail="fine" x="1177" y="158" class="t-backend" font-size="7" text-anchor="middle">백테스트 공유</text>
+        </g>
+
+        <g id="node-rules" data-node-id="rules" data-node-label="리스크 · 규정 관문" tabindex="0" role="button" aria-label="Focus 리스크 · 규정 관문, 수량 결정 · 거부권, 로컬 프로세스 — asyncio 단일 이벤트 루프 › 주문 관문 — 우회 불가" aria-pressed="false" data-node-kind="security" data-node-sublabel="수량 결정 · 거부권" data-node-tag="단일 종목 50%" data-node-context="로컬 프로세스 — asyncio 단일 이벤트 루프 › 주문 관문 — 우회 불가">
+          <title>리스크 · 규정 관문 · 수량 결정 · 거부권 · 로컬 프로세스 — asyncio 단일 이벤트 루프 › 주문 관문 — 우회 불가 · 단일 종목 50%</title>
+          <rect x="1082" y="530" width="190" height="76" rx="6" class="c-mask"/>
+          <rect x="1082" y="530" width="190" height="76" rx="6" class="c-security" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(1088 536) scale(0.6875)">
             <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
             <path d="m5.8 8 1.5 1.5 3-3"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="125" y="310" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">인증 토큰 관리</text>
-        <text data-detail="context" x="125" y="326" class="t-muted" font-size="9" text-anchor="middle">OAuth 2.0 · 토큰 관리</text>
-        <text data-detail="fine" x="125" y="336" class="t-security" font-size="7" text-anchor="middle">24h 캐시 · 선제 재발급</text>
+          <text data-node-label="" data-detail-anchor="" x="1177" y="566" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">리스크 · 규정 관문</text>
+        <text data-detail="context" x="1177" y="582" class="t-muted" font-size="9" text-anchor="middle">수량 결정 · 거부권</text>
+        <text data-detail="fine" x="1177" y="598" class="t-security" font-size="7" text-anchor="middle">단일 종목 50%</text>
         </g>
 
-        <g id="node-kis-rest" data-node-id="kis-rest" data-node-label="KIS 모의투자 서버" tabindex="0" role="button" aria-label="Focus KIS 모의투자 서버, REST · 시세·주문 원천, Architecture component" aria-pressed="false" data-node-kind="external" data-node-sublabel="REST · 시세·주문 원천" data-node-tag="openapivts :29443" data-node-context="Architecture component">
-          <title>KIS 모의투자 서버 · REST · 시세·주문 원천 · Architecture component · openapivts :29443</title>
-          <rect x="40" y="450" width="170" height="64" rx="6" class="c-mask"/>
-          <rect x="40" y="450" width="170" height="64" rx="6" class="c-external" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(46 456) scale(0.6875)">
+        <g id="node-limiter" data-node-id="limiter" data-node-label="유량 제어기" tabindex="0" role="button" aria-label="Focus 유량 제어기, 토큰버킷 · 우선순위, 로컬 프로세스 — asyncio 단일 이벤트 루프 › 주문 관문 — 우회 불가" aria-pressed="false" data-node-kind="messagebus" data-node-sublabel="토큰버킷 · 우선순위" data-node-tag="모의 2건/초" data-node-context="로컬 프로세스 — asyncio 단일 이벤트 루프 › 주문 관문 — 우회 불가">
+          <title>유량 제어기 · 토큰버킷 · 우선순위 · 로컬 프로세스 — asyncio 단일 이벤트 루프 › 주문 관문 — 우회 불가 · 모의 2건/초</title>
+          <rect x="566" y="530" width="190" height="76" rx="6" class="c-mask"/>
+          <rect x="566" y="530" width="190" height="76" rx="6" class="c-messagebus" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="messagebus" class="semantic-sigil s-messagebus" transform="translate(572 536) scale(0.6875)">
+            <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/>
+            <circle cx="5" cy="4.5" r="1" class="sigil-fill"/>
+            <circle cx="10.5" cy="8" r="1" class="sigil-fill"/>
+            <circle cx="7" cy="11.5" r="1" class="sigil-fill"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="661" y="566" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">유량 제어기</text>
+        <text data-detail="context" x="661" y="582" class="t-muted" font-size="9" text-anchor="middle">토큰버킷 · 우선순위</text>
+        <text data-detail="fine" x="661" y="598" class="t-messagebus" font-size="7" text-anchor="middle">모의 2건/초</text>
+        </g>
+
+        <g id="node-broker" data-node-id="broker" data-node-label="브로커 추상화" tabindex="0" role="button" aria-label="Focus 브로커 추상화, Mock ↔ 실서버, 로컬 프로세스 — asyncio 단일 이벤트 루프" aria-pressed="false" data-node-kind="backend" data-node-sublabel="Mock ↔ 실서버" data-node-tag=".env 전환" data-node-context="로컬 프로세스 — asyncio 단일 이벤트 루프">
+          <title>브로커 추상화 · Mock ↔ 실서버 · 로컬 프로세스 — asyncio 단일 이벤트 루프 · .env 전환</title>
+          <rect x="308" y="530" width="190" height="76" rx="6" class="c-mask"/>
+          <rect x="308" y="530" width="190" height="76" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(314 536) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="403" y="566" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">브로커 추상화</text>
+        <text data-detail="context" x="403" y="582" class="t-muted" font-size="9" text-anchor="middle">Mock ↔ 실서버</text>
+        <text data-detail="fine" x="403" y="598" class="t-backend" font-size="7" text-anchor="middle">.env 전환</text>
+        </g>
+
+        <g id="node-kis" data-node-id="kis" data-node-label="KIS 모의투자 서버" tabindex="0" role="button" aria-label="Focus KIS 모의투자 서버, REST + WebSocket, Architecture component" aria-pressed="false" data-node-kind="external" data-node-sublabel="REST + WebSocket" data-node-tag="대회 계좌" data-node-context="Architecture component">
+          <title>KIS 모의투자 서버 · REST + WebSocket · Architecture component · 대회 계좌</title>
+          <rect x="50" y="530" width="190" height="76" rx="6" class="c-mask"/>
+          <rect x="50" y="530" width="190" height="76" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(56 536) scale(0.6875)">
             <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
             <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="125" y="480" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">KIS 모의투자 서버</text>
-        <text data-detail="context" x="125" y="496" class="t-muted" font-size="9" text-anchor="middle">REST · 시세·주문 원천</text>
-        <text data-detail="fine" x="125" y="506" class="t-external" font-size="7" text-anchor="middle">openapivts :29443</text>
+          <text data-node-label="" data-detail-anchor="" x="145" y="566" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">KIS 모의투자 서버</text>
+        <text data-detail="context" x="145" y="582" class="t-muted" font-size="9" text-anchor="middle">REST + WebSocket</text>
+        <text data-detail="fine" x="145" y="598" class="t-external" font-size="7" text-anchor="middle">대회 계좌</text>
         </g>
 
-        <g id="node-limiter" data-node-id="limiter" data-node-label="유량 제어기" tabindex="0" role="button" aria-label="Focus 유량 제어기, asyncio · 유량 통제, Architecture component" aria-pressed="false" data-node-kind="security" data-node-sublabel="asyncio · 유량 통제" data-node-tag="토큰버킷 · 초당 2건" data-node-context="Architecture component">
-          <title>유량 제어기 · asyncio · 유량 통제 · Architecture component · 토큰버킷 · 초당 2건</title>
-          <rect x="270" y="450" width="170" height="64" rx="6" class="c-mask"/>
-          <rect x="270" y="450" width="170" height="64" rx="6" class="c-security" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(276 456) scale(0.6875)">
-            <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
-            <path d="m5.8 8 1.5 1.5 3-3"/>
-          </g>
-          <text data-node-label="" data-detail-anchor="" x="355" y="480" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">유량 제어기</text>
-        <text data-detail="context" x="355" y="496" class="t-muted" font-size="9" text-anchor="middle">asyncio · 유량 통제</text>
-        <text data-detail="fine" x="355" y="506" class="t-security" font-size="7" text-anchor="middle">토큰버킷 · 초당 2건</text>
-        </g>
-
-        <g id="node-client" data-node-id="client" data-node-label="실서버 클라이언트" tabindex="0" role="button" aria-label="Focus 실서버 클라이언트, httpx · 실서버 호출, 브로커 계층 · USE_MOCK_MODE 로 교체" aria-pressed="false" data-node-kind="backend" data-node-sublabel="httpx · 실서버 호출" data-node-tag="TR_ID 분기 · 재시도" data-node-context="브로커 계층 · USE_MOCK_MODE 로 교체">
-          <title>실서버 클라이언트 · httpx · 실서버 호출 · 브로커 계층 · USE_MOCK_MODE 로 교체 · TR_ID 분기 · 재시도</title>
-          <rect x="480" y="230" width="170" height="64" rx="6" class="c-mask"/>
-          <rect x="480" y="230" width="170" height="64" rx="6" class="c-backend" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(486 236) scale(0.6875)">
-            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
-          </g>
-          <text data-node-label="" data-detail-anchor="" x="565" y="260" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">실서버 클라이언트</text>
-        <text data-detail="context" x="565" y="276" class="t-muted" font-size="9" text-anchor="middle">httpx · 실서버 호출</text>
-        <text data-detail="fine" x="565" y="286" class="t-backend" font-size="7" text-anchor="middle">TR_ID 분기 · 재시도</text>
-        </g>
-
-        <g id="node-mock" data-node-id="mock" data-node-label="Mock 체결 엔진" tabindex="0" role="button" aria-label="Focus Mock 체결 엔진, numpy · 가상 체결, 브로커 계층 · USE_MOCK_MODE 로 교체" aria-pressed="false" data-node-kind="backend" data-node-sublabel="numpy · 가상 체결" data-node-tag="부분체결 · 거부 재현" data-node-context="브로커 계층 · USE_MOCK_MODE 로 교체">
-          <title>Mock 체결 엔진 · numpy · 가상 체결 · 브로커 계층 · USE_MOCK_MODE 로 교체 · 부분체결 · 거부 재현</title>
-          <rect x="480" y="450" width="170" height="64" rx="6" class="c-mask"/>
-          <rect x="480" y="450" width="170" height="64" rx="6" class="c-backend" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(486 456) scale(0.6875)">
-            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
-          </g>
-          <text data-node-label="" data-detail-anchor="" x="565" y="480" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Mock 체결 엔진</text>
-        <text data-detail="context" x="565" y="496" class="t-muted" font-size="9" text-anchor="middle">numpy · 가상 체결</text>
-        <text data-detail="fine" x="565" y="506" class="t-backend" font-size="7" text-anchor="middle">부분체결 · 거부 재현</text>
-        </g>
-
-        <g id="node-engine" data-node-id="engine" data-node-label="매매 엔진" tabindex="0" role="button" aria-label="Focus 매매 엔진, asyncio · 루프 조율, Architecture component" aria-pressed="false" data-node-kind="backend" data-node-sublabel="asyncio · 루프 조율" data-node-tag="3초 주기 · 이벤트 버스" data-node-context="Architecture component">
-          <title>매매 엔진 · asyncio · 루프 조율 · Architecture component · 3초 주기 · 이벤트 버스</title>
-          <rect x="700" y="280" width="170" height="64" rx="6" class="c-mask"/>
-          <rect x="700" y="280" width="170" height="64" rx="6" class="c-backend" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(706 286) scale(0.6875)">
-            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
-          </g>
-          <text data-node-label="" data-detail-anchor="" x="785" y="310" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">매매 엔진</text>
-        <text data-detail="context" x="785" y="326" class="t-muted" font-size="9" text-anchor="middle">asyncio · 루프 조율</text>
-        <text data-detail="fine" x="785" y="336" class="t-backend" font-size="7" text-anchor="middle">3초 주기 · 이벤트 버스</text>
-        </g>
-
-        <g id="node-features" data-node-id="features" data-node-label="피처 파이프라인" tabindex="0" role="button" aria-label="Focus 피처 파이프라인, pandas · 지표 생성, 전략 · 리스크 계층" aria-pressed="false" data-node-kind="backend" data-node-sublabel="pandas · 지표 생성" data-node-tag="종목 39 + 횡단면 5" data-node-context="전략 · 리스크 계층">
-          <title>피처 파이프라인 · pandas · 지표 생성 · 전략 · 리스크 계층 · 종목 39 + 횡단면 5</title>
-          <rect x="700" y="70" width="170" height="64" rx="6" class="c-mask"/>
-          <rect x="700" y="70" width="170" height="64" rx="6" class="c-backend" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(706 76) scale(0.6875)">
-            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
-          </g>
-          <text data-node-label="" data-detail-anchor="" x="785" y="100" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">피처 파이프라인</text>
-        <text data-detail="context" x="785" y="116" class="t-muted" font-size="9" text-anchor="middle">pandas · 지표 생성</text>
-        <text data-detail="fine" x="785" y="126" class="t-backend" font-size="7" text-anchor="middle">종목 39 + 횡단면 5</text>
-        </g>
-
-        <g id="node-alpha" data-node-id="alpha" data-node-label="AI 앙상블" tabindex="0" role="button" aria-label="Focus AI 앙상블, GBDT · 점수 합성, 전략 · 리스크 계층" aria-pressed="false" data-node-kind="backend" data-node-sublabel="GBDT · 점수 합성" data-node-tag="LightGBM ↔ sklearn" data-node-context="전략 · 리스크 계층">
-          <title>AI 앙상블 · GBDT · 점수 합성 · 전략 · 리스크 계층 · LightGBM ↔ sklearn</title>
-          <rect x="1020" y="70" width="170" height="64" rx="6" class="c-mask"/>
-          <rect x="1020" y="70" width="170" height="64" rx="6" class="c-backend" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(1026 76) scale(0.6875)">
-            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
-          </g>
-          <text data-node-label="" data-detail-anchor="" x="1105" y="100" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">AI 앙상블</text>
-        <text data-detail="context" x="1105" y="116" class="t-muted" font-size="9" text-anchor="middle">GBDT · 점수 합성</text>
-        <text data-detail="fine" x="1105" y="126" class="t-backend" font-size="7" text-anchor="middle">LightGBM ↔ sklearn</text>
-        </g>
-
-        <g id="node-risk" data-node-id="risk" data-node-label="리스크 관문" tabindex="0" role="button" aria-label="Focus 리스크 관문, Kelly · 수량 결정, 전략 · 리스크 계층" aria-pressed="false" data-node-kind="security" data-node-sublabel="Kelly · 수량 결정" data-node-tag="손절 · MDD 2단계" data-node-context="전략 · 리스크 계층">
-          <title>리스크 관문 · Kelly · 수량 결정 · 전략 · 리스크 계층 · 손절 · MDD 2단계</title>
-          <rect x="1020" y="280" width="170" height="64" rx="6" class="c-mask"/>
-          <rect x="1020" y="280" width="170" height="64" rx="6" class="c-security" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(1026 286) scale(0.6875)">
-            <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
-            <path d="m5.8 8 1.5 1.5 3-3"/>
-          </g>
-          <text data-node-label="" data-detail-anchor="" x="1105" y="310" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">리스크 관문</text>
-        <text data-detail="context" x="1105" y="326" class="t-muted" font-size="9" text-anchor="middle">Kelly · 수량 결정</text>
-        <text data-detail="fine" x="1105" y="336" class="t-security" font-size="7" text-anchor="middle">손절 · MDD 2단계</text>
-        </g>
-
-        <g id="node-ledger" data-node-id="ledger" data-node-label="체결 원장" tabindex="0" role="button" aria-label="Focus 체결 원장, JSONL · 감사 기록, Architecture component" aria-pressed="false" data-node-kind="database" data-node-sublabel="JSONL · 감사 기록" data-node-tag="판정·주문·체결" data-node-context="Architecture component">
-          <title>체결 원장 · JSONL · 감사 기록 · Architecture component · 판정·주문·체결</title>
-          <rect x="700" y="540" width="170" height="64" rx="6" class="c-mask"/>
-          <rect x="700" y="540" width="170" height="64" rx="6" class="c-database" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(706 546) scale(0.6875)">
+        <g id="node-ledger" data-node-id="ledger" data-node-label="체결 원장 · 요건" tabindex="0" role="button" aria-label="Focus 체결 원장 · 요건, logs/ledger.jsonl, 로컬 프로세스 — asyncio 단일 이벤트 루프" aria-pressed="false" data-node-kind="database" data-node-sublabel="logs/ledger.jsonl" data-node-tag="대회 근거자료" data-node-context="로컬 프로세스 — asyncio 단일 이벤트 루프">
+          <title>체결 원장 · 요건 · logs/ledger.jsonl · 로컬 프로세스 — asyncio 단일 이벤트 루프 · 대회 근거자료</title>
+          <rect x="308" y="310" width="190" height="76" rx="6" class="c-mask"/>
+          <rect x="308" y="310" width="190" height="76" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(314 316) scale(0.6875)">
             <ellipse cx="8" cy="4" rx="5" ry="2"/>
             <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="785" y="570" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">체결 원장</text>
-        <text data-detail="context" x="785" y="586" class="t-muted" font-size="9" text-anchor="middle">JSONL · 감사 기록</text>
-        <text data-detail="fine" x="785" y="596" class="t-database" font-size="7" text-anchor="middle">판정·주문·체결</text>
+          <text data-node-label="" data-detail-anchor="" x="403" y="346" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">체결 원장 · 요건</text>
+        <text data-detail="context" x="403" y="362" class="t-muted" font-size="9" text-anchor="middle">logs/ledger.jsonl</text>
+        <text data-detail="fine" x="403" y="378" class="t-database" font-size="7" text-anchor="middle">대회 근거자료</text>
         </g>
 
-        <g id="node-dashboard" data-node-id="dashboard" data-node-label="모니터링 대시보드" tabindex="0" role="button" aria-label="Focus 모니터링 대시보드, FastAPI · 실시간 관제, Architecture component" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="FastAPI · 실시간 관제" data-node-tag="2초 스냅샷 · Prometheus" data-node-context="Architecture component">
-          <title>모니터링 대시보드 · FastAPI · 실시간 관제 · Architecture component · 2초 스냅샷 · Prometheus</title>
-          <rect x="1020" y="540" width="170" height="64" rx="6" class="c-mask"/>
-          <rect x="1020" y="540" width="170" height="64" rx="6" class="c-frontend" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(1026 546) scale(0.6875)">
+        <g id="node-dash" data-node-id="dash" data-node-label="관제 화면" tabindex="0" role="button" aria-label="Focus 관제 화면, 낙폭 · 국면 · 요건, 로컬 프로세스 — asyncio 단일 이벤트 루프" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="낙폭 · 국면 · 요건" data-node-tag="읽기 전용" data-node-context="로컬 프로세스 — asyncio 단일 이벤트 루프">
+          <title>관제 화면 · 낙폭 · 국면 · 요건 · 로컬 프로세스 — asyncio 단일 이벤트 루프 · 읽기 전용</title>
+          <rect x="566" y="310" width="190" height="76" rx="6" class="c-mask"/>
+          <rect x="566" y="310" width="190" height="76" rx="6" class="c-frontend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(572 316) scale(0.6875)">
             <rect x="2" y="3" width="12" height="10" rx="2"/>
             <path d="M2 6.5h12"/>
             <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
             <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="1105" y="570" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">모니터링 대시보드</text>
-        <text data-detail="context" x="1105" y="586" class="t-muted" font-size="9" text-anchor="middle">FastAPI · 실시간 관제</text>
-        <text data-detail="fine" x="1105" y="596" class="t-frontend" font-size="7" text-anchor="middle">2초 스냅샷 · Prometheus</text>
+          <text data-node-label="" data-detail-anchor="" x="661" y="346" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">관제 화면</text>
+        <text data-detail="context" x="661" y="362" class="t-muted" font-size="9" text-anchor="middle">낙폭 · 국면 · 요건</text>
+        <text data-detail="fine" x="661" y="378" class="t-frontend" font-size="7" text-anchor="middle">읽기 전용</text>
+        </g>
+
+        <g id="node-verify" data-node-id="verify" data-node-label="백테스트 · 검증" tabindex="0" role="button" aria-label="Focus 백테스트 · 검증, 30봉 워크포워드, 로컬 프로세스 — asyncio 단일 이벤트 루프" aria-pressed="false" data-node-kind="backend" data-node-sublabel="30봉 워크포워드" data-node-tag="데이터 지문" data-node-context="로컬 프로세스 — asyncio 단일 이벤트 루프">
+          <title>백테스트 · 검증 · 30봉 워크포워드 · 로컬 프로세스 — asyncio 단일 이벤트 루프 · 데이터 지문</title>
+          <rect x="824" y="310" width="190" height="76" rx="6" class="c-mask"/>
+          <rect x="824" y="310" width="190" height="76" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(830 316) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="919" y="346" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">백테스트 · 검증</text>
+        <text data-detail="context" x="919" y="362" class="t-muted" font-size="9" text-anchor="middle">30봉 워크포워드</text>
+        <text data-detail="fine" x="919" y="378" class="t-backend" font-size="7" text-anchor="middle">데이터 지문</text>
         </g>
 
         <!-- Connection labels -->
-        <g data-detail="context" data-edge-from="kis-ws" data-edge-to="client" data-edge-label="실시간 체결·호가" data-edge-key="0" data-edge-id="stream-in">
-          <rect x="301.6" y="180" width="86.8" height="14" rx="3" class="c-mask"/>
-          <text x="345" y="190" class="t-backend" font-size="8" text-anchor="middle">실시간 체결·호가</text>
+        <g data-detail="context" data-edge-from="toss" data-edge-to="universe" data-edge-label="수집" data-edge-key="0" data-edge-id="collect">
+          <rect x="259" y="108" width="30" height="14" rx="3" class="c-mask"/>
+          <text x="274" y="118" class="t-messagebus" font-size="8" text-anchor="middle">수집</text>
         </g>
-        <g data-detail="context" data-edge-from="auth" data-edge-to="client" data-edge-label="Bearer 토큰" data-edge-key="1" data-edge-id="token">
-          <rect x="223.6" y="245" width="62.8" height="14" rx="3" class="c-mask"/>
-          <text x="255" y="255" class="t-security" font-size="8" text-anchor="middle">Bearer 토큰</text>
+        <g data-detail="context" data-edge-from="universe" data-edge-to="features" data-edge-label="284종목" data-edge-key="1" data-edge-id="panel">
+          <rect x="510.2" y="108" width="43.6" height="14" rx="3" class="c-mask"/>
+          <text x="532" y="118" class="t-muted" font-size="8" text-anchor="middle">284종목</text>
         </g>
-        <g data-detail="context" data-edge-from="client" data-edge-to="limiter" data-edge-label="모든 REST 호출" data-edge-key="2" data-edge-id="gate-rest">
-          <rect x="316.4" y="343" width="77.2" height="14" rx="3" class="c-mask"/>
-          <text x="355" y="353" class="t-muted" font-size="8" text-anchor="middle">모든 REST 호출</text>
+        <g data-detail="context" data-edge-from="features" data-edge-to="alpha" data-edge-label="피처 60종" data-edge-key="2" data-edge-id="feat">
+          <rect x="763.4" y="108" width="53.199999999999996" height="14" rx="3" class="c-mask"/>
+          <text x="790" y="118" class="t-muted" font-size="8" text-anchor="middle">피처 60종</text>
         </g>
-        <g data-detail="context" data-edge-from="limiter" data-edge-to="kis-rest" data-edge-label="주문 P0 우선" data-edge-key="3" data-edge-id="to-kis">
-          <rect x="206.2" y="436" width="67.6" height="14" rx="3" class="c-mask"/>
-          <text x="240" y="446" class="t-backend" font-size="8" text-anchor="middle">주문 P0 우선</text>
+        <g data-detail="context" data-edge-from="alpha" data-edge-to="select" data-edge-label="점수 −1~1" data-edge-key="3" data-edge-id="score">
+          <rect x="1021.4" y="108" width="53.199999999999996" height="14" rx="3" class="c-mask"/>
+          <text x="1048" y="118" class="t-muted" font-size="8" text-anchor="middle">점수 −1~1</text>
         </g>
-        <g data-detail="context" data-edge-from="client" data-edge-to="engine" data-edge-label="시세 · 잔고" data-edge-key="4" data-edge-id="market-to-engine">
-          <rect x="604.6" y="302" width="62.8" height="14" rx="3" class="c-mask"/>
-          <text x="636" y="312" class="t-muted" font-size="8" text-anchor="middle">시세 · 잔고</text>
+        <g data-detail="context" data-edge-from="select" data-edge-to="rules" data-edge-label="진입 후보" data-edge-key="4" data-edge-id="cand">
+          <rect x="1150.4" y="170" width="53.199999999999996" height="14" rx="3" class="c-mask"/>
+          <text x="1177" y="180" class="t-backend" font-size="8" text-anchor="middle">진입 후보</text>
         </g>
-        <g data-detail="context" data-edge-from="mock" data-edge-to="engine" data-edge-label="동일 JSON 스키마" data-edge-key="5" data-edge-id="mock-to-engine">
-          <rect x="631.6" y="377" width="86.8" height="14" rx="3" class="c-mask"/>
-          <text x="675" y="387" class="t-messagebus" font-size="8" text-anchor="middle">동일 JSON 스키마</text>
+        <g data-detail="context" data-edge-from="rules" data-edge-to="limiter" data-edge-label="승인 주문" data-edge-key="5" data-edge-id="approved">
+          <rect x="892.4" y="548" width="53.199999999999996" height="14" rx="3" class="c-mask"/>
+          <text x="919" y="558" class="t-security" font-size="8" text-anchor="middle">승인 주문</text>
         </g>
-        <g data-detail="context" data-edge-from="engine" data-edge-to="features" data-edge-label="OHLCV 패널" data-edge-key="6" data-edge-id="engine-to-features">
-          <rect x="756" y="260" width="58" height="14" rx="3" class="c-mask"/>
-          <text x="785" y="270" class="t-muted" font-size="8" text-anchor="middle">OHLCV 패널</text>
+        <g data-detail="context" data-edge-from="limiter" data-edge-to="broker" data-edge-label="우선순위" data-edge-key="6" data-edge-id="queued">
+          <rect x="507.8" y="548" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="532" y="558" class="t-muted" font-size="8" text-anchor="middle">우선순위</text>
         </g>
-        <g data-detail="context" data-edge-from="features" data-edge-to="alpha" data-edge-label="피처 벡터" data-edge-key="7" data-edge-id="features-to-alpha">
-          <rect x="918.4" y="82" width="53.199999999999996" height="14" rx="3" class="c-mask"/>
-          <text x="945" y="92" class="t-muted" font-size="8" text-anchor="middle">피처 벡터</text>
+        <g data-detail="context" data-edge-from="broker" data-edge-to="kis" data-edge-label="REST · WS" data-edge-key="7" data-edge-id="order">
+          <rect x="247.4" y="548" width="53.199999999999996" height="14" rx="3" class="c-mask"/>
+          <text x="274" y="558" class="t-muted" font-size="8" text-anchor="middle">REST · WS</text>
         </g>
-        <g data-detail="context" data-edge-from="alpha" data-edge-to="risk" data-edge-label="앙상블 점수 −1~1" data-edge-key="8" data-edge-id="alpha-to-risk">
-          <rect x="1061.6" y="164" width="86.8" height="14" rx="3" class="c-mask"/>
-          <text x="1105" y="174" class="t-muted" font-size="8" text-anchor="middle">앙상블 점수 −1~1</text>
+        <g data-detail="context" data-edge-from="broker" data-edge-to="ledger" data-edge-label="체결 기록" data-edge-key="8" data-edge-id="fill">
+          <rect x="376.4" y="510" width="53.199999999999996" height="14" rx="3" class="c-mask"/>
+          <text x="403" y="520" class="t-muted" font-size="8" text-anchor="middle">체결 기록</text>
         </g>
-        <g data-detail="context" data-edge-from="risk" data-edge-to="engine" data-edge-label="승인 수량 또는 거부" data-edge-key="9" data-edge-id="risk-to-engine">
-          <rect x="894.4" y="285" width="101.2" height="14" rx="3" class="c-mask"/>
-          <text x="945" y="295" class="t-backend" font-size="8" text-anchor="middle">승인 수량 또는 거부</text>
+        <g data-detail="context" data-edge-from="ledger" data-edge-to="dash" data-edge-label="상태" data-edge-key="9" data-edge-id="state">
+          <rect x="517" y="328" width="30" height="14" rx="3" class="c-mask"/>
+          <text x="532" y="338" class="t-messagebus" font-size="8" text-anchor="middle">상태</text>
         </g>
-        <g data-detail="context" data-edge-from="engine" data-edge-to="client" data-edge-label="주문 제출" data-edge-key="10" data-edge-id="order-out">
-          <rect x="574.9" y="348" width="53.199999999999996" height="14" rx="3" class="c-mask"/>
-          <text x="601.5" y="358" class="t-muted" font-size="8" text-anchor="middle">주문 제출</text>
-        </g>
-        <g data-detail="context" data-edge-from="engine" data-edge-to="ledger" data-edge-label="판정 · 주문 · 체결 기록" data-edge-key="11" data-edge-id="to-ledger">
-          <rect x="731.8" y="384" width="120.39999999999999" height="14" rx="3" class="c-mask"/>
-          <text x="792" y="394" class="t-muted" font-size="8" text-anchor="middle">판정 · 주문 · 체결 기록</text>
-        </g>
-        <g data-detail="context" data-edge-from="engine" data-edge-to="dashboard" data-edge-label="상태 스냅샷 2초" data-edge-key="12" data-edge-id="to-dashboard">
-          <rect x="904" y="425.5" width="82" height="14" rx="3" class="c-mask"/>
-          <text x="945" y="435.5" class="t-muted" font-size="8" text-anchor="middle">상태 스냅샷 2초</text>
+        <g data-detail="context" data-edge-from="alpha" data-edge-to="verify" data-edge-label="구간별 재학습" data-edge-key="10" data-edge-id="walkforward">
+          <rect x="882.8" y="170" width="72.4" height="14" rx="3" class="c-mask"/>
+          <text x="919" y="180" class="t-messagebus" font-size="8" text-anchor="middle">구간별 재학습</text>
         </g>
 
         <!-- Boundary labels (foreground masks keep routes out of titles) -->
-        <g data-graph-role="structural-frame-label" data-composition-frame-id="0" data-composition-frame-kind="region" data-composition-frame-label="브로커 계층 · USE_MOCK_MODE 로 교체">
-          <rect data-graph-role="structural-frame-label-mask" x="454" y="210" width="199" height="16" rx="3" class="c-mask"/>
-          <text data-boundary-label="" x="458" y="223" class="t-cloud" font-size="9" font-weight="600">브로커 계층 · USE_MOCK_MODE 로 교체</text>
+        <g data-graph-role="structural-frame-label" data-composition-frame-id="0" data-composition-frame-kind="region" data-composition-frame-label="로컬 프로세스 — asyncio 단일 이벤트 루프">
+          <rect data-graph-role="structural-frame-label-mask" x="282" y="70" width="226" height="16" rx="3" class="c-mask"/>
+          <text data-boundary-label="" x="286" y="83" class="t-cloud" font-size="9" font-weight="600">로컬 프로세스 — asyncio 단일 이벤트 루프</text>
         </g>
 
-        <g data-graph-role="structural-frame-label" data-composition-frame-id="1" data-composition-frame-kind="region" data-composition-frame-label="전략 · 리스크 계층">
-          <rect data-graph-role="structural-frame-label-mask" x="674" y="50" width="107.2" height="16" rx="3" class="c-mask"/>
-          <text data-boundary-label="" x="678" y="63" class="t-cloud" font-size="9" font-weight="600">전략 · 리스크 계층</text>
+        <g data-graph-role="structural-frame-label" data-composition-frame-id="1" data-composition-frame-kind="security-group" data-composition-frame-label="주문 관문 — 우회 불가">
+          <rect data-graph-role="structural-frame-label-mask" x="540" y="510" width="123.39999999999999" height="16" rx="3" class="c-mask"/>
+          <text data-boundary-label="" x="544" y="523" class="t-security" font-size="9" font-weight="600">주문 관문 — 우회 불가</text>
         </g>
 
         <!-- Legend -->
-        <g data-legend="" data-legend-bridge="">
-          <text x="40" y="654" class="t-primary" font-size="12" font-weight="650">Legend</text>
-          <g data-legend-semantic-kind="frontend" data-legend-kind="frontend" data-legend-label="Frontend" data-legend-x="40" data-legend-baseline="674" data-legend-width="83">
-            <rect x="40" y="665" width="16" height="10" rx="2.5" class="c-frontend" stroke-width="1"/>
-            <text x="62" y="674" class="t-muted" font-size="10" font-weight="500">Frontend</text>
-          </g>
-          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="Backend" data-legend-x="145" data-legend-baseline="674" data-legend-width="78">
-            <rect x="145" y="665" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
-            <text x="167" y="674" class="t-muted" font-size="10" font-weight="500">Backend</text>
-          </g>
-          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="Database" data-legend-x="245" data-legend-baseline="674" data-legend-width="83">
-            <rect x="245" y="665" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
-            <text x="267" y="674" class="t-muted" font-size="10" font-weight="500">Database</text>
-          </g>
-          <g data-legend-semantic-kind="security" data-legend-kind="security" data-legend-label="Security" data-legend-x="350" data-legend-baseline="674" data-legend-width="83">
-            <rect x="350" y="665" width="16" height="10" rx="2.5" class="c-security" stroke-width="1"/>
-            <text x="372" y="674" class="t-muted" font-size="10" font-weight="500">Security</text>
-          </g>
-          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="External" data-legend-x="455" data-legend-baseline="674" data-legend-width="83">
-            <rect x="455" y="665" width="16" height="10" rx="2.5" class="c-external" stroke-width="1"/>
-            <text x="477" y="674" class="t-muted" font-size="10" font-weight="500">External</text>
-          </g>
-        </g>
+
       </svg>
       <p class="intent-trace-status no-print" id="intent-trace-status" role="status" aria-live="polite" aria-atomic="true"></p>
       <div class="share-chapter-cue no-print" id="share-chapter-cue" hidden role="status" aria-live="polite">
@@ -5607,36 +5576,33 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
       <div class="card">
         <div class="card-header">
           <div class="card-dot cyan"></div>
-          <h3>외부 연동 계층</h3>
+          <h3>데이터</h3>
         </div>
         <ul>
-          <li>&bull; 실시간은 WebSocket, 조회·주문은 REST로 나뉜다</li>
-          <li>&bull; 모든 REST 호출이 하나의 토큰 버킷을 통과한다</li>
-          <li>&bull; Mock과 실서버가 같은 응답 스키마를 반환한다</li>
+          <li>&bull; 토스는 학습 데이터 전용 — 장중 시세와 주문은 KIS로 간다</li>
+          <li>&bull; KRX CSV로 규정 필터를 적용해 284종목 확정 (지수 외 111종목 포함)</li>
         </ul>
       </div>
 
       <div class="card">
         <div class="card-header">
-          <div class="card-dot violet"></div>
-          <h3>판단 계층</h3>
+          <div class="card-dot emerald"></div>
+          <h3>판단</h3>
         </div>
         <ul>
-          <li>&bull; 지표 44종을 종목·횡단면으로 나눠 만든다</li>
-          <li>&bull; GBDT 상승확률에 기술적 팩터와 랭크를 합성한다</li>
-          <li>&bull; 시장 레짐이 신호 전체를 0.15~1.0배로 조절한다</li>
+          <li>&bull; 피처 60종은 전부 인과적 — 전구간 계산과 시점별 계산이 같아야 한다</li>
+          <li>&bull; 절대 임계값이 아니라 점수 순위로 고른다 — 임계값은 상승장에 현금을 든다</li>
         </ul>
       </div>
 
       <div class="card">
         <div class="card-header">
           <div class="card-dot rose"></div>
-          <h3>실행·관측 계층</h3>
+          <h3>관문</h3>
         </div>
         <ul>
-          <li>&bull; 수량은 리스크 관문만 정한다. 전략은 점수만 낸다</li>
-          <li>&bull; 거부된 판정까지 원장에 남겨 사후 설명이 가능하다</li>
-          <li>&bull; 관제 화면은 매매 루프와 같은 이벤트 루프에서 돈다</li>
+          <li>&bull; 리스크 매니저가 모든 주문의 수량을 최종 결정하고 거부권을 가진다</li>
+          <li>&bull; 최소 자격 4요건을 못 채우면 수익률과 무관하게 실격 — 원장에서 센다</li>
         </ul>
       </div>
     </div>

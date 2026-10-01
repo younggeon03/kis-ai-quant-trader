@@ -3,465 +3,378 @@
   "diagram_type": "architecture",
   "meta": {
     "title": "KIS AI Quant Trader 시스템 아키텍처",
+    "output": "architecture.html",
     "quality_profile": "showcase",
     "viewBox": [
-      1300,
-      690
+      1340,
+      660
     ],
     "views": [
       {
-        "id": "market-in",
-        "label": "시세 수집",
+        "id": "data-in",
+        "label": "데이터 적재",
         "focus": [
-          "kis-ws",
-          "kis-rest",
-          "limiter",
-          "client",
-          "engine"
+          "toss",
+          "universe",
+          "features"
         ],
-        "note": "실시간 스트림과 REST 폴링이 브로커를 거쳐 엔진으로 들어오는 경로."
+        "note": "토스는 학습 데이터 전용이고 KRX CSV는 규정 필터용 참조 데이터다. 둘 다 장중에 호출하지 않는다."
       },
       {
         "id": "decide",
-        "label": "판단 체인",
+        "label": "판단",
         "focus": [
-          "engine",
           "features",
           "alpha",
-          "risk"
+          "select"
         ],
-        "note": "피처 44종에서 앙상블 점수를 거쳐 리스크 관문까지."
+        "note": "피처 60종에서 점수를 내고, 절대 임계값이 아니라 점수 순위로 보유 종목을 고른다."
       },
       {
         "id": "gate",
-        "label": "리스크·유량 방어",
+        "label": "주문 관문",
         "focus": [
-          "risk",
+          "select",
+          "rules",
           "limiter",
-          "auth",
-          "engine"
+          "broker"
         ],
-        "note": "주문을 막는 두 관문: 수량을 정하는 리스크, 속도를 정하는 유량."
+        "note": "전략이 아무리 좋은 점수를 내도 대회 규정과 리스크 한도를 통과하지 못하면 주문이 나가지 않는다."
       },
       {
-        "id": "switch",
-        "label": "Mock 전환",
+        "id": "record",
+        "label": "기록과 관제",
         "focus": [
-          "client",
-          "mock",
-          "engine"
+          "broker",
+          "ledger",
+          "dash"
         ],
-        "note": "두 구현이 같은 JSON 스키마를 반환해 .env 한 줄로 교체된다."
+        "note": "체결은 전부 원장에 남는다. 최소 자격 요건 충족 현황이 여기서 계산된다."
+      },
+      {
+        "id": "verify",
+        "label": "검증 루프",
+        "focus": [
+          "features",
+          "alpha",
+          "verify"
+        ],
+        "note": "같은 전략·리스크 객체를 백테스트에 주입한다. 30봉 구간 워크포워드가 대회에 가장 가까운 측정이다."
       }
-    ],
-    "repository": {
-      "url": "https://github.com/younggeon03/kis-ai-quant-trader",
-      "provider": "github",
-      "revision": "cf3e494f388907216db2f54c81acd9a25be5712c"
-    }
+    ]
   },
   "components": [
     {
-      "id": "kis-ws",
+      "id": "toss",
       "type": "external",
-      "label": "KIS 실시간 스트림",
-      "sublabel": "WebSocket · 체결 수신",
+      "label": "토스증권 Open API",
+      "sublabel": "일봉 · 수급 65컬럼",
+      "tag": "학습 데이터 전용",
       "pos": [
-        40,
-        120
+        50,
+        90
       ],
       "size": [
-        170,
-        64
-      ],
-      "tag": "H0STCNT0 · AES 복호화",
-      "sources": [
-        {
-          "path": "core/websocket_client.py",
-          "label": "구독·재연결·복호화"
-        }
+        190,
+        76
       ]
     },
     {
-      "id": "auth",
-      "type": "security",
-      "label": "인증 토큰 관리",
-      "sublabel": "OAuth 2.0 · 토큰 관리",
-      "pos": [
-        40,
-        280
-      ],
-      "size": [
-        170,
-        64
-      ],
-      "tag": "24h 캐시 · 선제 재발급",
-      "sources": [
-        {
-          "path": "core/auth.py",
-          "label": "토큰 수명주기"
-        }
-      ]
-    },
-    {
-      "id": "kis-rest",
-      "type": "external",
-      "label": "KIS 모의투자 서버",
-      "sublabel": "REST · 시세·주문 원천",
-      "pos": [
-        40,
-        450
-      ],
-      "size": [
-        170,
-        64
-      ],
-      "tag": "openapivts :29443"
-    },
-    {
-      "id": "limiter",
-      "type": "security",
-      "label": "유량 제어기",
-      "sublabel": "asyncio · 유량 통제",
-      "pos": [
-        270,
-        450
-      ],
-      "size": [
-        170,
-        64
-      ],
-      "tag": "토큰버킷 · 초당 2건",
-      "sources": [
-        {
-          "path": "core/rate_limiter.py",
-          "label": "우선순위 큐"
-        }
-      ]
-    },
-    {
-      "id": "client",
+      "id": "universe",
       "type": "backend",
-      "label": "실서버 클라이언트",
-      "sublabel": "httpx · 실서버 호출",
+      "label": "유니버스 · 수집",
+      "sublabel": "284종목 · 규정 필터",
+      "tag": "KRX CSV 참조",
       "pos": [
-        480,
-        230
+        308,
+        90
       ],
       "size": [
-        170,
-        64
-      ],
-      "tag": "TR_ID 분기 · 재시도",
-      "sources": [
-        {
-          "path": "api/client.py",
-          "label": "실서버 호출"
-        },
-        {
-          "path": "api/base.py",
-          "label": "공통 인터페이스"
-        }
-      ]
-    },
-    {
-      "id": "mock",
-      "type": "backend",
-      "label": "Mock 체결 엔진",
-      "sublabel": "numpy · 가상 체결",
-      "pos": [
-        480,
-        450
-      ],
-      "size": [
-        170,
-        64
-      ],
-      "tag": "부분체결 · 거부 재현",
-      "sources": [
-        {
-          "path": "api/mock_client.py",
-          "label": "가상 체결 엔진"
-        }
-      ]
-    },
-    {
-      "id": "engine",
-      "type": "backend",
-      "label": "매매 엔진",
-      "sublabel": "asyncio · 루프 조율",
-      "pos": [
-        700,
-        280
-      ],
-      "size": [
-        170,
-        64
-      ],
-      "tag": "3초 주기 · 이벤트 버스",
-      "sources": [
-        {
-          "path": "main.py",
-          "label": "TradingEngine._tick"
-        }
+        190,
+        76
       ]
     },
     {
       "id": "features",
       "type": "backend",
       "label": "피처 파이프라인",
-      "sublabel": "pandas · 지표 생성",
+      "sublabel": "가격 44 + 수급 16",
+      "tag": "전부 인과적",
       "pos": [
-        700,
-        70
+        566,
+        90
       ],
       "size": [
-        170,
-        64
-      ],
-      "tag": "종목 39 + 횡단면 5",
-      "sources": [
-        {
-          "path": "strategy/features.py",
-          "label": "피처 조립"
-        },
-        {
-          "path": "utils/indicators.py",
-          "label": "지표 구현"
-        }
+        190,
+        76
       ]
     },
     {
       "id": "alpha",
       "type": "backend",
       "label": "AI 앙상블",
-      "sublabel": "GBDT · 점수 합성",
+      "sublabel": "GBDT + 팩터 + 횡단면",
+      "tag": "삼중배리어",
       "pos": [
-        1020,
-        70
+        824,
+        90
       ],
       "size": [
-        170,
-        64
-      ],
-      "tag": "LightGBM ↔ sklearn",
-      "sources": [
-        {
-          "path": "strategy/ai_model.py",
-          "label": "라벨링·학습·앙상블"
-        }
+        190,
+        76
       ]
     },
     {
-      "id": "risk",
-      "type": "security",
-      "label": "리스크 관문",
-      "sublabel": "Kelly · 수량 결정",
+      "id": "select",
+      "type": "backend",
+      "label": "종목 선정",
+      "sublabel": "점수 상위 Top-K",
+      "tag": "백테스트 공유",
       "pos": [
-        1020,
-        280
+        1082,
+        90
       ],
       "size": [
-        170,
-        64
+        190,
+        76
+      ]
+    },
+    {
+      "id": "rules",
+      "type": "security",
+      "label": "리스크 · 규정 관문",
+      "sublabel": "수량 결정 · 거부권",
+      "tag": "단일 종목 50%",
+      "pos": [
+        1082,
+        530
       ],
-      "tag": "손절 · MDD 2단계",
-      "sources": [
-        {
-          "path": "strategy/risk_manager.py",
-          "label": "진입 심사·청산 규칙"
-        }
+      "size": [
+        190,
+        76
+      ]
+    },
+    {
+      "id": "limiter",
+      "type": "messagebus",
+      "label": "유량 제어기",
+      "sublabel": "토큰버킷 · 우선순위",
+      "tag": "모의 2건/초",
+      "pos": [
+        566,
+        530
+      ],
+      "size": [
+        190,
+        76
+      ]
+    },
+    {
+      "id": "broker",
+      "type": "backend",
+      "label": "브로커 추상화",
+      "sublabel": "Mock ↔ 실서버",
+      "tag": ".env 전환",
+      "pos": [
+        308,
+        530
+      ],
+      "size": [
+        190,
+        76
+      ]
+    },
+    {
+      "id": "kis",
+      "type": "external",
+      "label": "KIS 모의투자 서버",
+      "sublabel": "REST + WebSocket",
+      "tag": "대회 계좌",
+      "pos": [
+        50,
+        530
+      ],
+      "size": [
+        190,
+        76
       ]
     },
     {
       "id": "ledger",
       "type": "database",
-      "label": "체결 원장",
-      "sublabel": "JSONL · 감사 기록",
+      "label": "체결 원장 · 요건",
+      "sublabel": "logs/ledger.jsonl",
+      "tag": "대회 근거자료",
       "pos": [
-        700,
-        540
+        308,
+        310
       ],
       "size": [
-        170,
-        64
-      ],
-      "tag": "판정·주문·체결",
-      "sources": [
-        {
-          "path": "utils/logger.py",
-          "label": "JsonLedger"
-        }
+        190,
+        76
       ]
     },
     {
-      "id": "dashboard",
+      "id": "dash",
       "type": "frontend",
-      "label": "모니터링 대시보드",
-      "sublabel": "FastAPI · 실시간 관제",
+      "label": "관제 화면",
+      "sublabel": "낙폭 · 국면 · 요건",
+      "tag": "읽기 전용",
       "pos": [
-        1020,
-        540
+        566,
+        310
       ],
       "size": [
-        170,
-        64
+        190,
+        76
+      ]
+    },
+    {
+      "id": "verify",
+      "type": "backend",
+      "label": "백테스트 · 검증",
+      "sublabel": "30봉 워크포워드",
+      "tag": "데이터 지문",
+      "pos": [
+        824,
+        310
       ],
-      "tag": "2초 스냅샷 · Prometheus",
-      "sources": [
-        {
-          "path": "monitor/app.py",
-          "label": "관제 화면"
-        }
+      "size": [
+        190,
+        76
       ]
     }
   ],
   "boundaries": [
     {
       "kind": "region",
-      "label": "브로커 계층 · USE_MOCK_MODE 로 교체",
+      "label": "로컬 프로세스 — asyncio 단일 이벤트 루프",
       "wraps": [
-        "client",
-        "mock"
+        "universe",
+        "features",
+        "alpha",
+        "select",
+        "ledger",
+        "dash",
+        "verify",
+        "broker",
+        "limiter",
+        "rules"
       ]
     },
     {
-      "kind": "region",
-      "label": "전략 · 리스크 계층",
+      "kind": "security-group",
+      "label": "주문 관문 — 우회 불가",
       "wraps": [
-        "features",
-        "alpha",
-        "risk"
+        "limiter",
+        "rules"
       ]
     }
   ],
   "connections": [
     {
-      "id": "stream-in",
-      "from": "kis-ws",
-      "to": "client",
-      "label": "실시간 체결·호가",
-      "variant": "emphasis"
-    },
-    {
-      "id": "token",
-      "from": "auth",
-      "to": "client",
-      "label": "Bearer 토큰",
-      "variant": "security",
-      "labelDx": -90,
-      "labelDy": -22
-    },
-    {
-      "id": "gate-rest",
-      "from": "client",
-      "to": "limiter",
-      "label": "모든 REST 호출",
-      "fromSide": "left",
-      "toSide": "top"
-    },
-    {
-      "id": "to-kis",
-      "from": "limiter",
-      "to": "kis-rest",
-      "label": "주문 P0 우선",
-      "variant": "emphasis",
-      "labelDy": -26
-    },
-    {
-      "id": "market-to-engine",
-      "from": "client",
-      "to": "engine",
-      "label": "시세 · 잔고",
-      "fromSide": "right",
-      "toSide": "left",
-      "labelAt": [
-        636,
-        312
-      ]
-    },
-    {
-      "id": "mock-to-engine",
-      "from": "mock",
-      "to": "engine",
-      "label": "동일 JSON 스키마",
+      "id": "collect",
+      "from": "toss",
+      "to": "universe",
+      "label": "수집",
       "variant": "dashed"
     },
     {
-      "id": "engine-to-features",
-      "from": "engine",
+      "id": "panel",
+      "from": "universe",
       "to": "features",
-      "label": "OHLCV 패널"
+      "label": "284종목"
     },
     {
-      "id": "features-to-alpha",
+      "id": "feat",
       "from": "features",
       "to": "alpha",
-      "label": "피처 벡터"
+      "label": "피처 60종"
     },
     {
-      "id": "alpha-to-risk",
+      "id": "score",
       "from": "alpha",
-      "to": "risk",
-      "label": "앙상블 점수 −1~1",
-      "labelDy": 50
+      "to": "select",
+      "label": "점수 −1~1"
     },
     {
-      "id": "risk-to-engine",
-      "from": "risk",
-      "to": "engine",
-      "label": "승인 수량 또는 거부",
-      "variant": "emphasis"
-    },
-    {
-      "id": "order-out",
-      "from": "engine",
-      "to": "client",
-      "label": "주문 제출",
+      "id": "cand",
+      "from": "select",
+      "to": "rules",
+      "label": "진입 후보",
+      "variant": "emphasis",
       "fromSide": "bottom",
-      "toSide": "bottom",
-      "labelDx": -70
+      "toSide": "top",
+      "labelDy": 24
     },
     {
-      "id": "to-ledger",
-      "from": "engine",
+      "id": "approved",
+      "from": "rules",
+      "to": "limiter",
+      "label": "승인 주문",
+      "variant": "security"
+    },
+    {
+      "id": "queued",
+      "from": "limiter",
+      "to": "broker",
+      "label": "우선순위"
+    },
+    {
+      "id": "order",
+      "from": "broker",
+      "to": "kis",
+      "label": "REST · WS"
+    },
+    {
+      "id": "fill",
+      "from": "broker",
       "to": "ledger",
-      "label": "판정 · 주문 · 체결 기록",
-      "labelDy": 60
+      "label": "체결 기록",
+      "fromSide": "top",
+      "toSide": "bottom"
     },
     {
-      "id": "to-dashboard",
-      "from": "engine",
-      "to": "dashboard",
-      "label": "상태 스냅샷 2초"
+      "id": "state",
+      "from": "ledger",
+      "to": "dash",
+      "label": "상태",
+      "variant": "dashed"
+    },
+    {
+      "id": "walkforward",
+      "from": "alpha",
+      "to": "verify",
+      "label": "구간별 재학습",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 24
     }
   ],
   "cards": [
     {
       "dot": "cyan",
-      "title": "외부 연동 계층",
+      "title": "데이터",
       "items": [
-        "실시간은 WebSocket, 조회·주문은 REST로 나뉜다",
-        "모든 REST 호출이 하나의 토큰 버킷을 통과한다",
-        "Mock과 실서버가 같은 응답 스키마를 반환한다"
+        "토스는 학습 데이터 전용 — 장중 시세와 주문은 KIS로 간다",
+        "KRX CSV로 규정 필터를 적용해 284종목 확정 (지수 외 111종목 포함)"
       ]
     },
     {
-      "dot": "violet",
-      "title": "판단 계층",
+      "dot": "emerald",
+      "title": "판단",
       "items": [
-        "지표 44종을 종목·횡단면으로 나눠 만든다",
-        "GBDT 상승확률에 기술적 팩터와 랭크를 합성한다",
-        "시장 레짐이 신호 전체를 0.15~1.0배로 조절한다"
+        "피처 60종은 전부 인과적 — 전구간 계산과 시점별 계산이 같아야 한다",
+        "절대 임계값이 아니라 점수 순위로 고른다 — 임계값은 상승장에 현금을 든다"
       ]
     },
     {
       "dot": "rose",
-      "title": "실행·관측 계층",
+      "title": "관문",
       "items": [
-        "수량은 리스크 관문만 정한다. 전략은 점수만 낸다",
-        "거부된 판정까지 원장에 남겨 사후 설명이 가능하다",
-        "관제 화면은 매매 루프와 같은 이벤트 루프에서 돈다"
+        "리스크 매니저가 모든 주문의 수량을 최종 결정하고 거부권을 가진다",
+        "최소 자격 4요건을 못 채우면 수익률과 무관하게 실격 — 원장에서 센다"
       ]
     }
   ]

@@ -182,7 +182,7 @@ def main() -> int:
         panel = generate_synthetic_panel(
             symbols, n_bars=args.days, seed=settings.MOCK_SEED,
             sector_map={c: settings.sector_of(c) for c in symbols})
-    panel = align_panel(panel)
+    panel = align_panel(panel, settings.MIN_HISTORY_BARS)
 
     trials: List[float] = []
     if args.trial_sharpes:

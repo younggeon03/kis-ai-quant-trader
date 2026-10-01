@@ -8,10 +8,11 @@ TR_ID는 `settings.tr("order_buy")` 형태로 조회하며 모의(VTS)/실전(PR
 from __future__ import annotations
 
 import functools
+import json
 from pathlib import Path
-from typing import Dict, List, Literal, Tuple
+from typing import Any, Dict, List, Literal, Tuple
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -126,8 +127,27 @@ class Settings(BaseSettings):
 
     # ------------------------------------------------------------------ 유니버스
     UNIVERSE: List[str] = Field(default_factory=lambda: list(DEFAULT_UNIVERSE))
-    UNIVERSE_SIZE: int = Field(default=20, description="일봉 랭킹으로 추릴 실제 매매 대상 종목 수")
+    UNIVERSE_FILE: str = Field(
+        default="",
+        description="코스피200·코스닥150 구성종목 JSON 경로(`scripts/refresh_universe.py` 산출물). "
+                    "비어 있거나 파일이 없으면 DEFAULT_UNIVERSE(40종목)를 쓴다. 지수 구성종목은 "
+                    "정기변경이 6월·12월 두 번뿐인 참조 데이터이므로 런타임에 받지 않는다")
+    UNIVERSE_SIZE: int = Field(
+        default=120,
+        description="일봉 랭킹으로 추릴 신호 계산 대상 종목 수. 20이면 거래대금 상위 "
+                    "대형주만 남아 소형주 꼬리를 노릴 수 없다(백테스트는 전체를 보는데 "
+                    "실거래만 20종목이면 두 경로가 갈라진다). 실시간 시세는 별도로 "
+                    "WS_MAX_SUBSCRIPTIONS 만큼만 구독한다(main.py::_refresh_watchlist)")
     MIN_TRADING_VALUE: float = Field(default=3_000_000_000, description="최소 20일 평균 거래대금(원)")
+    MIN_HISTORY_BARS: int = Field(
+        default=1350,
+        description="이 봉 수 미만의 이력을 가진 종목은 패널에서 제외한다. align_panel이 "
+                    "공통 날짜 교집합을 잡으므로 상장이 늦은 종목 하나가 전체 구간을 "
+                    "잘라낸다(신규 상장이 섞이면 수십 봉으로 붕괴). 실제 적용 하한은 "
+                    "min(이 값, 중앙값×0.9)이라 짧은 패널은 보호된다. 284종목 실측 "
+                    "트레이드오프: 하한 750이면 239종목이지만 교집합이 764봉(30봉 구간 8개), "
+                    "1350이면 219종목에 1353봉(구간 28개)이다. 늦게 상장한 소수 종목이 "
+                    "전체 구간을 잘라내므로 하한을 높이는 쪽이 유리하다")
 
     # ------------------------------------------------------------------ 전략/AI
     MODEL_DIR: str = Field(default=str(PROJECT_ROOT / "models"))
@@ -160,9 +180,22 @@ class Settings(BaseSettings):
     TARGET_VOLATILITY: float = Field(default=0.18, description="연율 목표 변동성(포지션 사이징 기준)")
     KELLY_FRACTION: float = Field(default=0.25, description="Fractional Kelly 계수(1/4 Kelly)")
     KELLY_MAX_WEIGHT: float = Field(default=0.20)
-    STOP_LOSS_PCT: float = Field(default=0.035, description="종목 고정 손절 비율")
-    TAKE_PROFIT_PCT: float = Field(default=0.09, description="종목 익절 목표")
+    STOP_LOSS_PCT: float = Field(
+        default=0.12,
+        description="종목 고정 손절 비율. 3.5%는 유니버스 중앙값 일간 변동성(3.3%)과 거의 "
+                    "같아 무작위 진입에서도 10봉 내 62.6%가 노이즈로 손절됐다. 실데이터 "
+                    "21구간에서 12%로 넓히자 Sharpe -0.147 → 0.425, 누적 -5.2% → +12.1%. "
+                    "**이 프로젝트에서 검증된 단일 최대 개선이다**")
+    TAKE_PROFIT_PCT: float = Field(
+        default=0.09,
+        description="종목 익절 목표. 0이면 익절하지 않는다. **제거하지 않는다** — 실데이터 "
+                    "21구간 재측정에서 손절 12%만 적용한 쪽(Sharpe 0.425 / +12.1%)이 "
+                    "익절까지 제거한 쪽(0.263 / +7.0%)보다 나았고, 익절 제거 단독은 "
+                    "원 설정보다도 나빴다(-0.147 → -0.163)")
     TRAILING_ATR_MULT: float = Field(default=2.2, description="ATR 트레일링 스톱 배수")
+    # 트레일링과 MAX_HOLDING_BARS는 절제 실험에서 현행 유지가 더 좋았다.
+    # 단독 효과(원 설정 -0.147 대비): 트레일링 제거 -0.089, 보유 10봉 단축 -0.560.
+    # (0으로 두면 각각 비활성화된다 — risk_manager.evaluate_exits 참고)
     TRAILING_ACTIVATE_PCT: float = Field(default=0.025, description="트레일링 스톱 활성화 수익률")
     MAX_HOLDING_BARS: int = Field(default=30, description="최대 보유 봉 수(시간 손절)")
     DAILY_LOSS_LIMIT: float = Field(default=0.03, description="일중 손실 한도(당일 시작 자산 대비)")
@@ -172,6 +205,43 @@ class Settings(BaseSettings):
     COOLDOWN_MINUTES: int = Field(default=60, description="킬스위치 이후 신규 진입 금지 시간(분)")
     CRASH_DROP_PCT: float = Field(default=0.045, description="단기 급락 감지 임계(전량 청산 트리거)")
     CRASH_LOOKBACK: int = Field(default=10, description="급락 감지 룩백(봉 수)")
+    USE_TOP_K: bool = Field(
+        default=False,
+        description="점수 상위 K개를 골라 목표 익스포저를 채운다. False면 기존 절대 "
+                    "임계값(SIGNAL_BUY_THRESHOLD) 방식을 쓴다. 임계값 방식은 넘는 "
+                    "종목이 없으면 현금을 들기 때문에 상승장에서 참여를 못 한다")
+    MIN_HOLDING_BARS: int = Field(
+        default=0,
+        description="최소 보유 봉 수. 이 기간에는 순위가 밀려도 교체하지 않는다. "
+                    "순위는 매 봉 흔들리므로, 없으면 왕복비용 0.278%가 알파를 먹는다")
+    KELLY_COLD_START_MULT: float = Field(
+        default=0.40,
+        description="거래 이력이 부족할 때 쓰는 Kelly 배수. 대회처럼 기간이 짧으면 "
+                    "표본이 모이지 않으므로 낮은 값은 노이즈에 맞추는 것과 같다")
+
+    # ------------------------------------------------------------------ 대회
+    # 날짜가 비어 있으면 대회 로직 전체가 꺼지고 평소 동작을 유지한다.
+    COMP_START: str = Field(default="", description="대회 시작일 YYYY-MM-DD")
+    COMP_END: str = Field(default="", description="대회 종료일 YYYY-MM-DD")
+    PHASE1_END: str = Field(
+        default="",
+        description="수익률 초기화 가능 마지막 날 YYYY-MM-DD. 이 날까지가 1단계다")
+    PHASE1_TOP_K: int = Field(
+        default=2,
+        description="1단계 보유 종목 수(꼬리 베팅). 대회 규정 단일 종목 한도가 50%%이므로 "
+                    "1종목이면 현금 50%%가 남는다. 2종목 x 50%%가 규정 안에서 가능한 "
+                    "최대 집중이며, 1종목 100%% 몰빵은 규정 위반이다")
+    PHASE2_TOP_K: int = Field(default=4, description="2단계 보유 종목 수(본 전략)")
+    PHASE1_DISABLE_RISK: bool = Field(
+        default=True,
+        description="1단계에서 손절·MDD 게이트를 끈다. 초기화 옵션이 하방을 덮기 "
+                    "때문이며, 이 논리는 1단계가 끝나면 성립하지 않는다")
+
+    # 대회 최소 요건 — 못 채우면 수익률과 무관하게 실격이다(모두 체결 기준).
+    MIN_TRADE_COUNT: int = Field(default=0, description="최소 거래 횟수")
+    MIN_TRADE_AMOUNT: float = Field(default=0.0, description="최소 매매금액(원)")
+    MIN_TRADE_DAYS: int = Field(default=0, description="최소 매매일수(영업일)")
+    MIN_TRADE_SYMBOLS: int = Field(default=0, description="최소 매매 종목 수")
 
     # ------------------------------------------------------------------ 비용 모델
     FEE_BPS: float = Field(default=1.4, description="매매 수수료(bps). 편도")
@@ -267,7 +337,92 @@ class Settings(BaseSettings):
         return prod if self.is_prod else vts
 
     def sector_of(self, symbol: str) -> str:
-        return SECTOR_MAP.get(symbol, "ETC")
+        """섹터. 코드에 박힌 `SECTOR_MAP`을 우선하고, 없으면 유니버스 파일의 값을 쓴다."""
+        hit = SECTOR_MAP.get(symbol)
+        if hit:
+            return hit
+        return self._universe_blob().get("sectors", {}).get(symbol, "ETC")
+
+    def _universe_blob(self) -> Dict[str, Any]:
+        """`UNIVERSE_FILE`을 한 번만 읽어 캐시한다. 없거나 깨졌으면 빈 dict."""
+        cached = getattr(self, "_universe_cache", None)
+        if cached is not None:
+            return cached
+        blob: Dict[str, Any] = {}
+        path = (self.UNIVERSE_FILE or "").strip()
+        if path:
+            p = Path(path)
+            if not p.is_absolute():
+                p = PROJECT_ROOT / p
+            try:
+                blob = json.loads(p.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                pass
+            except (json.JSONDecodeError, OSError):
+                # 조용히 넘기면 40종목으로 도는 이유를 찾기 어렵다.
+                print(f"[Settings] 경고: UNIVERSE_FILE을 읽을 수 없습니다 ({p}) "
+                      f"→ DEFAULT_UNIVERSE로 폴백")
+        object.__setattr__(self, "_universe_cache", blob)
+        return blob
+
+    def resolved_universe(self) -> List[str]:
+        """실제로 쓸 종목 목록.
+
+        `UNIVERSE_FILE`이 지정되고 읽히면 그 안의 `tradable`(토스 시세가 확인된 종목)을
+        쓰고, 아니면 `UNIVERSE`(기본 40종목)를 쓴다. 이 함수를 거치므로 매매 런타임은
+        pykrx를 import하지 않는다.
+
+        `UNIVERSE`는 설정 로드 시점에 이미 이 값으로 치환되므로 보통은 같다
+        (`_apply_universe_file`). 명시적으로 확인할 때 쓴다.
+        """
+        blob = self._universe_blob()
+        syms = [str(x) for x in (blob.get("tradable") or []) if str(x).strip()]
+        return syms or list(self.UNIVERSE)
+
+    def market_cap_of(self, symbol: str) -> float:
+        """상장 시가총액(**원**). 유니버스 파일에 없으면 0.
+
+        `scripts/refresh_universe.py`가 원 단위로 정규화해 저장한다(지수 CSV의
+        `상장시가총액`은 백만원, 전종목시세의 `시가총액`은 원 단위로 서로 다르다).
+        """
+        return self._universe_num("market_cap", symbol)
+
+    def shares_of(self, symbol: str) -> float:
+        """상장주식수(주). 대회 규정의 10만주 하한 판정에 쓴다."""
+        return self._universe_num("shares", symbol)
+
+    def trading_value_of(self, symbol: str) -> float:
+        """유니버스 기준일의 거래대금(원). 유동성 판정에 쓴다."""
+        return self._universe_num("trading_value", symbol)
+
+    def index_members(self) -> Dict[str, List[str]]:
+        """지수별 구성종목. 최소 자격 요건("코스피200·코스닥150 중 5종목") 판정용이다.
+
+        **매매 제한이 아니다.** 대회 규정상 KOSPI·KOSDAQ 전 개별 종목을 매매할 수 있다.
+        """
+        blob = self._universe_blob().get("indices") or {}
+        return {str(k): [str(x) for x in (v or [])] for k, v in blob.items()}
+
+    def _universe_num(self, key: str, symbol: str) -> float:
+        try:
+            return float(self._universe_blob().get(key, {}).get(symbol, 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+
+    @model_validator(mode="after")
+    def _apply_universe_file(self) -> "Settings":
+        """`UNIVERSE_FILE`이 있으면 `UNIVERSE`를 거기서 읽은 목록으로 치환한다.
+
+        호출부(`s.UNIVERSE`를 쓰는 12군데)를 하나하나 고치면 누락이 생긴다.
+        설정 로드 시점에 한 번 바꿔 두면 백테스트·수집·실매매가 자동으로 같은
+        유니버스를 본다.
+        """
+        if (self.UNIVERSE_FILE or "").strip():
+            syms = [str(x) for x in (self._universe_blob().get("tradable") or [])
+                    if str(x).strip()]
+            if syms:
+                object.__setattr__(self, "UNIVERSE", syms)
+        return self
 
     def ensure_dirs(self) -> None:
         for d in (self.LOG_DIR, self.STATE_DIR, self.DATA_DIR, self.MODEL_DIR,

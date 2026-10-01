@@ -99,6 +99,29 @@ _HTML = r"""<!DOCTYPE html>
   .gauge-head{display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap;}
   .state{font-size:13px;font-weight:700;padding:4px 12px;border-radius:2px;letter-spacing:.02em;}
   .state.normal{background:rgba(0,196,140,.12);color:var(--live);}
+  /* 대회 영역 — 기간·국면·초기화 권고·최소 요건 */
+  .comp{margin:14px 0;padding:14px 16px;border:1px solid var(--line);border-radius:12px;
+        background:var(--panel);display:grid;gap:12px;}
+  .comp-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+  .comp-phase{font-weight:700;padding:3px 10px;border-radius:999px;font-size:12px;}
+  .comp-phase.p1{background:rgba(255,59,59,.14);color:var(--up);}
+  .comp-phase.p2{background:rgba(0,196,140,.12);color:var(--live);}
+  .comp-note{color:var(--dim);font-size:12px;}
+  .comp-left{margin-left:auto;font-variant-numeric:tabular-nums;font-size:12px;color:var(--dim);}
+  /* 초기화 권고: 되돌릴 수 없는 1회성 행위라 눈에 띄어야 한다 */
+  .reset{padding:10px 12px;border-radius:10px;font-size:13px;line-height:1.5;}
+  .reset.act{background:rgba(255,59,59,.12);border:1px solid rgba(255,59,59,.35);color:var(--up);}
+  .reset.hold{background:rgba(0,0,0,.14);border:1px solid var(--line);color:var(--dim);}
+  .reqs{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;}
+  .req{border:1px solid var(--line);border-radius:10px;padding:8px 10px;}
+  .req-top{display:flex;justify-content:space-between;font-size:11px;color:var(--dim);}
+  .req-val{font-size:14px;font-weight:700;font-variant-numeric:tabular-nums;margin:2px 0 6px;}
+  .req-bar{height:4px;border-radius:999px;background:rgba(255,255,255,.08);overflow:hidden;}
+  .req-bar i{display:block;height:100%;border-radius:999px;background:var(--dim);}
+  .req.ok .req-bar i{background:var(--live);}
+  .req.ok .req-val{color:var(--live);}
+  .req.bad .req-bar i{background:var(--up);}
+  .req.bad .req-val{color:var(--up);}
   .state.derisk{background:rgba(245,166,35,.14);color:var(--caution);}
   .state.halt{background:rgba(255,77,79,.16);color:var(--halt);}
   .gauge-note{font-size:13px;color:var(--dim);}
@@ -179,6 +202,16 @@ _HTML = r"""<!DOCTYPE html>
     <a class="link" href="/architecture" target="_blank" rel="noopener">시스템 구조</a>
     <button id="hold" aria-pressed="false">갱신 멈춤</button>
   </header>
+
+  <div class="comp" id="comp" hidden>
+    <div class="comp-head">
+      <span class="comp-phase" id="compPhase">—</span>
+      <span class="comp-note" id="compLabel"></span>
+      <span class="comp-left" id="compLeft"></span>
+    </div>
+    <div class="reset" id="compReset" hidden></div>
+    <div class="reqs" id="compReqs"></div>
+  </div>
 
   <div class="hero">
     <div>
@@ -336,6 +369,49 @@ function drawRps(hist, rl) {
   ].map(([k,v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
 }
 
+function renderCompetition(c){
+  const box = $('comp');
+  if (!c || !c.active) { box.hidden = true; return; }
+  box.hidden = false;
+
+  const p1 = c.phase === 'PHASE1';
+  const badge = $('compPhase');
+  badge.textContent = p1 ? '1단계 · 꼬리 베팅' : '2단계 · 본 전략';
+  badge.className = 'comp-phase ' + (p1 ? 'p1' : 'p2');
+  $('compLabel').textContent = c.label || '';
+  $('compLeft').innerHTML = `${esc(c.period||'')} · 남은 <b>${num(c.days_remaining)}</b>영업일 · `
+    + `보유 목표 <b>${num(c.top_k)}</b>종목`;
+
+  // 초기화 권고. 10/16이 마지막 기회이고 코드가 실행하지 않으므로 사람이 봐야 한다.
+  const rs = $('compReset');
+  if (c.reset && c.reset.window_open) {
+    rs.hidden = false;
+    rs.className = 'reset ' + (c.reset.should_reset ? 'act' : 'hold');
+    const head = c.reset.should_reset
+      ? `<b>수익률 초기화 권고</b> — KIS 화면에서 직접 실행하십시오`
+      : `<b>초기화 보류</b>`;
+    rs.innerHTML = `${head}<br>누적 <b>${c.reset.total_return_pct>0?'+':''}`
+      + `${c.reset.total_return_pct}%</b> · 마감 ${esc(c.reset.deadline||'')}<br>`
+      + `<span style="color:var(--dim)">${esc(c.reset.reason||'')}</span>`;
+  } else { rs.hidden = true; }
+
+  // 최소 요건 — 못 채우면 수익률과 무관하게 실격이다.
+  const reqs = c.requirements;
+  const wrap = $('compReqs');
+  if (!reqs || !reqs.requirements) { wrap.innerHTML = ''; return; }
+  wrap.innerHTML = reqs.requirements.map(q => {
+    const pct = Math.round((q.ratio||0)*100);
+    const cur = q.unit === '원' ? (q.current/1e8).toFixed(2)+'억' : num(q.current)+q.unit;
+    const req = q.unit === '원' ? (q.required/1e8).toFixed(2)+'억' : num(q.required)+q.unit;
+    return `<div class="req ${q.met?'ok':'bad'}">
+      <div class="req-top"><span>${esc(q.label)}</span><span>${q.met?'충족':pct+'%'}</span></div>
+      <div class="req-val">${esc(cur)}</div>
+      <div class="req-top"><span style="color:var(--dim)">기준 ${esc(req)}</span></div>
+      <div class="req-bar"><i style="width:${pct}%"></i></div>
+    </div>`;
+  }).join('');
+}
+
 async function refresh() {
   if (holding) return;
   let s;
@@ -351,6 +427,8 @@ async function refresh() {
 
   const p = s.portfolio||{}, r = s.risk||{}, st = s.strategy||{}, sys = s.system||{},
         rl = sys.rate_limiter||{}, ws = sys.websocket||{}, pr = sys.progress||{};
+
+  renderCompetition(s.competition||{});
 
   const el = Math.round(sys.elapsed_sec||0);
   $('meta').innerHTML = [

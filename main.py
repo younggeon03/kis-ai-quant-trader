@@ -45,16 +45,20 @@ from core.events import (
     TOPIC_ORDER,
     TOPIC_SIGNAL,
     EventBus,
+    ExitReason,
     Fill,
     OrderRequest,
     OrderType,
     Portfolio,
     Quote,
     Side,
+    Signal,
 )
 from monitor.app import DashboardServer
 from strategy.ai_model import EnsembleAlphaStrategy
-from strategy.risk_manager import RiskManager, RiskState
+from strategy.risk_manager import ExitOrder, RiskManager, RiskState
+from strategy.selection import select_entries, select_rotation_exits
+from strategy.phase import current_phase, phase_config, reset_recommendation
 from utils.krx_calendar import KRXCalendar, MarketSession
 from utils.logger import JsonLedger, logger, setup_logging
 from utils.market_rules import round_to_tick
@@ -80,10 +84,19 @@ class TradingEngine:
                                          self.s.DASHBOARD_PORT, settings=self.s) \
             if (enable_dashboard and self.s.DASHBOARD_ENABLED) else None
 
+        # 신호 유니버스: 일봉으로 점수를 계산할 전체 후보(하루 1회 적재)
         self.universe: List[str] = []
+        # 시세 관심목록: 실시간 현재가를 받을 종목. KIS WebSocket 구독 한도가 41건
+        # 이므로 유니버스 전체를 구독할 수 없다. 보유 종목 + 점수 상위로 채운다.
+        self.watchlist: List[str] = []
         self.panel: Dict[str, pd.DataFrame] = {}
         self.latest_prices: Dict[str, float] = {}
         self.atr_map: Dict[str, float] = {}
+        # 대회 국면 — 날짜로 결정되며 기간 밖에서는 OFF(평소 동작)다.
+        self.phase = phase_config(settings=self.s)
+        self._last_phase = self.phase.phase
+        self.reset_advice = None
+        self.compliance = None
         self.score_map: Dict[str, float] = {}
         self.recent_fills: List[Dict[str, Any]] = []
         self.open_orders: Dict[str, Dict[str, Any]] = {}
@@ -98,6 +111,9 @@ class TradingEngine:
         self._errors = 0
         self._mock_epoch = dt.datetime(2025, 1, 2, 9, 0)
         self._last_bar_ts: str = ""
+        # 신호 캐시. 일봉 전략이므로 봉이 바뀔 때만 재계산한다(아래 _current_signals 참고).
+        self._signals: List[Signal] = []
+        self._signals_bar_ts: str = ""
         self._started_at: Optional[dt.datetime] = None
 
     # ================================================================== 시간
@@ -192,6 +208,8 @@ class TradingEngine:
 
         self.universe = [s for s, _ in scored[: self.s.UNIVERSE_SIZE]]
         self.panel = {s: loaded[s] for s in self.universe}
+        # 초기 관심목록은 유동성 상위로 채운다. 첫 신호가 나오면 점수 기준으로 바뀐다.
+        self.watchlist = self.universe[: self.s.WS_MAX_SUBSCRIPTIONS]
         for s, df in self.panel.items():
             self.latest_prices[s] = float(df["close"].iloc[-1])
         self._last_bar_ts = str(self.panel[self.universe[0]]["ts"].iloc[-1])
@@ -210,7 +228,7 @@ class TradingEngine:
                 on_trade=self._on_ws_quote,
                 on_notice=self._on_ws_notice,
             )
-            await self.ws.subscribe_symbols(self.universe, orderbook=False)
+            await self.ws.subscribe_symbols(self.watchlist, orderbook=False)
             await self.ws.subscribe_notice()
             self.ws.start()
         except Exception as exc:
@@ -273,15 +291,16 @@ class TradingEngine:
     # ================================================================== 데이터
     async def _refresh_quotes(self) -> None:
         """현재가 갱신. 유량 보호를 위해 루프당 일부 종목만 회전 조회한다."""
-        if not self.universe:
+        watch = self.watchlist or self.universe
+        if not watch:
             return
         # WebSocket이 건강하면 REST 조회를 생략(유량 절약)
         if self.ws is not None and self.ws.is_healthy():
             return
-        n = len(self.universe)
+        n = len(watch)
         chunk = min(QUOTE_CHUNK, n)
         for _ in range(chunk):
-            symbol = self.universe[self._quote_cursor % n]
+            symbol = watch[self._quote_cursor % n]
             self._quote_cursor += 1
             try:
                 quote = await self.broker.get_quote(symbol)
@@ -522,26 +541,36 @@ class TradingEngine:
             self.rps_history.append(round(limiter.stats.measured_rps(), 2))
 
         prev_state = self.risk.state
+        # --- 대회 국면 적용 (날짜만 보고 전환한다) ---
+        self.phase = phase_config(settings=self.s, now=now)
+        self.risk.set_phase(self.phase if self.phase.is_competition else None)
+        if self.phase.phase != self._last_phase:
+            logger.warning(f"[대회] 국면 전환 {self._last_phase} → {self.phase.phase} :: {self.phase.label}")
+            self.ledger.write("phase", {"from": self._last_phase, "to": self.phase.phase,
+                                        "top_k": self.phase.top_k,
+                                        "use_stop_loss": self.phase.use_stop_loss,
+                                        "use_mdd_gate": self.phase.use_mdd_gate})
+            self._last_phase = self.phase.phase
+
+        if self.phase.is_competition:
+            self._check_reset_window(now)
+            self._check_compliance(now)
+
         self.risk.update(self.portfolio, now)
         if prev_state != self.risk.state:
             self.ledger.write("risk_state", {"from": prev_state, "to": self.risk.state,
                                              "equity": self.portfolio.equity,
                                              "drawdown": self.portfolio.drawdown})
 
-        # --- 신호 생성 ---
-        try:
-            signals = self.strategy.generate_signals(self.panel, self.portfolio.open_positions(), now)
-        except Exception as exc:
-            self._errors += 1
-            logger.exception(f"[Engine] 신호 생성 실패: {exc}")
-            signals = []
-        self.score_map = {s.symbol: s.score for s in signals}
-        self.atr_map = {s.symbol: s.atr for s in signals}
+        # --- 신호 (봉이 바뀔 때만 재계산) ---
+        signals = self._current_signals(now)
         if signals:
             await self.bus.publish(TOPIC_SIGNAL, signals[0])
 
         # --- 청산(리스크 우선) ---
         exits = self.risk.evaluate_exits(self.portfolio, prices, self.atr_map, self.score_map, now)
+        if self.s.USE_TOP_K:
+            exits.extend(self._rotation_exits(signals, prices, exits))
         for order in exits:
             price = prices.get(order.symbol, order.price)
             ok = await self._submit(order.symbol, Side.SELL, order.qty, price,
@@ -552,9 +581,18 @@ class TradingEngine:
 
         # --- 진입 ---
         if self.risk.state == RiskState.NORMAL:
-            for sig in signals:
-                if sig.score < self.s.SIGNAL_BUY_THRESHOLD:
-                    break
+            # 백테스트(`backtest/engine.py`)와 반드시 같은 선정 로직을 쓴다.
+            # 두 경로가 갈라지면 백테스트는 실거래를 예측하지 못한다.
+            if self.s.USE_TOP_K:
+                candidates = select_entries(
+                    signals, self.portfolio, self.s,
+                    top_k=self._top_k(),
+                    regime_scale=self.strategy.regime.scale,
+                    pending=set(self.open_orders_symbols()))
+            else:
+                candidates = [x for x in signals
+                              if x.score >= self.s.SIGNAL_BUY_THRESHOLD]
+            for sig in candidates:
                 if sig.symbol in self.open_orders_symbols():
                     continue
                 decision = self.risk.evaluate_entry(sig, self.portfolio, now, pending=self._pending_notional())
@@ -589,6 +627,137 @@ class TradingEngine:
                 f"pos={len(self.portfolio.open_positions())} risk={self.risk.state} "
                 f"regime={self.strategy.regime.label}"
             )
+
+    def _rotation_exits(self, signals, prices, already) -> List[ExitOrder]:
+        """순위에서 밀려난 보유 종목을 교체 청산한다(백테스트와 동일 규칙).
+
+        손절·급락과 달리 "더 좋은 후보가 나타났다"는 이유의 청산이다. 이미 다른
+        사유로 청산 예정인 종목은 중복해서 팔지 않는다.
+        """
+        taken = {order.symbol for order in already}
+        out: List[ExitOrder] = []
+        for symbol in select_rotation_exits(
+                signals, self.portfolio, self.s,
+                top_k=self._top_k(),
+                regime_scale=self.strategy.regime.scale):
+            if symbol in taken or symbol in self.open_orders_symbols():
+                continue
+            pos = self.portfolio.positions.get(symbol)
+            if pos is None or pos.qty <= 0:
+                continue
+            out.append(ExitOrder(symbol, pos.qty, ExitReason.SIGNAL,
+                                 prices.get(symbol, pos.last_price),
+                                 "순위 이탈 — 더 좋은 후보로 교체"))
+        return out
+
+    def _top_k(self) -> int:
+        """이번 봉의 목표 보유 종목 수. 대회 기간이면 국면 값을 쓴다."""
+        phase = getattr(self, "phase", None)
+        if phase is not None and phase.is_competition:
+            return phase.top_k
+        return int(self.s.MAX_POSITIONS)
+
+    def _check_reset_window(self, now) -> None:
+        """수익률 초기화 권고를 로그와 대시보드에 띄운다.
+
+        **실행하지 않는다.** 되돌릴 수 없는 1회성 계좌 설정 변경이므로 사용자가
+        KIS 화면에서 직접 수행한다.
+        """
+        advice = reset_recommendation(self.portfolio, now, self.s)
+        self.reset_advice = advice
+        if not advice.window_open:
+            return
+        if advice.should_reset:
+            logger.error(f"[대회·초기화] {advice.reason} — KIS 화면에서 직접 초기화하십시오")
+        else:
+            logger.info(f"[대회·초기화] {advice.reason}")
+        self.ledger.write("reset_advice", {
+            "should_reset": advice.should_reset, "total_return": advice.total_return,
+            "deadline": advice.deadline, "reason": advice.reason})
+
+    def _check_compliance(self, now) -> None:
+        """대회 최소 요건 충족 현황을 갱신한다.
+
+        요건을 놓치면 수익률과 무관하게 실격이므로, 빠듯해지면 회전율 통제를
+        완화해 거래를 늘린다. 거래비용보다 실격이 비싸다.
+        """
+        from strategy.compliance import holding_bars_override, status_from_ledger
+
+        try:
+            self.compliance = status_from_ledger(
+                Path(self.s.LOG_DIR) / "ledger.jsonl", self.s, now=now)
+        except Exception as exc:
+            logger.warning(f"[대회·요건] 집계 실패: {exc}")
+            return
+        override = holding_bars_override(self.compliance, self.s)
+        if override is not None and override != self.s.MIN_HOLDING_BARS:
+            logger.warning(
+                f"[대회·요건] 미충족 항목이 있어 최소 보유기간을 "
+                f"{self.s.MIN_HOLDING_BARS} → {override}봉으로 완화합니다")
+            self.s.MIN_HOLDING_BARS = override
+
+    def _current_signals(self, now) -> List[Signal]:
+        """이번 루프에서 쓸 신호. **일봉이 바뀔 때만** 다시 계산한다.
+
+        ## 왜 캐시가 필요한가
+
+        이 전략은 일봉으로 판단한다. 그런데 루프는 `LOOP_INTERVAL`(3초)마다 돌고,
+        예전에는 매 루프 `generate_signals()`를 호출했다. 일봉은 장중에 바뀌지 않으므로
+        같은 계산을 반복한 것이다.
+
+        실측: 20종목 **5.63초**, 116종목 **17.83초**. 루프 간격 3초를 이미 넘겼고
+        유니버스를 넓히면 더 심해진다. 장중에 실제로 필요한 것은 손절·트레일링
+        판단용 **현재가**이고, 그것은 `latest_prices`가 따로 갱신한다.
+
+        그래서 `_last_bar_ts`가 달라졌을 때만 재계산한다. 봉 재적재는
+        `BAR_REFRESH_LOOPS` 주기로 일어나므로 하루 1회 수준이다.
+        """
+        if self._signals and self._signals_bar_ts == self._last_bar_ts:
+            return self._signals
+        try:
+            signals = self.strategy.generate_signals(
+                self.panel, self.portfolio.open_positions(), now)
+        except Exception as exc:
+            self._errors += 1
+            logger.exception(f"[Engine] 신호 생성 실패: {exc}")
+            return self._signals          # 직전 신호를 유지한다(빈 목록으로 떨어뜨리지 않는다)
+        self._signals = signals
+        self._signals_bar_ts = self._last_bar_ts
+        self.score_map = {x.symbol: x.score for x in signals}
+        self.atr_map = {x.symbol: x.atr for x in signals}
+        if signals:
+            self._refresh_watchlist(signals)
+            logger.info(f"[Signal] {len(signals)}종목 재계산 (봉 {self._last_bar_ts}) · "
+                        f"상위 {', '.join(f'{x.symbol}:{x.score:.2f}' for x in signals[:3])}")
+        return signals
+
+    def _refresh_watchlist(self, signals) -> None:
+        """실시간 시세를 받을 종목을 점수 기준으로 갱신한다.
+
+        ## 왜 유니버스 전체를 구독하지 않는가
+
+        KIS WebSocket 구독 한도가 41건(체결+호가 합산)이다. 유니버스가 284종목이면
+        전체 구독이 불가능하다. 반면 **신호 계산은 일봉만 쓰고 일봉은 하루 1회
+        적재**하므로, 실시간 시세가 필요한 것은 실제로 거래할 종목뿐이다.
+
+        순서는 보유 종목이 먼저다. 손절·트레일링 판단이 현재가에 달려 있어서
+        보유 종목의 시세가 밀리면 방어가 늦어진다. 남는 자리를 점수 상위 후보로 채운다.
+
+        구독 대상이 바뀌면 재구독한다. 매 루프 재구독하면 유량을 낭비하므로
+        **집합이 실제로 달라졌을 때만** 한다.
+        """
+        cap = max(1, int(self.s.WS_MAX_SUBSCRIPTIONS))
+        held = [c for c in self.portfolio.open_positions()]
+        ranked = [x.symbol for x in signals if x.symbol not in held]
+        new_watch = (held + ranked)[:cap]
+        if set(new_watch) == set(self.watchlist):
+            return
+        self.watchlist = new_watch
+        if self.ws is not None:
+            try:
+                asyncio.create_task(self.ws.subscribe_symbols(new_watch, orderbook=False))
+            except Exception as exc:
+                logger.debug(f"[WS] 관심목록 재구독 실패: {exc}")
 
     def open_orders_symbols(self) -> set:
         return {o["symbol"] for o in self.open_orders.values()}
@@ -734,11 +903,48 @@ class TradingEngine:
                 "pct": round(min(100.0, max(0.0, (total - left) / total * 100)), 1),
                 "label": f"마감까지 {left:.0f}분"}
 
+    def _competition_snapshot(self) -> Dict[str, Any]:
+        """대회 국면·초기화 권고·최소 요건 현황.
+
+        대회 기간이 아니면 `active=False`만 돌려준다. 대시보드는 그때 이 영역을 숨긴다.
+
+        **초기화 권고가 화면에 떠야 하는 이유**: 수익률 초기화는 10/12~10/16 중
+        단 1회이고 코드가 대신 실행하지 않는다(되돌릴 수 없는 계좌 설정 변경이다).
+        마지막 날을 놓치면 기회가 사라지므로 사람이 볼 수 있어야 한다.
+        """
+        from strategy.phase import trading_days_remaining
+
+        phase = getattr(self, "phase", None)
+        if phase is None or not phase.is_competition:
+            return {"active": False}
+
+        advice = getattr(self, "reset_advice", None)
+        comp = getattr(self, "compliance", None)
+        return {
+            "active": True,
+            "phase": phase.phase,
+            "label": phase.label,
+            "top_k": phase.top_k,
+            "use_stop_loss": phase.use_stop_loss,
+            "use_mdd_gate": phase.use_mdd_gate,
+            "days_remaining": trading_days_remaining(self._now(), self.s),
+            "period": f"{self.s.COMP_START} ~ {self.s.COMP_END}",
+            "reset": ({
+                "window_open": advice.window_open,
+                "should_reset": advice.should_reset,
+                "deadline": advice.deadline,
+                "total_return_pct": round(advice.total_return * 100, 2),
+                "reason": advice.reason,
+            } if advice is not None else None),
+            "requirements": comp.to_dict() if comp is not None else None,
+        }
+
     def state_snapshot(self) -> Dict[str, Any]:
         """대시보드/헬스체크용 통합 스냅샷."""
         limiter = getattr(self.broker, "limiter", None)
         auth = getattr(self.broker, "auth", None)
         return {
+            "competition": self._competition_snapshot(),
             "portfolio": self.portfolio.snapshot(),
             "risk": self.risk.snapshot(self.portfolio),
             "strategy": self.strategy.snapshot(),
@@ -754,6 +960,7 @@ class TradingEngine:
                 "errors": self._errors,
                 "started_at": self._started_at.isoformat() if self._started_at else None,
                 "universe": len(self.universe),
+                "watchlist": len(self.watchlist),
                 "open_orders": len(self.open_orders),
                 "event_queue": self.bus.pending,
                 "elapsed_sec": round((self.calendar.now() - self._started_at).total_seconds())

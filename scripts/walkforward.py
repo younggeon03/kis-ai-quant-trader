@@ -38,6 +38,9 @@ def main() -> int:
     parser.add_argument("--train-window", type=int, default=500, help="학습 창 길이(봉)")
     parser.add_argument("--retrain-days", type=int, default=63,
                         help="재학습 주기(봉). 63≈분기, 21≈월")
+    parser.add_argument("--flow-dir", type=str, default="",
+                        help="수급 디렉토리(기본 <source>/flow)")
+    parser.add_argument("--no-flow", action="store_true", help="수급 피처 제외")
     parser.add_argument("--out", type=str, default="reports/walkforward.json")
     args = parser.parse_args()
 
@@ -45,16 +48,26 @@ def main() -> int:
     setup_logging(settings.LOG_DIR, settings.LOG_LEVEL)
 
     symbols = settings.UNIVERSE[: args.symbols] if args.symbols else settings.UNIVERSE
+    flow_panel = {}
     if args.source:
         panel = load_panel_from_dir(args.source, symbols)
         if not panel:
             logger.error(f"[WalkForward] {args.source} 에서 데이터를 찾지 못했습니다.")
             return 1
+        # 수급은 **학습과 평가에 같은 패널**을 넘겨야 한다. 한쪽만 쓰면 학습/추론
+        # 입력 분포가 달라진다(backtest/walkforward.py::train_on_bars 참고).
+        if not args.no_flow:
+            from strategy.flow_features import load_flow_dir
+            flow_dir = Path(args.flow_dir) if args.flow_dir                 else Path(args.source) / "flow"
+            flow_panel = load_flow_dir(flow_dir, symbols)
+            logger.info(f"[WalkForward] 수급 {len(flow_panel)}종목 로드 ({flow_dir})"
+                        if flow_panel else
+                        f"[WalkForward] 수급 없음 ({flow_dir}) — 가격 피처만 사용")
     else:
         panel = generate_synthetic_panel(
             symbols, n_bars=args.days, seed=settings.MOCK_SEED,
             sector_map={c: settings.sector_of(c) for c in symbols})
-    panel = align_panel(panel)
+    panel = align_panel(panel, settings.MIN_HISTORY_BARS)
 
     n_bars = min(len(df) for df in panel.values())
     expected = max(0, (n_bars - max(args.train_window, 120)) // args.retrain_days)
@@ -65,7 +78,8 @@ def main() -> int:
     try:
         result = run_walkforward(panel, settings,
                                  train_window=args.train_window,
-                                 step=args.retrain_days)
+                                 step=args.retrain_days,
+                                 flow_panel=flow_panel)
     except ValueError as exc:
         logger.error(f"[WalkForward] {exc}")
         return 1

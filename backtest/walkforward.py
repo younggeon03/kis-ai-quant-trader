@@ -47,11 +47,21 @@ def slice_panel(panel: Dict[str, pd.DataFrame], start: int = 0,
 
 
 def train_on_bars(panel: Dict[str, pd.DataFrame], bar_index: np.ndarray,
-                  settings) -> AlphaModel:
+                  settings,
+                  flow_panel: Optional[Dict[str, pd.DataFrame]] = None) -> AlphaModel:
     """주어진 봉 인덱스만으로 모델을 학습한다.
 
     purge된 구간을 인덱스에서 빼고 넘기면 그 봉들이 학습에서 제외되므로,
     테스트 구간의 정보가 새지 않는다.
+
+    ## `flow_panel`을 반드시 넘겨야 하는 이유
+
+    예전에는 `build_panel_features(sub)`를 수급 없이 호출했다. 그러면 모델이 수급
+    피처 16종을 **전부 NaN으로 보고 학습**한다. 그 상태로 백테스트에서만 수급을
+    채우면 학습과 추론의 입력 분포가 달라져(train/serve mismatch) 도움이 되기는커녕
+    해롭다. 즉 **수급 피처 전체가 워크포워드 경로에서 죽어 있었다.**
+
+    수급을 쓰려면 학습과 평가에 **같은 수급 패널**을 넘겨야 한다.
     """
     keep = set(int(i) for i in bar_index)
     sub: Dict[str, pd.DataFrame] = {}
@@ -64,19 +74,26 @@ def train_on_bars(panel: Dict[str, pd.DataFrame], bar_index: np.ndarray,
         raise ValueError("학습 구간이 너무 짧습니다")
 
     model = AlphaModel(settings)
-    model.fit(build_panel_features(sub), verbose=False)
+    model.fit(build_panel_features(sub, flow_panel), verbose=False)
     return model
 
 
 def segment_returns(panel: Dict[str, pd.DataFrame], model: AlphaModel, settings,
-                    start: int, end: int) -> Optional[np.ndarray]:
-    """[start, end) 구간만 평가한 백테스트의 일별 수익률."""
+                    start: int, end: int,
+                    flow_panel: Optional[Dict[str, pd.DataFrame]] = None
+                    ) -> Optional[np.ndarray]:
+    """[start, end) 구간만 평가한 백테스트의 일별 수익률.
+
+    `flow_panel`은 **학습에 쓴 것과 같아야 한다**(`train_on_bars` 참고).
+    한쪽만 수급을 쓰면 학습/추론 입력 분포가 달라진다.
+    """
     if end - start < 10:
         return None
     strategy = EnsembleAlphaStrategy(settings, model=model)
     engine = BacktestEngine(slice_panel(panel, 0, end), strategy=strategy,
                             risk_manager=RiskManager(settings), settings=settings,
-                            initial_capital=settings.INITIAL_CAPITAL)
+                            initial_capital=settings.INITIAL_CAPITAL,
+                            flow_panel=flow_panel)
     try:
         result = engine.run(warmup=max(start, MIN_WARMUP), verbose=False)
     except ValueError:
@@ -208,7 +225,9 @@ class WalkForwardResult:
 # ====================================================================== 실행
 def run_walkforward(panel: Dict[str, pd.DataFrame], settings,
                     train_window: int = 500, step: int = 63,
-                    verbose: bool = True) -> WalkForwardResult:
+                    verbose: bool = True,
+                    flow_panel: Optional[Dict[str, pd.DataFrame]] = None
+                    ) -> WalkForwardResult:
     """롤링 윈도우로 재학습하며 전 구간을 out-of-sample로 평가한다."""
     n_bars = min(len(df) for df in panel.values())
     if n_bars < train_window + step + MIN_WARMUP:
@@ -233,14 +252,16 @@ def run_walkforward(panel: Dict[str, pd.DataFrame], settings,
 
         index += 1
         try:
-            model = train_on_bars(panel, np.arange(train_start, train_end), settings)
+            model = train_on_bars(panel, np.arange(train_start, train_end),
+                                  settings, flow_panel)
         except Exception as exc:
             if verbose:
                 logger.warning(f"[WalkForward] 구간 {index} 학습 실패: {exc}")
             test_start += step
             continue
 
-        returns = segment_returns(panel, model, settings, test_start, test_end)
+        returns = segment_returns(panel, model, settings, test_start, test_end,
+                                  flow_panel)
         if returns is None or len(returns) == 0:
             test_start += step
             continue

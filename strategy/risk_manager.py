@@ -26,6 +26,7 @@ from core.events import ExitReason, Fill, Portfolio, Position, RiskDecision, Sid
 from utils.krx_calendar import KST
 from utils.logger import logger
 from utils.market_rules import affordable_qty
+from strategy.eligibility import is_buyable, position_weight_cap
 
 
 class RiskState:
@@ -87,8 +88,26 @@ class RiskManager:
         self._price_history: Dict[str, Deque[float]] = {}
         self._last_day: Optional[dt.date] = None
         self._halt_equity: float = 0.0
+        self._phase = None   # 대회 국면(strategy/phase.PhaseConfig). None이면 평소 규칙
 
     # ================================================================== 상태 갱신
+    def set_phase(self, phase) -> None:
+        """대회 국면을 지정한다(`strategy/phase.PhaseConfig` 또는 None).
+
+        1단계(초기화 창이 열린 5영업일)에는 손절과 MDD 게이트를 끈다. 근거는
+        초기화 옵션이 하방을 완전히 덮는다는 것뿐이고, 창이 닫히면 그 근거가
+        사라지므로 `phase.current_phase()`가 날짜만 보고 전환한다.
+        """
+        self._phase = phase
+
+    @property
+    def use_stop_loss(self) -> bool:
+        return self._phase is None or bool(self._phase.use_stop_loss)
+
+    @property
+    def use_mdd_gate(self) -> bool:
+        return self._phase is None or bool(self._phase.use_mdd_gate)
+
     def update(self, portfolio: Portfolio, now: Optional[dt.datetime] = None) -> str:
         """포트폴리오 상태를 반영해 리스크 상태를 갱신한다. 매 루프 1회 호출."""
         now = now or dt.datetime.now(tz=KST)
@@ -109,6 +128,12 @@ class RiskManager:
                 elif dd_now < self.s.MDD_HARD_LIMIT:
                     self._transition(RiskState.DERISK, f"새 거래일이지만 낙폭 {dd_now:.2%} 잔존 → 축소 운용")
                 # 하드 리밋 이상이면 HALT 유지
+
+        # 1단계에서는 MDD 게이트를 쓰지 않는다. 날짜 기준선만 갱신하고 NORMAL을 유지한다.
+        if not self.use_mdd_gate:
+            if self.state != RiskState.NORMAL:
+                self._transition(RiskState.NORMAL, "1단계 — MDD 게이트 해제(초기화 옵션이 하방을 덮는다)")
+            return self.state
 
         dd = portfolio.drawdown
         daily = portfolio.daily_pnl_pct
@@ -168,7 +193,10 @@ class RiskManager:
 
     # ================================================================== 포지션 사이징
     _MIN_KELLY_SAMPLES = 12
-    _COLD_START_MULT = 0.40   # 표본 부족 시 full-size의 40%만 사용
+    # 표본 부족 시 쓰는 배수. 설정(`KELLY_COLD_START_MULT`)으로 뺐다 — 대회처럼
+    # 기간이 짧으면 Kelly를 추정할 거래 이력이 모이지 않으므로, 낮은 고정값은
+    # 안전이 아니라 노이즈에 맞추는 것과 같다.
+    _COLD_START_MULT = 0.40   # 설정이 없을 때의 폴백
     _MIN_KELLY_MULT = 0.15
     _MIN_BET = 0.12        # 베팅 사이즈 바닥값 — 신호가 임계값을 넘었으면 최소한은 잡는다
 
@@ -197,7 +225,9 @@ class RiskManager:
         """
         kelly, p, b = self._kelly_stats()
         if kelly is None:
-            return self._COLD_START_MULT, p, b, 0.0
+            cold = float(getattr(self.s, "KELLY_COLD_START_MULT",
+                                 self._COLD_START_MULT))
+            return cold, p, b, 0.0
         mult = float(np.clip(kelly / max(1e-9, self.s.KELLY_MAX_WEIGHT), self._MIN_KELLY_MULT, 1.0))
         return mult, p, b, kelly
 
@@ -231,6 +261,13 @@ class RiskManager:
         if signal.score < self.s.SIGNAL_BUY_THRESHOLD:
             return self._reject(f"신호 미달 {signal.score:.3f} < {self.s.SIGNAL_BUY_THRESHOLD}")
 
+        # 대회 규정 관문 — 현재가 1,000원 미만, 발행주식수 10만주 미만, 관리종목,
+        # KONEX 등은 주문 자체가 거부되거나 실격 사유가 된다. 전략 점수가 아무리
+        # 높아도 여기를 통과하지 못하면 주문을 내지 않는다.
+        ok, why = is_buyable(signal.symbol, signal.price, self.s)
+        if not ok:
+            return self._reject(f"대회 규정 — {why}")
+
         equity = portfolio.equity
         if equity <= 0:
             return self._reject("자산 0 이하")
@@ -261,7 +298,10 @@ class RiskManager:
         # --- 단일 종목 여유 (미체결 포함) ---
         current_w = (open_positions[signal.symbol].market_value / equity) if already else 0.0
         current_w += pending.get(signal.symbol, 0.0) / equity
-        symbol_room = self.s.MAX_POSITION_WEIGHT - current_w
+        # 대회 규정 단일 종목 한도(50%)와 설정값 중 더 작은 쪽을 쓴다.
+        # 설정을 실수로 올려도 규정을 넘지 않게 하는 안전장치다.
+        weight_cap = position_weight_cap(self.s)
+        symbol_room = weight_cap - current_w
         if symbol_room <= 0.01:
             return self._reject(f"종목 비중 상한 도달 {current_w:.1%} (미체결 포함)")
 
@@ -286,7 +326,7 @@ class RiskManager:
             signal_scale = 0.6 + 0.4 * strength
 
         target_w = vol_w * kelly_mult * signal_scale * signal.regime
-        target_w = min(target_w, self.s.MAX_POSITION_WEIGHT, symbol_room, sector_room, gross_room)
+        target_w = min(target_w, weight_cap, symbol_room, sector_room, gross_room)
         if target_w <= 0.005:
             return self._reject(f"산출 비중 과소 {target_w:.3%}")
 
@@ -380,7 +420,13 @@ class RiskManager:
             pos.mark(price)
             atr = atr_map.get(symbol, 0.0)
 
-            # 1) 급락 감지
+            # 1) 급락 감지 — 1단계에서는 손절류를 전부 건너뛴다
+            if not self.use_stop_loss:
+                if pos.bars_held >= self.s.MAX_HOLDING_BARS:
+                    exits.append(ExitOrder(symbol, pos.qty, ExitReason.TIME_STOP, price,
+                                           f"보유 {pos.bars_held}봉 초과"))
+                continue
+
             buf = self._price_history.get(symbol)
             if buf and len(buf) >= 3:
                 peak = max(buf)
@@ -400,10 +446,11 @@ class RiskManager:
                 continue
 
             # 3) 트레일링 스톱
-            if not pos.trailing_active and pos.pnl_pct >= self.s.TRAILING_ACTIVATE_PCT:
+            trail_on = self.s.TRAILING_ACTIVATE_PCT > 0
+            if trail_on and not pos.trailing_active and pos.pnl_pct >= self.s.TRAILING_ACTIVATE_PCT:
                 pos.trailing_active = True
                 self._reasons.append(f"TRAIL_ON: {symbol} @{pos.pnl_pct:.2%}")
-            if pos.trailing_active:
+            if trail_on and pos.trailing_active:
                 trail_dist = self.s.TRAILING_ATR_MULT * atr if atr > 0 else pos.peak_price * 0.03
                 trail_stop = pos.peak_price - trail_dist
                 # 트레일링 스톱은 손절선을 아래로 내리지 않는다(단방향 상향)
@@ -414,7 +461,7 @@ class RiskManager:
                     continue
 
             # 4) 익절
-            if pos.pnl_pct >= self.s.TAKE_PROFIT_PCT:
+            if self.s.TAKE_PROFIT_PCT > 0 and pos.pnl_pct >= self.s.TAKE_PROFIT_PCT:
                 exits.append(ExitOrder(symbol, pos.qty, ExitReason.TAKE_PROFIT, price,
                                        f"목표 수익 {pos.pnl_pct:.2%}"))
                 continue
