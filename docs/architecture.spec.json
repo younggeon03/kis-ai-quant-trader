@@ -61,7 +61,12 @@
         ],
         "note": "같은 전략·리스크 객체를 백테스트에 주입한다. 30봉 구간 워크포워드가 대회에 가장 가까운 측정이다."
       }
-    ]
+    ],
+    "repository": {
+      "url": "https://github.com/younggeon03/kis-ai-quant-trader",
+      "provider": "github",
+      "revision": "0d5de447e0cd7b9460e48137a07a32646fdf0250"
+    }
   },
   "components": [
     {
@@ -77,6 +82,12 @@
       "size": [
         190,
         76
+      ],
+      "sources": [
+        {
+          "path": "api/toss_data.py",
+          "label": "OAuth · 중첩 JSON 평탄화 · 페이지네이션"
+        }
       ]
     },
     {
@@ -92,6 +103,20 @@
       "size": [
         190,
         76
+      ],
+      "sources": [
+        {
+          "path": "scripts/refresh_universe.py",
+          "label": "KRX CSV → 규정 필터 → universe.json"
+        },
+        {
+          "path": "scripts/collect_data.py",
+          "label": "일봉·수급 증분 수집"
+        },
+        {
+          "path": "config/settings.py",
+          "label": "UNIVERSE_FILE 해석 · 규정 상수"
+        }
       ]
     },
     {
@@ -107,6 +132,20 @@
       "size": [
         190,
         76
+      ],
+      "sources": [
+        {
+          "path": "strategy/features.py",
+          "label": "종목 39 + 횡단면 5"
+        },
+        {
+          "path": "strategy/flow_features.py",
+          "label": "수급 16종 · 룩어헤드 차단"
+        },
+        {
+          "path": "utils/indicators.py",
+          "label": "지표(인과성 검증됨)"
+        }
       ]
     },
     {
@@ -122,6 +161,16 @@
       "size": [
         190,
         76
+      ],
+      "sources": [
+        {
+          "path": "strategy/ai_model.py",
+          "label": "삼중배리어 · PurgedKFold · 점수 합성"
+        },
+        {
+          "path": "strategy/sample_weights.py",
+          "label": "라벨 고유도 가중치"
+        }
       ]
     },
     {
@@ -137,6 +186,16 @@
       "size": [
         190,
         76
+      ],
+      "sources": [
+        {
+          "path": "strategy/selection.py",
+          "label": "순위 기반 목표 보유 · 교체 청산"
+        },
+        {
+          "path": "strategy/phase.py",
+          "label": "국면 전환 · 초기화 권고"
+        }
       ]
     },
     {
@@ -152,6 +211,16 @@
       "size": [
         190,
         76
+      ],
+      "sources": [
+        {
+          "path": "strategy/risk_manager.py",
+          "label": "사이징 · MDD 상태기계 · 청산"
+        },
+        {
+          "path": "strategy/eligibility.py",
+          "label": "대회 규정 매매 가능 판정"
+        }
       ]
     },
     {
@@ -167,6 +236,12 @@
       "size": [
         190,
         76
+      ],
+      "sources": [
+        {
+          "path": "core/rate_limiter.py",
+          "label": "토큰버킷 + 우선순위 큐"
+        }
       ]
     },
     {
@@ -182,6 +257,20 @@
       "size": [
         190,
         76
+      ],
+      "sources": [
+        {
+          "path": "api/factory.py",
+          "label": "USE_MOCK_MODE 분기"
+        },
+        {
+          "path": "api/base.py",
+          "label": "동일 KIS JSON 스키마"
+        },
+        {
+          "path": "api/mock_client.py",
+          "label": "가상 체결 엔진"
+        }
       ]
     },
     {
@@ -197,6 +286,20 @@
       "size": [
         190,
         76
+      ],
+      "sources": [
+        {
+          "path": "api/client.py",
+          "label": "실서버 클라이언트"
+        },
+        {
+          "path": "core/websocket_client.py",
+          "label": "체결·호가·체결통보"
+        },
+        {
+          "path": "core/auth.py",
+          "label": "토큰 발급·캐시"
+        }
       ]
     },
     {
@@ -212,6 +315,16 @@
       "size": [
         190,
         76
+      ],
+      "sources": [
+        {
+          "path": "utils/logger.py",
+          "label": "JsonLedger (append-only)"
+        },
+        {
+          "path": "strategy/compliance.py",
+          "label": "최소 자격 4요건 집계"
+        }
       ]
     },
     {
@@ -227,6 +340,12 @@
       "size": [
         190,
         76
+      ],
+      "sources": [
+        {
+          "path": "monitor/app.py",
+          "label": "FastAPI · 인라인 SVG · 대회 영역"
+        }
       ]
     },
     {
@@ -242,6 +361,20 @@
       "size": [
         190,
         76
+      ],
+      "sources": [
+        {
+          "path": "backtest/engine.py",
+          "label": "T종가 판단 → T+1시가 체결"
+        },
+        {
+          "path": "backtest/walkforward.py",
+          "label": "구간별 재학습"
+        },
+        {
+          "path": "scripts/ablate_exits.py",
+          "label": "설정군 절제 · 데이터 지문"
+        }
       ]
     }
   ],
