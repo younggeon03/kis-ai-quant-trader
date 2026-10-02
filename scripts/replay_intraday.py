@@ -114,8 +114,8 @@ def replay_day(day: str, day_bars: Dict[str, Dict[str, tuple]],
     minutes = sorted(by_minute)
     held: Dict[str, Dict[str, float]] = {}      # 종목 → {entry, qty_w}
     trades: List[Dict[str, object]] = []
-    pending: List = []
     triggers = 0
+    swaps = 0
     diag_minutes: List[int] = []
     diag_speed: List[int] = []
     flatten_closes = 0
@@ -132,7 +132,10 @@ def replay_day(day: str, day_bars: Dict[str, Dict[str, tuple]],
                 if sig is not None:
                     fired.append(sig)
         triggers += len(fired)
-        pending.extend(fired)
+        # 명부에 올린다. 매 분 비우면 "하루의 첫 2건"만 사게 된다 — 실거래
+        # (`main.py`)와 같은 구조를 써야 측정이 실거래를 예측한다.
+        for sig in fired:
+            w.add_candidate(sig, sig.freshness)
 
         # --- 청산 (진입보다 먼저. 자리를 비워야 다음이 들어간다) ---
         for sym in list(held):
@@ -150,13 +153,12 @@ def replay_day(day: str, day_bars: Dict[str, Dict[str, tuple]],
             if "마감" in reason:
                 flatten_closes += 1
 
-        # --- 진입: 신선도 상위부터, 보유 한도까지 ---
-        if pending and not w.should_flatten(now):
+        # --- 진입: 명부 상위부터, 보유 한도까지 ---
+        if not w.should_flatten(now):
             nxt = minutes[i + 1] if i + 1 < len(minutes) else None
-            for sig in sorted(pending, key=lambda x: -x.freshness):
-                if len(held) >= per_day or sig.symbol in held:
-                    continue
-                if nxt is None:
+            free = max(0, per_day - len(held))
+            for sig in w.pick_entries(now, free):
+                if nxt is None or sig.symbol in held:
                     continue
                 bar = opens.get(sig.symbol, {}).get(nxt)
                 if bar is None:
@@ -164,11 +166,26 @@ def replay_day(day: str, day_bars: Dict[str, Dict[str, tuple]],
                 entry = bar[0]
                 if entry <= 0:
                     continue
-                held[sig.symbol] = {"entry": entry, "qty_w": weight}
-                w.open_watch(sig.symbol, entry)
+                held[sig.symbol] = {"entry": entry, "qty_w": weight,
+                                    "score": sig.freshness}
+                w.open_watch(sig.symbol, entry, sig.freshness)
                 diag_minutes.append(sig.trig_minute)
                 diag_speed.append(sig.speed)
-        pending = []
+            # --- 교체: 슬롯이 꽉 찼고 명부에 훨씬 좋은 후보가 있으면 ---
+            if len(held) >= per_day:
+                tgt = w.swap_target(now)
+                if tgt is not None:
+                    drop, incoming = tgt
+                    bar = opens.get(drop, {}).get(ts)
+                    if bar is not None and drop in held:
+                        pos = held.pop(drop)
+                        ret = bar[3] / pos["entry"] - 1.0 - cost
+                        trades.append({"day": day, "symbol": drop, "ret": ret,
+                                       "reason": f"교체({incoming.symbol})",
+                                       "exit_ts": ts})
+                        w.close_watch(drop)
+                        w.note_swap(incoming)
+                        swaps += 1
 
     # --- 장이 끝났는데 남아 있으면 오버나이트다. 있어서는 안 된다. ---
     overnight = []
@@ -180,7 +197,7 @@ def replay_day(day: str, day_bars: Dict[str, Dict[str, tuple]],
                        "reason": "오버나이트(미청산)", "exit_ts": ""})
         overnight.append(sym)
     return {"trades": trades, "triggers": triggers, "overnight": overnight,
-            "flatten_closes": flatten_closes,
+            "flatten_closes": flatten_closes, "swaps": swaps,
             "trig_minutes": diag_minutes, "speeds": diag_speed}
 
 
@@ -254,12 +271,16 @@ def main() -> int:
         target_pct=s.INTRADAY_TARGET_PCT, stop_pct=s.INTRADAY_STOP_PCT,
         trail_pct=s.INTRADAY_TRAIL_PCT,
         trail_activate_pct=s.INTRADAY_TRAIL_ACTIVATE_PCT,
-        flatten_hhmm=s.INTRADAY_FLATTEN_HHMM)
+        flatten_hhmm=s.INTRADAY_FLATTEN_HHMM,
+        candidate_ttl=s.INTRADAY_CANDIDATE_TTL,
+        swap_margin=s.INTRADAY_SWAP_MARGIN,
+        max_swaps=s.INTRADAY_MAX_SWAPS)
 
     all_trades: List[Dict[str, object]] = []
     tot_trig = 0
     overnight: List[str] = []
     flatten_closes = 0
+    tot_swaps = 0
     tmins: List[int] = []
     speeds: List[int] = []
     for k, day in enumerate(days, 1):
@@ -270,6 +291,7 @@ def main() -> int:
         tot_trig += int(r["triggers"])          # type: ignore[arg-type]
         overnight.extend(r["overnight"])        # type: ignore[arg-type]
         flatten_closes += int(r["flatten_closes"])  # type: ignore[arg-type]
+        tot_swaps += int(r["swaps"])            # type: ignore[arg-type]
         tmins.extend(r["trig_minutes"])         # type: ignore[arg-type]
         speeds.extend(r["speeds"])              # type: ignore[arg-type]
         if k % 50 == 0:
@@ -284,6 +306,8 @@ def main() -> int:
     print(f"  돌파 발동          {tot_trig:,}건  (하루 평균 {tot_trig / max(1, len(days)):.1f})")
     print(f"  진입               {len(tmins):,}건")
     print(f"  마감 정리로 청산    {flatten_closes:,}건")
+    print(f"  교체               {tot_swaps:,}건  "
+          f"(하루 한도 {s.INTRADAY_MAX_SWAPS}회 · 여유 {s.INTRADAY_SWAP_MARGIN})")
     print(f"  **오버나이트 잔여   {len(overnight):,}건**  "
           f"{'→ 정상(0건이어야 한다)' if not overnight else '→ 버그! 마감 정리가 동작하지 않는다'}")
     if tmins:

@@ -201,9 +201,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="분봉 청산 규칙 격자")
     ap.add_argument("--source", default="data/cache")
     ap.add_argument("--minute-dir", default="data/cache/minute")
-    ap.add_argument("--trigger", type=float, default=0.03)
-    ap.add_argument("--vol-mult", type=float, default=1.5,
-                    help="돌파 봉 거래량 / 전일 분당 평균 하한")
+    ap.add_argument("--trigger", type=float, default=0.0,
+                    help="돌파 기준(0=설정값 INTRADAY_TRIGGER_PCT)")
+    ap.add_argument("--vol-mult", type=float, default=0.0,
+                    help="돌파 봉 거래량 / 전일 분당 평균 하한(0=설정값 INTRADAY_VOL_MULT)")
     ap.add_argument("--min-bars", type=int, default=200)
     ap.add_argument("--trials", type=int, default=40000)
     ap.add_argument("--days", type=int, default=30, help="대회 거래일 수")
@@ -215,6 +216,8 @@ def main() -> int:
 
     s = get_settings()
     setup_logging(s.LOG_DIR, s.LOG_LEVEL)
+    args.trigger = args.trigger or s.INTRADAY_TRIGGER_PCT
+    args.vol_mult = args.vol_mult or s.INTRADAY_VOL_MULT
     have = sorted(p.stem for p in Path(args.minute_dir).glob("*.csv"))
     if not have:
         logger.error(f"[Grid] {args.minute_dir} 에 분봉이 없습니다")

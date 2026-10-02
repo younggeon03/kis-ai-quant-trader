@@ -193,9 +193,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="분봉 모델 스킬 측정")
     ap.add_argument("--source", default="data/cache")
     ap.add_argument("--minute-dir", default="data/cache/minute")
-    ap.add_argument("--trigger", type=float, default=0.03)
-    ap.add_argument("--vol-mult", type=float, default=1.5,
-                    help="돌파 봉 거래량 / 전일 분당 평균 하한")
+    ap.add_argument("--trigger", type=float, default=0.0,
+                    help="돌파 기준(0=설정값 INTRADAY_TRIGGER_PCT)")
+    ap.add_argument("--vol-mult", type=float, default=0.0,
+                    help="돌파 봉 거래량 / 전일 분당 평균 하한(0=설정값 INTRADAY_VOL_MULT)")
     ap.add_argument("--exit", default="close", choices=list(EXITS))
     ap.add_argument("--min-bars", type=int, default=200)
     ap.add_argument("--folds", type=int, default=5)
@@ -209,6 +210,10 @@ def main() -> int:
     s = get_settings()
     setup_logging(s.LOG_DIR, s.LOG_LEVEL)
     cost = s.round_trip_cost
+    # 0이면 설정값을 쓴다. 실거래(`strategy/intraday.py`)와 다른 트리거로 측정하면
+    # 스킬이 실거래의 스킬이 아니게 된다.
+    args.trigger = args.trigger or s.INTRADAY_TRIGGER_PCT
+    args.vol_mult = args.vol_mult or s.INTRADAY_VOL_MULT
     have = sorted(p.stem for p in Path(args.minute_dir).glob("*.csv"))
     if not have:
         logger.error(f"[Skill] {args.minute_dir} 에 분봉이 없습니다")

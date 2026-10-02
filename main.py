@@ -112,9 +112,14 @@ class TradingEngine:
             stop_pct=self.s.INTRADAY_STOP_PCT,
             trail_pct=self.s.INTRADAY_TRAIL_PCT,
             trail_activate_pct=self.s.INTRADAY_TRAIL_ACTIVATE_PCT,
-            flatten_hhmm=self.s.INTRADAY_FLATTEN_HHMM)
+            flatten_hhmm=self.s.INTRADAY_FLATTEN_HHMM,
+            candidate_ttl=self.s.INTRADAY_CANDIDATE_TTL,
+            swap_margin=self.s.INTRADAY_SWAP_MARGIN,
+            max_swaps=self.s.INTRADAY_MAX_SWAPS)
         self._intraday_queue: List[TriggerSignal] = []
         self._scanned_day: str = ""
+        # 진입 시점 점수. 교체 판정에 쓰므로 체결 때까지 들고 있어야 한다.
+        self._entry_scores: Dict[str, float] = {}
         # 대시보드 자산곡선/유량 그래프용 링버퍼 (메모리 상한 고정)
         self.equity_history: deque = deque(maxlen=720)
         self.rps_history: deque = deque(maxlen=90)
@@ -231,6 +236,18 @@ class TradingEngine:
             "scanned": len(rows), "subscribed": len(chosen),
             "top": [{"symbol": s_, "chg": round(c, 5), "vol_ratio": round(v, 3)}
                     for s_, c, v in pick[:10]]})
+
+    def _intraday_score(self, sig: TriggerSignal) -> float:
+        """돌파 사건의 선정 점수.
+
+        지금은 **신선도 고정 공식**이다. 분봉 모델을 쓰려면 이 함수만 바꾸면
+        되도록 분리해 뒀다 — 점수 산정이 감시기 밖에 있는 이유도 같다.
+
+        모델 전환은 측정이 끝난 뒤에 한다. 부분 데이터에서 모델 선택 평균이
+        무작위보다 낮았고(+0.567% vs +0.575%), 개선된 것은 꼬리뿐이었다
+        (P(+100%) 1.76배). 공정한 비교 전에 바꾸면 그 상태를 실거래로 들고 간다.
+        """
+        return float(sig.freshness)
 
     def _feed_intraday(self, symbol: str, price: float, cum_volume: float,
                        now: dt.datetime) -> None:
@@ -418,7 +435,10 @@ class TradingEngine:
                 # 장중 청산 감시도 **체결 시점**에 평단가로 시작한다. 접수 시점에는
                 # 평단가가 없어 목표·손절 기준이 어긋난다(위 손절선과 같은 이유).
                 if self.s.USE_INTRADAY:
-                    self.intraday.open_watch(fill.symbol, pos.avg_price)
+                    # 진입 점수를 함께 넣는다 — 교체 판정의 기준이 된다.
+                    self.intraday.open_watch(
+                        fill.symbol, pos.avg_price,
+                        self._entry_scores.get(fill.symbol, 0.0))
         if fill.side is Side.SELL:
             pos_after = self.portfolio.positions.get(fill.symbol)
             if pos_after is None or pos_after.qty <= 0:
@@ -752,20 +772,47 @@ class TradingEngine:
 
         # --- 장중 진입 (분봉 전략) ---
         if self.s.USE_INTRADAY:
+            # 발동한 사건을 **명부에 올린다.** 매 루프 비우면 같은 분에 동시 발동한
+            # 것들 사이에서만 고르게 되고, 실측에서 슬롯 2개가 09:00~09:01에 차는
+            # 날이 76.9%라 나머지 12건이 선택 기회 없이 버려졌다
+            # (`IntradayWatcher.pick_entries()` 주석 참고).
             queued, self._intraday_queue = self._intraday_queue, []
-            if self.risk.state != RiskState.NORMAL and queued:
-                logger.info(f"[장중] 리스크 상태 {self.risk.state} — 돌파 {len(queued)}건 보류")
-            elif queued:
-                # 마감 정리 시각 이후에는 새로 들어가지 않는다. 들어가도 곧 팔아야 한다.
-                if self.intraday.should_flatten(now):
+            for sig in queued:
+                self.intraday.add_candidate(sig, self._intraday_score(sig))
+
+            inflight = self.open_orders_symbols()
+            if self.risk.state != RiskState.NORMAL:
+                if queued:
+                    logger.info(f"[장중] 리스크 상태 {self.risk.state} — 돌파 {len(queued)}건 보류")
+            elif self.intraday.should_flatten(now):
+                if queued:
                     logger.info(f"[장중] 마감 정리 시각 — 돌파 {len(queued)}건 진입하지 않음")
-                    queued = []
-                # **신선도** 순으로 처리한다. 보유 한도(2종목)에 걸리면 뒤는 버려지므로
-                # 이 정렬이 사실상 종목 선정이다. 돌파율 순이 아닌 이유는
-                # `IntradayWatcher.freshness()` 주석에 있다 — 실측에서 폭증이 과하고
-                # 전일 거래대금을 이미 넘긴 사건이 더 나빴다.
-                for sig in sorted(queued, key=lambda x: -x.freshness):
-                    if sig.symbol in self.open_orders_symbols():
+            else:
+                held = set(self.portfolio.open_positions())
+                free = max(0, int(self.s.MAX_POSITIONS) - len(held | set(inflight)))
+                picks = self.intraday.pick_entries(now, free, exclude=set(inflight))
+                # 슬롯이 꽉 찼으면 교체를 검토한다. 매도만 내고, 매수는 슬롯이
+                # 비는 다음 루프에서 `pick_entries()`가 집는다.
+                if free <= 0:
+                    tgt = self.intraday.swap_target(now, exclude=set(inflight))
+                    if tgt is not None:
+                        drop, incoming = tgt
+                        pos = self.portfolio.positions.get(drop)
+                        if pos is not None and pos.qty > 0:
+                            px = prices.get(drop, pos.avg_price)
+                            ok = await self._submit(
+                                drop, Side.SELL, pos.qty, px,
+                                f"INTRADAY_SWAP|{incoming.symbol}로 교체")
+                            if ok:
+                                self.intraday.note_swap(incoming)
+                                logger.warning(
+                                    f"[장중·교체] {drop} 매도 → {incoming.symbol} "
+                                    f"({self.intraday.swaps_today}/{self.s.INTRADAY_MAX_SWAPS}회)")
+                                self.ledger.write("intraday_swap", {
+                                    "out": drop, "in": incoming.symbol,
+                                    "in_freshness": round(incoming.freshness, 4)})
+                for sig in picks:
+                    if sig.symbol in inflight:
                         continue
                     # 리스크 매니저가 모든 주문의 최종 관문이다. 장중 경로도 우회하지 않는다.
                     # 점수는 돌파 강도로 둔다 — 모델 점수가 아니므로 `bet=-1`(모델 없음)로
@@ -785,6 +832,9 @@ class TradingEngine:
                     if not decision.approved:
                         logger.info(f"[장중] {sig.symbol} 진입 거부 — {decision.reason}")
                         continue
+                    # 체결 시점에 `open_watch`가 교체 기준 점수로 쓴다. 접수와
+                    # 체결 사이에 신호 객체가 사라지므로 여기서 남겨 둔다.
+                    self._entry_scores[sig.symbol] = self._intraday_score(sig)
                     await self._submit(sig.symbol, Side.BUY, decision.qty, sig.price,
                                        f"INTRADAY|{sig.describe()}")
 

@@ -2,7 +2,6 @@
 
 제16회 뱅키스 대학생 모의투자대회(AI 부문) 대응 기록. 갱신 **2026-10-01**.
 대회 시작 **2026-10-12 — 11일 남음.**
-계획서: `C:\Users\young\.claude\plans\piped-churning-marshmallow.md`
 
 ---
 

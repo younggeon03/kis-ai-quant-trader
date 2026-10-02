@@ -109,6 +109,7 @@ class PositionWatch:
     entry: float
     peak: float = 0.0
     armed: bool = False            # 트레일링 발동 조건을 넘었는가
+    score: float = 0.0             # 진입 시점 점수 (교체 판정의 기준)
 
     def gain(self, price: float) -> float:
         return price / max(self.entry, _EPS) - 1.0
@@ -124,7 +125,10 @@ class IntradayWatcher:
     def __init__(self, trigger_pct: float = 0.03, vol_mult: float = 1.5,
                  target_pct: float = 0.0, stop_pct: float = 0.0,
                  trail_pct: float = 0.0, trail_activate_pct: float = 0.0,
-                 flatten_hhmm: str = "1515"):
+                 flatten_hhmm: str = "1515",
+                 candidate_ttl: int = 30,
+                 swap_margin: float = 0.10,
+                 max_swaps: int = 2):
         self.trigger_pct = float(trigger_pct)
         self.vol_mult = float(vol_mult)
         self.target_pct = float(target_pct)
@@ -132,8 +136,14 @@ class IntradayWatcher:
         self.trail_pct = float(trail_pct)
         self.trail_activate_pct = float(trail_activate_pct)
         self.flatten_hhmm = str(flatten_hhmm)
+        self.candidate_ttl = int(candidate_ttl)
+        self.swap_margin = float(swap_margin)
+        self.max_swaps = int(max_swaps)
         self.states: Dict[str, SymbolState] = {}
         self.watches: Dict[str, PositionWatch] = {}
+        # 후보 명부 — {종목: (신호, 점수)}. **매 분 비우지 않는다.**
+        self.book: Dict[str, tuple] = {}
+        self.swaps_today: int = 0
         self._day: str = ""
 
     # ------------------------------------------------------------ 준비
@@ -158,6 +168,8 @@ class IntradayWatcher:
             st.half_minute = -1
             st.minute_index = 0
         self.watches.clear()
+        self.book.clear()
+        self.swaps_today = 0
 
     def vol_floor(self, symbol: str) -> float:
         """분당 거래량 하한. 전일 거래량을 모르면 0(조건 없음)이다."""
@@ -259,14 +271,108 @@ class IntradayWatcher:
         calm = 1.0 - min(1.0, max(0.0, burst) / 20.0)
         return float(0.25 * (early + fast + quiet + calm))
 
+    # ------------------------------------------------------- 후보 명부·교체
+    def add_candidate(self, sig: TriggerSignal, score: float) -> None:
+        """발동한 사건을 명부에 올린다. 점수는 **호출자가 정한다.**
+
+        점수 산정을 감시기 밖에 두는 이유는, 모델 점수와 고정 공식(신선도)을
+        같은 구조에서 바꿔 끼워 비교해야 하기 때문이다. 감시기가 점수까지
+        계산하면 그 비교가 코드 수정 없이는 불가능해진다.
+        """
+        self.book[sig.symbol] = (sig, float(score))
+
+    def prune_book(self, now: dt.datetime) -> None:
+        """오래된 후보를 버린다.
+
+        돌파 후 시간이 지나면 그 정보는 낡는다 — 실측에서 `trig_minute`가
+        36.8분(상위 25%) vs 74.9분(하위 75%)으로 **이른 돌파가 좋다**. 몇 시간 전
+        돌파를 지금 사는 것은 그 신호를 거스른다. `candidate_ttl`분만 보관한다.
+        """
+        if not self.book:
+            return
+        cutoff = now - dt.timedelta(minutes=self.candidate_ttl)
+        for sym in [s for s, (sig, _) in self.book.items() if sig.ts < cutoff]:
+            self.book.pop(sym, None)
+
+    def pick_entries(self, now: dt.datetime, free_slots: int,
+                     exclude: Optional[set] = None) -> List[TriggerSignal]:
+        """빈 슬롯을 명부의 상위 점수로 채운다.
+
+        ## 왜 명부가 필요한가 (겪은 설계 결함)
+
+        처음에는 발동 신호를 **매 분 비웠다**(`pending = []`). 그래서 같은 분에
+        동시 발동한 것들 사이에서만 골랐다. 실측에서 하루 돌파가 중앙 14건인데
+        경과분이 중앙 15분 · p75 82분 · p90 253분으로 **시간에 흩어져 있고**,
+        2번째 돌파가 5분 안에 나는 날이 **76.9%**였다. 즉 슬롯 2개가 09:00~09:01에
+        차고 나머지 12건은 **선택 기회조차 없이 버려졌다.**
+
+        결과적으로 "하루의 첫 2건"을 사는 전략이었고, 모델도 신선도도 쓰이지
+        않았다. 점수를 아무리 잘 만들어도 개입할 자리가 없었다.
+
+        명부에 `candidate_ttl`분 보관하면 선택이 하루 종일 작동한다.
+        """
+        self.prune_book(now)
+        skip = set(exclude or set()) | set(self.watches)
+        cand = [(sig, sc) for sym, (sig, sc) in self.book.items() if sym not in skip]
+        cand.sort(key=lambda x: -x[1])
+        picked = [sig for sig, _ in cand[: max(0, free_slots)]]
+        for sig in picked:
+            self.book.pop(sig.symbol, None)
+        return picked
+
+    def swap_target(self, now: dt.datetime,
+                    exclude: Optional[set] = None
+                    ) -> Optional[Tuple[str, TriggerSignal]]:
+        """슬롯이 꽉 찼을 때 **갈아탈 대상**. (내보낼 종목, 들일 신호) 또는 `None`.
+
+        점수가 가장 낮은 보유 종목과 명부 최고 점수를 비교해, 차이가
+        `swap_margin`을 넘을 때만 교체한다.
+
+        ## 여유(margin)가 필요한 이유
+
+        교체는 왕복비용 0.278%를 즉시 지불한다. 점수가 조금만 높은 후보로 계속
+        갈아타면 비용만 쌓인다(일봉 전략에서 `MIN_HOLDING_BARS`를 둔 것과 같은
+        이유다). 그리고 하루 교체 횟수를 `max_swaps`로 제한한다 — 명부가 계속
+        갱신되므로 제한이 없으면 이론상 하루 수십 번 갈아탈 수 있다.
+
+        보유 종목의 평가손익은 보지 않는다. 점수는 "이 급등이 계속 갈 확률"이고
+        그 질문은 이미 올랐든 안 올랐든 같다. 손익으로 판단하면 손절·익절 규칙과
+        역할이 겹쳐 어느 쪽이 작동했는지 알 수 없게 된다.
+        """
+        if self.swaps_today >= self.max_swaps or not self.watches:
+            return None
+        self.prune_book(now)
+        skip = set(exclude or set()) | set(self.watches)
+        cand = [(sig, sc) for sym, (sig, sc) in self.book.items() if sym not in skip]
+        if not cand:
+            return None
+        best_sig, best_sc = max(cand, key=lambda x: x[1])
+        worst = min(self.watches.values(), key=lambda w: w.score)
+        if best_sc - worst.score <= self.swap_margin:
+            return None
+        return worst.symbol, best_sig
+
+    def note_swap(self, sig: TriggerSignal) -> None:
+        """교체를 실행했음을 기록한다. 호출자가 **매도 주문을 낸 뒤** 부른다.
+
+        후보를 명부에서 **빼지 않는다.** 매도가 체결돼 슬롯이 비면 다음 루프의
+        `pick_entries()`가 그 후보를 집어 매수한다. 매도와 매수를 같은 루프에서
+        내면 브로커 가용금액이 `cash - reserved`라 매도 대금이 들어오기 전이어서
+        "주문가능금액 부족"으로 거부된다(비중 45%로 실제 겪었다).
+
+        매도가 실패하면 교체 횟수만 소모된다. 하루 한도를 넘지 않게 하는 쪽이
+        안전하므로 그대로 둔다.
+        """
+        self.swaps_today += 1
+
     # ------------------------------------------------------------ 청산
-    def open_watch(self, symbol: str, entry: float) -> None:
+    def open_watch(self, symbol: str, entry: float, score: float = 0.0) -> None:
         """체결된 포지션의 청산 감시를 시작한다. **접수가 아니라 체결 시점**에
         부른다 — 접수 시점에는 평단가가 없어 목표·손절 기준이 어긋난다
         (`main.py::_on_fill_event`가 손절선을 체결 시점에 잡는 것과 같은 이유다)."""
         if entry > 0:
             self.watches[symbol] = PositionWatch(symbol=symbol, entry=float(entry),
-                                                 peak=float(entry))
+                                                 peak=float(entry), score=float(score))
 
     def close_watch(self, symbol: str) -> None:
         self.watches.pop(symbol, None)
