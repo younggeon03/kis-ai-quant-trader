@@ -90,6 +90,10 @@ def make_settings() -> Settings:
     s.REST_RATE_LIMIT = 20.0
     s.REST_BURST = 10
     s.MIN_TRADING_VALUE = 0.0
+    # 사이징 모드를 고정한다. `.env`가 `fixed`면 변동성 타게팅 검증이 성립하지
+    # 않는데, 테스트가 환경 설정에 좌우되면 무엇을 검증하는지 알 수 없어진다.
+    # fixed 모드는 같은 테스트 안에서 따로 검증한다.
+    s.SIZING_MODE = "vol_target"
     return s
 
 
@@ -324,6 +328,25 @@ def test_risk_manager():
     q_calm = risk.evaluate_entry(calm, pf).qty
     q_wild = risk.evaluate_entry(wild, pf).qty
     assert q_calm > q_wild, f"변동성 타게팅 미작동 ({q_calm} vs {q_wild})"
+
+    # --- 고정 비중 모드 ---
+    # 변동성·켈리·레짐을 곱하지 않으므로 변동성이 달라도 비중이 같아야 하고,
+    # 실제로 `FIXED_POSITION_WEIGHT`에 닿아야 한다. 이 모드가 없으면 돌파 진입이
+    # 종목당 6~14%로 들어가 측정한 구조(2종목 x 42%)와 달라진다.
+    s_fixed = s.model_copy(deep=True)
+    s_fixed.SIZING_MODE = "fixed"
+    s_fixed.FIXED_POSITION_WEIGHT = 0.42
+    s_fixed.MAX_POSITION_WEIGHT = 0.42
+    s_fixed.MAX_SECTOR_WEIGHT = 0.35          # fixed 모드는 섹터 상한을 면제한다
+    risk_fixed = RiskManager(s_fixed)
+    pf2 = Portfolio(cash=100_000_000.0, initial_capital=100_000_000.0)
+    d_calm = risk_fixed.evaluate_entry(calm, pf2)
+    d_wild = risk_fixed.evaluate_entry(wild, pf2)
+    assert d_calm.approved and d_wild.approved, "고정 모드에서 진입 거부"
+    assert d_calm.qty == d_wild.qty, (
+        f"고정 모드인데 변동성이 수량을 바꿨다 ({d_calm.qty} vs {d_wild.qty})")
+    w_fixed = d_calm.qty * calm.price / pf2.equity
+    assert 0.40 <= w_fixed <= 0.42, f"고정 비중이 목표에서 벗어남 {w_fixed:.3f}"
 
     # 대회 규정 관문: 1,000원 미만 매수 불가
     cheap = Signal(symbol=s.UNIVERSE[0], score=0.6, price=900, atr=30, volatility=0.3)

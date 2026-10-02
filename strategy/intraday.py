@@ -65,6 +65,8 @@ class SymbolState:
     last_price: float = 0.0
     session_high: float = 0.0
     triggered: bool = False        # 오늘 이미 발동했는가 (하루 한 번)
+    half_minute: int = -1          # 돌파선 절반을 처음 지난 분 (급등 속도의 분모)
+    minute_index: int = 0          # 09:00부터 경과 분
 
     @property
     def minute_volume(self) -> float:
@@ -82,6 +84,11 @@ class TriggerSignal:
     minute_volume: float
     vol_floor: float
     ts: dt.datetime
+    trig_minute: int = 0           # 09:00부터 경과 분
+    speed: int = 0                 # 절반 돌파에서 완전 돌파까지 걸린 분
+    turnover_ratio: float = 0.0    # 오늘 누적 거래량 / 전일 거래량
+    burst: float = 0.0             # 이번 분 거래량 / 전일 분당 평균
+    freshness: float = 0.0         # 0~1, 높을수록 '덜 돌고 빠른' 급등
 
     @property
     def level_pct(self) -> float:
@@ -89,7 +96,9 @@ class TriggerSignal:
 
     def describe(self) -> str:
         return (f"장중 돌파 {self.level_pct:+.2%} "
-                f"(거래량 {self.minute_volume:,.0f} ≥ {self.vol_floor:,.0f})")
+                f"(거래량 {self.minute_volume:,.0f} ≥ {self.vol_floor:,.0f} · "
+                f"{self.trig_minute}분 · 속도 {self.speed}분 · "
+                f"누적 {self.turnover_ratio:.2f}배 · 신선도 {self.freshness:.3f})")
 
 
 @dataclass
@@ -146,6 +155,8 @@ class IntradayWatcher:
             st.cum_volume = 0.0
             st.session_high = 0.0
             st.triggered = False
+            st.half_minute = -1
+            st.minute_index = 0
         self.watches.clear()
 
     def vol_floor(self, symbol: str) -> float:
@@ -172,6 +183,11 @@ class IntradayWatcher:
             # 분이 바뀌었다. 이번 분의 기준 누적값을 지금 값으로 잡는다.
             st.minute_key = key
             st.minute_vol_base = max(st.cum_volume, 0.0)
+        st.minute_index = max(0, (ts.hour - 9) * 60 + ts.minute)
+        # 돌파선 **절반**을 처음 지난 분. 거기서 완전 돌파까지 걸린 시간이 급등
+        # 속도이고, 실측에서 빠른 급등이 좋았다(37분 vs 64분).
+        if st.half_minute < 0 and price >= st.prev_close * (1.0 + self.trigger_pct / 2.0):
+            st.half_minute = st.minute_index
         # 누적거래량은 단조증가다. 역행하면(장 리셋·데이터 오류) 기준을 다시 잡는다.
         if cum_volume + _EPS < st.cum_volume:
             st.minute_vol_base = 0.0
@@ -188,8 +204,60 @@ class IntradayWatcher:
             return None
 
         st.triggered = True
-        return TriggerSignal(symbol=symbol, price=price, prev_close=st.prev_close,
-                             minute_volume=st.minute_volume, vol_floor=floor, ts=ts)
+        speed = max(0, st.minute_index - (st.half_minute if st.half_minute >= 0
+                                          else st.minute_index))
+        turnover_ratio = (st.cum_volume / st.prev_volume) if st.prev_volume > 0 else 0.0
+        per_min = (st.prev_volume / SESSION_MINUTES) if st.prev_volume > 0 else 0.0
+        burst = (st.minute_volume / per_min) if per_min > 0 else 0.0
+        return TriggerSignal(
+            symbol=symbol, price=price, prev_close=st.prev_close,
+            minute_volume=st.minute_volume, vol_floor=floor, ts=ts,
+            trig_minute=st.minute_index, speed=speed,
+            turnover_ratio=turnover_ratio, burst=burst,
+            freshness=self.freshness(st.minute_index, speed, turnover_ratio, burst))
+
+    # ------------------------------------------------------------ 신선도
+    @staticmethod
+    def freshness(trig_minute: int, speed: int, turnover_ratio: float,
+                  burst: float) -> float:
+        """0~1. 높을수록 "덜 돌고 빠른" 급등이다.
+
+        ## 왜 돌파율이 아니라 신선도로 고르는가
+
+        하루에 돌파 사건이 여러 건 나오는데 보유 한도는 2종목이다. 무엇을 고르느냐가
+        `tail_optimizer` 기준 `P(+100%)`를 1.04%(무작위)에서 6.17%(스킬 20%)까지
+        바꾼다 — 구조보다 큰 레버다.
+
+        처음에는 돌파율이 큰 순서로 골랐다. 그런데 실측은 그 방향이 **반대**라고
+        말한다. 종가 수익률 상위 25% 사건과 나머지를 비교하면:
+
+        | 피처 | 상위군 | 하위군 | 방향 |
+        |---|---|---|---|
+        | 돌파 시각 | 62분 | 106분 | 이를수록 좋다 |
+        | +5%→돌파 속도 | 37분 | 64분 | 빠를수록 좋다 |
+        | 누적/전일 거래대금 | 0.99 | 1.30 | **덜 돌았을수록 좋다** |
+        | 폭증 배수 | 10.7 | 15.6 | **과하지 않을수록 좋다** |
+
+        뒤 두 개가 직관과 반대다. 폭증이 과하고 전일 거래대금을 이미 넘겼다면
+        소재가 터진 직후가 아니라 **터지고 한참 지난 뒤**다. 네 피처가 같은 축을
+        가리킨다 — 신선도다.
+
+        ## 왜 모델이 아니라 고정 공식인가
+
+        분봉 모델은 부분 데이터(97종목)에서 AUC 0.5435, 스킬 0%였고 선택이 무작위
+        보다 나빴다. 정보 없는 피처 6개가 중요도의 35%를 먹으면서 노이즈를 넣은
+        것이 원인으로 보인다. 전 표본 재측정 전에 모델을 쓰면 그 상태를 그대로
+        실거래에 들고 간다. 고정 공식은 과적합 여지가 없고 지금 적용할 수 있다.
+
+        네 항목에 같은 가중(0.25)을 준다. 가중을 데이터로 맞추면 그 순간 모델이
+        되고 과적합 여지가 생긴다. 정규화 분모는 실측 분포의 하위군 수준으로
+        잡았다 — 60분, 2.0배, 20배.
+        """
+        early = 1.0 - min(1.0, max(0, trig_minute) / float(SESSION_MINUTES))
+        fast = 1.0 - min(1.0, max(0, speed) / 60.0)
+        quiet = 1.0 - min(1.0, max(0.0, turnover_ratio) / 2.0)
+        calm = 1.0 - min(1.0, max(0.0, burst) / 20.0)
+        return float(0.25 * (early + fast + quiet + calm))
 
     # ------------------------------------------------------------ 청산
     def open_watch(self, symbol: str, entry: float) -> None:

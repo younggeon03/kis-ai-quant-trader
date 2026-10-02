@@ -687,8 +687,11 @@ class TradingEngine:
                 if self.intraday.should_flatten(now):
                     logger.info(f"[장중] 마감 정리 시각 — 돌파 {len(queued)}건 진입하지 않음")
                     queued = []
-                # 돌파 강도가 센 순서로 처리한다. 보유 한도에 걸리면 뒤는 버려진다.
-                for sig in sorted(queued, key=lambda x: -x.level_pct):
+                # **신선도** 순으로 처리한다. 보유 한도(2종목)에 걸리면 뒤는 버려지므로
+                # 이 정렬이 사실상 종목 선정이다. 돌파율 순이 아닌 이유는
+                # `IntradayWatcher.freshness()` 주석에 있다 — 실측에서 폭증이 과하고
+                # 전일 거래대금을 이미 넘긴 사건이 더 나빴다.
+                for sig in sorted(queued, key=lambda x: -x.freshness):
                     if sig.symbol in self.open_orders_symbols():
                         continue
                     # 리스크 매니저가 모든 주문의 최종 관문이다. 장중 경로도 우회하지 않는다.
