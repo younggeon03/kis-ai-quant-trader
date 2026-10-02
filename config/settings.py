@@ -230,8 +230,20 @@ class Settings(BaseSettings):
         default="vol_target",
         description="포지션 사이징 방식 — vol_target(변동성 타게팅) | fixed(고정 비중)")
     FIXED_POSITION_WEIGHT: float = Field(
-        default=0.45,
-        description="고정 비중 모드의 종목당 목표 비중. 규정 상한 50% 아래로 여유를 둔다")
+        default=0.42,
+        description="고정 비중 모드의 종목당 목표 비중")
+    # 왜 45%가 아니라 42%인가 (실측)
+    #
+    # 측정 최적은 2종목 x 45%였는데, 그대로 두면 45+45=90%가 `MAX_GROSS_EXPOSURE`
+    # (0.9)와 **정확히 같아** 수수료·슬리피지만 얹혀도 넘친다. 여기에 부분 체결이
+    # 겹치면 더 나쁘다 — 브로커 가용금액은 `cash - reserved`이고, 첫 주문이 체결을
+    # 마치기 전에는 예약금이 잡혀 있어 두 번째 진입이 "주문가능금액 부족"으로
+    # 거부된다(Mock 스모크에서 실제로 발생).
+    #
+    # 거부가 나면 **조용히 1종목 구조가 된다.** `tail_optimizer` 기준 P(+100%)가
+    # 2종목 1.04% → 1종목 0.50%로 반토막이고, 측정한 분포와 실거래가 갈라지는
+    # 가장 나쁜 형태다. 그래서 42+42=84%로 6%p 여유를 둔다. 종목당 노출이 3%p
+    # 줄어 꼬리가 약간 얇아지는 것이 그 대가다.
     KELLY_FRACTION: float = Field(default=0.25, description="Fractional Kelly 계수(1/4 Kelly)")
     KELLY_MAX_WEIGHT: float = Field(default=0.20)
     STOP_LOSS_PCT: float = Field(
