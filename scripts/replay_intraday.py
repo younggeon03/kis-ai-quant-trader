@@ -192,6 +192,12 @@ def main() -> int:
     ap.add_argument("--days", type=int, default=0, help="최근 N거래일만(0=전체)")
     ap.add_argument("--per-day", type=int, default=2)
     ap.add_argument("--weight", type=float, default=0.42)
+    ap.add_argument("--vol-mult", type=float, default=0.0,
+                    help="돌파 봉 거래량 하한 배수를 덮어쓴다(0=설정값 사용). "
+                         "장 시작 직후는 거래가 원래 많아(10분에 하루의 9.7%) "
+                         "하한이 낮으면 09:00 노이즈가 전부 통과한다")
+    ap.add_argument("--trigger", type=float, default=0.0,
+                    help="돌파 기준을 덮어쓴다(0=설정값 사용)")
     ap.add_argument("--out", default="reports/replay_intraday.json")
     args = ap.parse_args()
 
@@ -204,8 +210,9 @@ def main() -> int:
         return 1
     bars = load_minutes(args.minute_dir, syms)
     daily = load_panel_from_dir(args.source, list(bars))
-    logger.info(f"[Replay] 분봉 {len(bars)}종목 · 설정 트리거 +{s.INTRADAY_TRIGGER_PCT:.0%} "
-                f"· 거래량 x{s.INTRADAY_VOL_MULT} · 마감 {s.INTRADAY_FLATTEN_HHMM}")
+    logger.info(f"[Replay] 분봉 {len(bars)}종목 · 트리거 "
+                f"+{(args.trigger or s.INTRADAY_TRIGGER_PCT):.1%} · 거래량 x"
+                f"{(args.vol_mult or s.INTRADAY_VOL_MULT)} · 마감 {s.INTRADAY_FLATTEN_HHMM}")
 
     # 전일 종가·거래량. 일봉에서 가져온다 — 분봉만으로는 '전일 대비'를 모른다.
     prev_map: Dict[str, Dict[str, Tuple[float, float]]] = {}
@@ -240,8 +247,10 @@ def main() -> int:
                     g["cum"].astype(float))))
     logger.info("[Replay] 날짜별 분할 완료")
 
+    trig = args.trigger or s.INTRADAY_TRIGGER_PCT
+    vmult = args.vol_mult or s.INTRADAY_VOL_MULT
     w = IntradayWatcher(
-        trigger_pct=s.INTRADAY_TRIGGER_PCT, vol_mult=s.INTRADAY_VOL_MULT,
+        trigger_pct=trig, vol_mult=vmult,
         target_pct=s.INTRADAY_TARGET_PCT, stop_pct=s.INTRADAY_STOP_PCT,
         trail_pct=s.INTRADAY_TRAIL_PCT,
         trail_activate_pct=s.INTRADAY_TRAIL_ACTIVATE_PCT,
@@ -313,7 +322,7 @@ def main() -> int:
     out.write_text(json.dumps({
         "config": {"symbols": len(bars), "days": len(days), "per_day": args.per_day,
                    "weight": args.weight, "cost": cost,
-                   "trigger": s.INTRADAY_TRIGGER_PCT, "vol_mult": s.INTRADAY_VOL_MULT,
+                   "trigger": trig, "vol_mult": vmult,
                    "flatten": s.INTRADAY_FLATTEN_HHMM},
         "validation": {"triggers": tot_trig, "entries": len(tmins),
                        "flatten_closes": flatten_closes,
