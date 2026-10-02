@@ -223,6 +223,19 @@ class Settings(BaseSettings):
     INTRADAY_TRAIL_PCT: float = Field(default=0.0, description="장중 트레일링 폭(0=미적용)")
     INTRADAY_TRAIL_ACTIVATE_PCT: float = Field(
         default=0.0, description="트레일링 발동 수익률")
+    # 아침 후보 스캔 — 유니버스 스냅샷에 의존하지 않기 위한 장치.
+    # `config/universe.json`은 생성 시점(2026-09-29)에 거래대금 상위였던 종목이고,
+    # 거래대금 하한은 측정에서 **"그날 뭔가 돌고 있던 종목"을 남기는 필터**로
+    # 작동했다(하한을 낮추면 p95 변동성이 12.80%→5.32%로 떨어진다). 즉 그 목록은
+    # 생성 시점의 테마다. 대회 기간엔 다른 종목이 돈다.
+    #
+    # 그래서 매일 아침 전 후보의 상승률·거래량을 한 번 훑어 **오늘 움직이는** 종목을
+    # 구독한다. 구독 한도가 41건이라 상시 전 종목 감시는 불가능하다.
+    INTRADAY_SCAN_HHMM: str = Field(
+        default="0905", description="아침 후보 스캔 시각(HHMM). 이 시각 이후 첫 루프에 1회")
+    INTRADAY_SCAN_TOP: int = Field(
+        default=40, description="스캔 결과 상위 몇 종목을 구독할지(WS 한도 이하)")
+
     INTRADAY_FLATTEN_HHMM: str = Field(
         default="1515", description="마감 정리 시각(HHMM). 오버나이트를 만들지 않는다")
 

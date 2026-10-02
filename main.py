@@ -114,6 +114,7 @@ class TradingEngine:
             trail_activate_pct=self.s.INTRADAY_TRAIL_ACTIVATE_PCT,
             flatten_hhmm=self.s.INTRADAY_FLATTEN_HHMM)
         self._intraday_queue: List[TriggerSignal] = []
+        self._scanned_day: str = ""
         # 대시보드 자산곡선/유량 그래프용 링버퍼 (메모리 상한 고정)
         self.equity_history: deque = deque(maxlen=720)
         self.rps_history: deque = deque(maxlen=90)
@@ -160,6 +161,76 @@ class TradingEngine:
             logger.info(f"[장중] 전일 기준 {primed}종목 적재 "
                         f"(돌파 +{self.s.INTRADAY_TRIGGER_PCT:.1%}, "
                         f"거래량 x{self.s.INTRADAY_VOL_MULT})")
+
+    async def _scan_candidates(self, now: dt.datetime) -> None:
+        """아침에 전 후보의 상승률·거래량을 한 번 훑어 **오늘 움직이는** 종목을 구독한다.
+
+        ## 왜 필요한가
+
+        `config/universe.json`은 생성 시점(2026-09-29)의 거래대금 상위 목록이다.
+        거래대금 하한은 측정에서 "그날 뭔가 돌고 있던 종목을 남기는 필터"로
+        작동했다 — 하한을 낮추면 p95 변동성이 12.80%에서 5.32%로 **떨어진다**.
+        즉 그 목록은 생성 시점의 테마이고, 대회 30일 사이엔 다른 종목이 돈다.
+        스냅샷에 묶이면 대회 기간의 신선한 테마를 전부 놓친다.
+
+        ## 왜 KIS로 조회하는가
+
+        토스에 순위 API(`/api/v1/rankings`)가 있지만 우리 자격증명에 권한이 없고
+        (검증 400 뒤 인가 401), 무엇보다 **이 세션에서 토스 IP가 여섯 번 끊겼다.**
+        주문이 KIS로 나가니 조회도 KIS로 해서 실거래 경로의 의존성을 하나로 둔다.
+
+        유량은 걱정하지 않아도 된다. `PriorityRateLimiter`가 시세를 P2, 주문을 P0로
+        두므로 스캔이 몰려도 손절 주문이 밀리지 않는다.
+        """
+        if not self.s.USE_INTRADAY:
+            return
+        day = now.strftime("%Y%m%d")
+        if self._scanned_day == day or now.strftime("%H%M") < self.s.INTRADAY_SCAN_HHMM:
+            return
+        self._scanned_day = day          # 실패해도 하루 한 번만 시도한다
+        pool = [s_ for s_ in self.s.UNIVERSE if s_ not in self.portfolio.open_positions()]
+        logger.info(f"[장중·스캔] 후보 {len(pool)}종목 상승률 조회 시작")
+        rows: List[tuple] = []
+        for symbol in pool:
+            try:
+                q = await self.broker.get_quote(symbol)
+            except Exception as exc:
+                logger.debug(f"[장중·스캔] {symbol} 실패: {exc}")
+                continue
+            if q is None or q.price <= 0:
+                continue
+            self.latest_prices[symbol] = q.price
+            st = self.intraday.states.get(symbol)
+            prev_close = st.prev_close if st else 0.0
+            if prev_close <= 0:
+                continue
+            chg = q.price / prev_close - 1.0
+            # 전일 거래량 대비 오늘 누적 — 아직 덜 돈 종목을 선호한다(신선도).
+            ratio = (q.volume / st.prev_volume) if (st and st.prev_volume > 0) else 0.0
+            rows.append((symbol, chg, ratio))
+        if not rows:
+            logger.warning("[장중·스캔] 유효한 시세가 없어 관심목록을 바꾸지 않습니다")
+            return
+
+        # 이미 돌파선을 넘긴 종목은 지금 들어가도 늦다(신선도 측정). 아직 아래에
+        # 있으면서 많이 오른 종목이 오늘 돌파할 후보다.
+        below = [r for r in rows if r[1] < self.s.INTRADAY_TRIGGER_PCT]
+        pick = sorted(below or rows, key=lambda r: -r[1])
+        cap = max(1, min(int(self.s.INTRADAY_SCAN_TOP), int(self.s.WS_MAX_SUBSCRIPTIONS)))
+        held = list(self.portfolio.open_positions())
+        chosen = held + [r[0] for r in pick][: max(0, cap - len(held))]
+        self.watchlist = chosen
+        if self.ws is not None:
+            try:
+                await self.ws.subscribe_symbols(chosen, orderbook=False)
+            except Exception as exc:
+                logger.warning(f"[장중·스캔] 재구독 실패: {exc}")
+        top = ", ".join(f"{s_}{c:+.1%}" for s_, c, _ in pick[:5])
+        logger.info(f"[장중·스캔] {len(rows)}종목 조회 → {len(chosen)}종목 구독 (상위: {top})")
+        self.ledger.write("intraday_scan", {
+            "scanned": len(rows), "subscribed": len(chosen),
+            "top": [{"symbol": s_, "chg": round(c, 5), "vol_ratio": round(v, 3)}
+                    for s_, c, v in pick[:10]]})
 
     def _feed_intraday(self, symbol: str, price: float, cum_volume: float,
                        now: dt.datetime) -> None:
@@ -603,6 +674,8 @@ class TradingEngine:
         self._apply_latest_prices_to_panel()
         if self.s.USE_INTRADAY and self._loops % BAR_REFRESH_LOOPS == 0:
             self._prime_intraday()
+        # 아침 후보 스캔(하루 1회). 전일 기준 적재 뒤여야 상승률을 계산할 수 있다.
+        await self._scan_candidates(now)
 
         # --- 평가 및 리스크 상태 ---
         prices = {s: p for s, p in self.latest_prices.items() if p > 0}
