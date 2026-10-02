@@ -836,6 +836,54 @@ def test_selection_and_phase():
 
 
 # ============================================================ 16. 패널 정렬
+@check("17. 장중 돌파 감시·청산")
+def test_intraday():
+    """분봉 전략의 집행 레이어. 네트워크 없이 순수 로직만 검증한다.
+
+    가격·거래량 **동시** 조건, 누적거래량 차분으로 만드는 분당 거래량, 하루 1회
+    발동, 청산 우선순위(손절 > 트레일링 > 익절 > 마감정리), 날짜 롤오버를 본다.
+    롤오버가 깨지면 **어제 발동한 종목이 오늘 영원히 발동하지 않는다.**
+    """
+    import datetime as dt
+    from strategy.intraday import IntradayWatcher
+
+    w = IntradayWatcher(trigger_pct=0.03, vol_mult=1.5, stop_pct=0.05,
+                        trail_pct=0.03, trail_activate_pct=0.05, flatten_hhmm="1515")
+    w.prime("A", prev_close=10_000.0, prev_volume=391_000.0)   # 분당 1,000주 → 하한 1,500
+    base = dt.datetime(2026, 10, 12, 9, 0)
+
+    def q(mi, price, cum):
+        return w.on_quote("A", price, cum, base + dt.timedelta(minutes=mi))
+
+    assert abs(w.vol_floor("A") - 1500.0) < 1e-6, f"하한 {w.vol_floor('A')}"
+    assert q(0, 10_100, 500) is None, "가격 미달인데 발동"
+    assert q(1, 10_400, 1_000) is None, "거래량 미달인데 발동"
+    sig = q(1, 10_400, 2_600)          # 같은 분 누적 2,600 → 이번 분 2,100주
+    assert sig is not None, "가격·거래량 모두 충족인데 미발동"
+    assert abs(sig.level_pct - 0.04) < 1e-6, f"돌파율 {sig.level_pct}"
+    assert q(2, 10_800, 9_000) is None, "하루 두 번 발동"
+
+    # --- 청산 우선순위 ---
+    w.open_watch("A", 10_400.0)
+    t = base + dt.timedelta(minutes=30)
+    assert w.exit_reason("A", 10_700.0, t) is None, "+2.9%에서 청산"
+    assert w.exit_reason("A", 11_000.0, t) is None, "고점 갱신 중 청산"
+    assert w.exit_reason("A", 10_900.0, t) is None, "고점 대비 -0.9%에서 청산"
+    assert "트레일링" in (w.exit_reason("A", 10_650.0, t) or ""), "트레일링 미작동"
+    w.open_watch("A", 10_400.0)
+    assert "손절" in (w.exit_reason("A", 9_800.0, t) or ""), "손절 미작동"
+    w.open_watch("A", 10_400.0)
+    assert "마감" in (w.exit_reason("A", 10_400.0,
+                                  dt.datetime(2026, 10, 12, 15, 16)) or ""), "마감 정리 미작동"
+
+    # --- 날짜 롤오버 ---
+    w.reset_day("20261013")
+    nxt = w.on_quote("A", 10_400.0, 99_999.0, dt.datetime(2026, 10, 13, 9, 0))
+    assert nxt is not None, "날짜가 바뀌었는데 발동 이력이 남아 있다"
+    return ("가격·거래량 동시 조건 · 분당 차분 · 하루 1회 · "
+            "청산 우선순위(손절>트레일>익절>마감) · 롤오버 모두 작동")
+
+
 @check("16. 패널 정렬 이력 하한")
 def test_panel_min_bars():
     """상장이 늦은 종목이 전체 백테스트 구간을 잘라내지 않는지.
@@ -876,6 +924,7 @@ async def run_all() -> int:
         test_risk_manager, test_features, test_backtest, test_event_bus,
         test_live_client_offline, test_validation, test_weights_and_bets,
         test_competition_rules, test_selection_and_phase, test_panel_min_bars,
+        test_intraday,
     ]
     print("\n" + "=" * 86)
     print(" KIS AI Quant Trader — 셀프 테스트")

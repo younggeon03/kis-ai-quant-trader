@@ -58,6 +58,7 @@ from monitor.app import DashboardServer
 from strategy.ai_model import EnsembleAlphaStrategy
 from strategy.risk_manager import ExitOrder, RiskManager, RiskState
 from strategy.selection import select_entries, select_rotation_exits
+from strategy.intraday import IntradayWatcher, TriggerSignal
 from strategy.phase import current_phase, phase_config, reset_recommendation
 from utils.krx_calendar import KRXCalendar, MarketSession
 from utils.logger import JsonLedger, logger, setup_logging
@@ -92,6 +93,7 @@ class TradingEngine:
         self.panel: Dict[str, pd.DataFrame] = {}
         self.latest_prices: Dict[str, float] = {}
         self.atr_map: Dict[str, float] = {}
+        self.vol_map: Dict[str, float] = {}
         # 대회 국면 — 날짜로 결정되며 기간 밖에서는 OFF(평소 동작)다.
         self.phase = phase_config(settings=self.s)
         self._last_phase = self.phase.phase
@@ -100,6 +102,18 @@ class TradingEngine:
         self.score_map: Dict[str, float] = {}
         self.recent_fills: List[Dict[str, Any]] = []
         self.open_orders: Dict[str, Dict[str, Any]] = {}
+        # --- 장중 분봉 전략 (strategy/intraday.py) ---
+        # `USE_INTRADAY`가 꺼져 있어도 생성한다. 조건 분기를 한 곳(`_feed_intraday`)에
+        # 모아 두면 켜고 끌 때 다른 경로를 건드리지 않는다.
+        self.intraday = IntradayWatcher(
+            trigger_pct=self.s.INTRADAY_TRIGGER_PCT,
+            vol_mult=self.s.INTRADAY_VOL_MULT,
+            target_pct=self.s.INTRADAY_TARGET_PCT,
+            stop_pct=self.s.INTRADAY_STOP_PCT,
+            trail_pct=self.s.INTRADAY_TRAIL_PCT,
+            trail_activate_pct=self.s.INTRADAY_TRAIL_ACTIVATE_PCT,
+            flatten_hhmm=self.s.INTRADAY_FLATTEN_HHMM)
+        self._intraday_queue: List[TriggerSignal] = []
         # 대시보드 자산곡선/유량 그래프용 링버퍼 (메모리 상한 고정)
         self.equity_history: deque = deque(maxlen=720)
         self.rps_history: deque = deque(maxlen=90)
@@ -117,6 +131,55 @@ class TradingEngine:
         self._started_at: Optional[dt.datetime] = None
 
     # ================================================================== 시간
+    def _prime_intraday(self) -> None:
+        """일봉 패널에서 전일 종가·거래량을 감시기에 넣는다.
+
+        전일 **거래량**이 분당 하한의 기준이므로 종가만으로는 트리거가 성립하지
+        않는다. 일봉이 갱신될 때마다 다시 넣어야 날짜가 밀리지 않는다.
+        """
+        if not self.s.USE_INTRADAY:
+            return
+        today = self._now().strftime("%Y%m%d")
+        primed = 0
+        for symbol, df in self.panel.items():
+            if df is None or len(df) < 2:
+                continue
+            # **마지막 봉이 오늘일 수 있다.** `_apply_latest_prices_to_panel()`이
+            # 마지막 봉의 종가·고가·저가를 실시간 가격으로 덮어쓰기 때문이다(당일 봉
+            # 형성). 그걸 전일 종가로 쓰면 기준선이 현재가를 따라다녀 트리거가
+            # 영원히 발동하지 않거나 즉시 발동한다. ts로 오늘을 걸러낸다.
+            hist = df[df["ts"].astype(str) < today]
+            if hist.empty:
+                hist = df.iloc[:-1]          # ts가 오늘이 아니어도 마지막 봉은 제외
+            if hist.empty:
+                continue
+            prev = hist.iloc[-1]
+            self.intraday.prime(symbol, float(prev["close"]), float(prev["volume"]))
+            primed += 1
+        if primed:
+            logger.info(f"[장중] 전일 기준 {primed}종목 적재 "
+                        f"(돌파 +{self.s.INTRADAY_TRIGGER_PCT:.1%}, "
+                        f"거래량 x{self.s.INTRADAY_VOL_MULT})")
+
+    def _feed_intraday(self, symbol: str, price: float, cum_volume: float,
+                       now: dt.datetime) -> None:
+        """시세 한 건을 감시기에 흘린다. 발동하면 대기열에 쌓고 `_tick()`이 처리한다.
+
+        여기서 바로 주문하지 않는다 — WebSocket 콜백에서 주문을 내면 네트워크
+        대기가 시세 수신을 막는다. 루프 주기가 3초이므로 지연은 그 안이고,
+        백테스트의 '다음 분봉 시가 체결'(최대 60초)보다 빠르다.
+        """
+        if not self.s.USE_INTRADAY or price <= 0:
+            return
+        sig = self.intraday.on_quote(symbol, price, cum_volume, now)
+        if sig is not None:
+            self._intraday_queue.append(sig)
+            logger.warning(f"[장중] 돌파 {symbol} {sig.describe()}")
+            self.ledger.write("intraday_trigger", {
+                "symbol": sig.symbol, "price": sig.price,
+                "prev_close": sig.prev_close, "level_pct": round(sig.level_pct, 5),
+                "minute_volume": sig.minute_volume, "vol_floor": sig.vol_floor})
+
     def _now(self) -> dt.datetime:
         """Mock은 가상 시계(봉 1개 = 1거래일), 실서버는 KST 실제 시각."""
         if self.s.USE_MOCK_MODE and self.broker is not None and getattr(self.broker, "is_mock", False):
@@ -157,6 +220,8 @@ class TradingEngine:
 
         await self._sync_portfolio(initial=True)
         self._restore_state()
+        # 장중 감시기에 전일 종가·거래량을 넣는다. 일봉 적재 뒤여야 한다.
+        self._prime_intraday()
 
         if not self.s.USE_MOCK_MODE:
             await self._start_websocket()
@@ -239,6 +304,9 @@ class TradingEngine:
     async def _on_ws_quote(self, quote: Quote) -> None:
         if quote.price > 0:
             self.latest_prices[quote.symbol] = quote.price
+            # `Quote.volume`은 KIS `acml_vol`(누적거래량)이다. 감시기가 분이 바뀔 때
+            # 기준값을 잡고 차분으로 이번 분의 거래량을 만든다.
+            self._feed_intraday(quote.symbol, quote.price, quote.volume, self._now())
 
     async def _on_ws_notice(self, notice: Dict[str, Any]) -> None:
         """실시간 체결통보 → 즉시 포트폴리오 반영(폴링보다 빠름)."""
@@ -276,6 +344,14 @@ class TradingEngine:
                 atr = self.atr_map.get(fill.symbol) or pos.avg_price * 0.02
                 new_stop = self.risk.initial_stop(pos.avg_price, atr)
                 pos.stop_price = max(pos.stop_price, new_stop) if pos.stop_price > 0 else new_stop
+                # 장중 청산 감시도 **체결 시점**에 평단가로 시작한다. 접수 시점에는
+                # 평단가가 없어 목표·손절 기준이 어긋난다(위 손절선과 같은 이유).
+                if self.s.USE_INTRADAY:
+                    self.intraday.open_watch(fill.symbol, pos.avg_price)
+        if fill.side is Side.SELL:
+            pos_after = self.portfolio.positions.get(fill.symbol)
+            if pos_after is None or pos_after.qty <= 0:
+                self.intraday.close_watch(fill.symbol)
         record = fill.to_dict()
         record["ts"] = fill.ts.isoformat()
         record["realized"] = round(realized, 0)
@@ -306,6 +382,7 @@ class TradingEngine:
                 quote = await self.broker.get_quote(symbol)
                 if quote and quote.price > 0:
                     self.latest_prices[symbol] = quote.price
+                    self._feed_intraday(symbol, quote.price, quote.volume, self._now())
             except Exception as exc:
                 logger.debug(f"[Quote] {symbol} 조회 실패: {exc}")
 
@@ -524,6 +601,8 @@ class TradingEngine:
         if self._loops % BAR_REFRESH_LOOPS == 0 and self._loops > 0 and not self.s.USE_MOCK_MODE:
             await self._refresh_bars()
         self._apply_latest_prices_to_panel()
+        if self.s.USE_INTRADAY and self._loops % BAR_REFRESH_LOOPS == 0:
+            self._prime_intraday()
 
         # --- 평가 및 리스크 상태 ---
         prices = {s: p for s, p in self.latest_prices.items() if p > 0}
@@ -579,8 +658,64 @@ class TradingEngine:
                 self.ledger.write("exit", {"symbol": order.symbol, "qty": order.qty,
                                            "reason": order.reason.value, "detail": order.detail})
 
-        # --- 진입 ---
-        if self.risk.state == RiskState.NORMAL:
+        # --- 장중 청산 (분봉 전략) ---
+        # 리스크 청산 뒤에 본다. 킬스위치·급락은 장중 규칙보다 우선해야 한다.
+        if self.s.USE_INTRADAY:
+            for symbol in list(self.intraday.watches):
+                pos = self.portfolio.positions.get(symbol)
+                if pos is None or pos.qty <= 0:
+                    self.intraday.close_watch(symbol)
+                    continue
+                price = prices.get(symbol, 0.0)
+                if price <= 0:
+                    continue
+                reason = self.intraday.exit_reason(symbol, price, now)
+                if reason is None:
+                    continue
+                ok = await self._submit(symbol, Side.SELL, pos.qty, price, f"INTRADAY|{reason}")
+                if ok:
+                    self.ledger.write("exit", {"symbol": symbol, "qty": pos.qty,
+                                               "reason": "intraday", "detail": reason})
+
+        # --- 장중 진입 (분봉 전략) ---
+        if self.s.USE_INTRADAY:
+            queued, self._intraday_queue = self._intraday_queue, []
+            if self.risk.state != RiskState.NORMAL and queued:
+                logger.info(f"[장중] 리스크 상태 {self.risk.state} — 돌파 {len(queued)}건 보류")
+            elif queued:
+                # 마감 정리 시각 이후에는 새로 들어가지 않는다. 들어가도 곧 팔아야 한다.
+                if self.intraday.should_flatten(now):
+                    logger.info(f"[장중] 마감 정리 시각 — 돌파 {len(queued)}건 진입하지 않음")
+                    queued = []
+                # 돌파 강도가 센 순서로 처리한다. 보유 한도에 걸리면 뒤는 버려진다.
+                for sig in sorted(queued, key=lambda x: -x.level_pct):
+                    if sig.symbol in self.open_orders_symbols():
+                        continue
+                    # 리스크 매니저가 모든 주문의 최종 관문이다. 장중 경로도 우회하지 않는다.
+                    # 점수는 돌파 강도로 둔다 — 모델 점수가 아니므로 `bet=-1`(모델 없음)로
+                    # 두어 사이징이 점수 기반 폴백을 쓰게 한다.
+                    entry_sig = Signal(
+                        symbol=sig.symbol, score=min(1.0, max(0.0, sig.level_pct * 10.0)),
+                        price=sig.price, ts=sig.ts,
+                        atr=self.atr_map.get(sig.symbol, 0.0),
+                        volatility=self.vol_map.get(sig.symbol, 0.0),
+                        bet=-1.0, reason="intraday_breakout")
+                    decision = self.risk.evaluate_entry(entry_sig, self.portfolio, now,
+                                                        pending=self._pending_notional())
+                    self.ledger.write("risk_decision", {
+                        "symbol": sig.symbol, "score": round(entry_sig.score, 4),
+                        "approved": decision.approved, "qty": decision.qty,
+                        "reason": decision.reason, "path": "intraday", **decision.detail})
+                    if not decision.approved:
+                        logger.info(f"[장중] {sig.symbol} 진입 거부 — {decision.reason}")
+                        continue
+                    await self._submit(sig.symbol, Side.BUY, decision.qty, sig.price,
+                                       f"INTRADAY|{sig.describe()}")
+
+        # --- 진입 (일봉 신호) ---
+        # 장중 전략을 쓰면 진입은 돌파가 결정한다. 두 경로가 같이 돌면 익스포저가
+        # 의도의 두 배가 되고, 측정한 분포(하루 2종목 x 45%)와 달라진다.
+        if self.risk.state == RiskState.NORMAL and not self.s.USE_INTRADAY:
             # 백테스트(`backtest/engine.py`)와 반드시 같은 선정 로직을 쓴다.
             # 두 경로가 갈라지면 백테스트는 실거래를 예측하지 못한다.
             if self.s.USE_TOP_K:
@@ -725,6 +860,8 @@ class TradingEngine:
         self._signals_bar_ts = self._last_bar_ts
         self.score_map = {x.symbol: x.score for x in signals}
         self.atr_map = {x.symbol: x.atr for x in signals}
+        # 장중 경로가 사이징에 쓸 변동성. 일봉 신호에서 같이 받아 둔다.
+        self.vol_map = {x.symbol: x.volatility for x in signals}
         if signals:
             self._refresh_watchlist(signals)
             logger.info(f"[Signal] {len(signals)}종목 재계산 (봉 {self._last_bar_ts}) · "
@@ -748,7 +885,18 @@ class TradingEngine:
         """
         cap = max(1, int(self.s.WS_MAX_SUBSCRIPTIONS))
         held = [c for c in self.portfolio.open_positions()]
-        ranked = [x.symbol for x in signals if x.symbol not in held]
+        if self.s.USE_INTRADAY:
+            # 장중 전략에서는 '점수 상위'가 아니라 **오늘 돌파할 가능성**이 기준이다.
+            # 돌파선에 가까운 종목을 우선 구독한다 — 멀리 있는 종목의 시세는
+            # 지금 쓸 일이 없고, 구독 한도가 41건이라 자리가 귀하다.
+            # 아직 시세를 못 본 종목은 거리가 무한이라 뒤로 밀린다. 그래서
+            # 일봉 점수 상위를 소수 섞어 초기 탐색이 끊기지 않게 한다.
+            seed = [x.symbol for x in signals if x.symbol not in held][: max(5, cap // 4)]
+            cand = [x.symbol for x in signals if x.symbol not in held and x.symbol not in seed]
+            cand.sort(key=self.intraday.near_trigger)
+            ranked = seed + cand
+        else:
+            ranked = [x.symbol for x in signals if x.symbol not in held]
         new_watch = (held + ranked)[:cap]
         if set(new_watch) == set(self.watchlist):
             return

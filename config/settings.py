@@ -206,6 +206,26 @@ class Settings(BaseSettings):
     # 레짐(0.8) ≈ 3.3%로 공식 자체가 만든 값이었다(상한 18%는 닿지도 않았다).
     # 파라미터로 90%에 도달하려면 TARGET_VOLATILITY가 2.5 같은 값이 되어야 하므로
     # 모드를 분리한다. `strategy/risk_manager.py::evaluate_entry()`가 분기한다.
+    # --- 장중 분봉 전략 (strategy/intraday.py) ---
+    # 일봉 엔진과 별개 경로다. 장중에 조건이 충족되는 순간 진입하고 그날 안에 청산한다.
+    # 기본 OFF — 켜면 일봉 신호 대신 장중 돌파가 진입을 결정한다.
+    USE_INTRADAY: bool = Field(
+        default=False, description="장중 돌파 전략 사용(분봉). OFF면 일봉 신호로 진입")
+    INTRADAY_TRIGGER_PCT: float = Field(
+        default=0.03, description="장중 돌파 기준 — 현재가/전일종가 − 1")
+    INTRADAY_VOL_MULT: float = Field(
+        default=1.5, description="돌파 분의 거래량 ÷ 전일 분당 평균 하한")
+    # 청산 기본값은 '규칙 없음 + 마감 정리'다. 부분 데이터 격자에서 종가 청산이
+    # 꼬리가 가장 두꺼웠다 — 모든 청산 규칙이 분산을 깎고 분산이 꼬리를 만든다.
+    # 전 표본 격자 결과가 나오면 이 값을 갱신한다.
+    INTRADAY_TARGET_PCT: float = Field(default=0.0, description="장중 익절(0=미적용)")
+    INTRADAY_STOP_PCT: float = Field(default=0.0, description="장중 손절(0=미적용)")
+    INTRADAY_TRAIL_PCT: float = Field(default=0.0, description="장중 트레일링 폭(0=미적용)")
+    INTRADAY_TRAIL_ACTIVATE_PCT: float = Field(
+        default=0.0, description="트레일링 발동 수익률")
+    INTRADAY_FLATTEN_HHMM: str = Field(
+        default="1515", description="마감 정리 시각(HHMM). 오버나이트를 만들지 않는다")
+
     SIZING_MODE: str = Field(
         default="vol_target",
         description="포지션 사이징 방식 — vol_target(변동성 타게팅) | fixed(고정 비중)")
