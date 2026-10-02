@@ -206,6 +206,7 @@ async def run(args) -> int:
     saved_rows = 0
     skipped = 0
     failed = 0
+    aborted = False
     async with TossDataClient(s) as cli:
         for i, (sym, days) in enumerate(sorted(targets.items()), 1):
             path = out_dir / f"{sym}.csv"
@@ -221,9 +222,14 @@ async def run(args) -> int:
                 except Exception as exc:
                     failed += 1
                     logger.warning(f"[Minute] {sym} {day} 실패: {type(exc).__name__}: {str(exc)[:90]}")
-                    # IP 차단이나 토큰 만료면 계속 돌려도 전부 실패한다. 즉시 멈춘다.
+                    # **403은 종목 문제가 아니라 전역 차단이다.** 종목 루프만 빠져
+                    # 나가면 나머지 종목도 같은 403을 맞고, 루프만 돌다 "완료"로
+                    # 끝난다(실제로 그렇게 끝나 19,887/88,275일만 받고 성공으로
+                    # 보였다). 전체를 멈추고 0이 아닌 코드로 끝내야 한다.
                     if "IP address" in str(exc) or "403" in str(exc):
-                        logger.error("[Minute] 접근 거부 — IP 화이트리스트를 확인하십시오. 중단합니다")
+                        logger.error("[Minute] 접근 거부 — IP 화이트리스트를 확인하십시오. "
+                                     "전체 수집을 중단합니다")
+                        aborted = True
                         break
                     continue
                 if got.empty:
@@ -239,7 +245,18 @@ async def run(args) -> int:
             if i % 20 == 0 or i == len(targets):
                 logger.info(f"[Minute] {i}/{len(targets)}종목 · 수집 {done_days:,}일 "
                             f"({saved_rows:,}봉) · 기존 {skipped:,}일 · 실패 {failed}")
-    logger.success(f"[Minute] 완료 — {done_days:,}일 {saved_rows:,}봉 → {out_dir}")
+            if aborted:
+                break
+    remaining = total_days - done_days - skipped
+    if aborted:
+        logger.error(f"[Minute] **중단** — {done_days:,}일 받고 약 {remaining:,}일 남음. "
+                     f"IP를 등록한 뒤 같은 명령으로 이어받으십시오")
+        return 2
+    if failed:
+        logger.warning(f"[Minute] 완료(실패 {failed}건) — {done_days:,}일 "
+                       f"{saved_rows:,}봉 → {out_dir}")
+    else:
+        logger.success(f"[Minute] 완료 — {done_days:,}일 {saved_rows:,}봉 → {out_dir}")
     return 0
 
 
