@@ -283,6 +283,7 @@ def main() -> int:
     syms = sorted(p.stem for p in Path(args.minute_dir).glob("*.csv"))
     if not syms:
         logger.error(f"[Replay] {args.minute_dir} 에 분봉이 없습니다")
+        lock.unlink(missing_ok=True)
         return 1
     bars = load_minutes(args.minute_dir, syms)
     daily = load_panel_from_dir(args.source, list(bars))
@@ -383,6 +384,7 @@ def main() -> int:
                           200, vmult)
         if ev.empty:
             logger.error("[Replay] 사건이 없어 모델을 학습할 수 없습니다")
+            lock.unlink(missing_ok=True)
             return 1
         ev["ret"] = ev["ret"] - cost
         feats = [c for c in MINUTE_FEATURES if c in ev.columns]
@@ -390,6 +392,7 @@ def main() -> int:
         te = ev[ev["day"] > cut]
         if len(tr) < 500 or te.empty:
             logger.error(f"[Replay] 학습 {len(tr)}건 · 재연 {len(te)}건 — 부족합니다")
+            lock.unlink(missing_ok=True)
             return 1
         thr = float(tr["ret"].quantile(0.75))
         y = (tr["ret"] >= thr).astype(int).to_numpy()
