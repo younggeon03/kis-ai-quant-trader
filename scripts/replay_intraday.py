@@ -90,7 +90,8 @@ def replay_day(day: str, day_bars: Dict[str, Dict[str, tuple]],
                prev: Dict[str, Tuple[float, float]],
                w: IntradayWatcher, settings,
                per_day: int, weight: float, cost: float,
-               buy_band: float = 0.0) -> Dict[str, object]:
+               buy_band: float = 0.0,
+               scores: Optional[Dict[Tuple[str, str], float]] = None) -> Dict[str, object]:
     """하루를 재연한다. 반환은 그날의 거래 목록과 진단 수치.
 
     `day_bars`는 `{종목: {분ts: (open, high, low, close, cum)}}`로 **미리 잘려 있어야
@@ -137,7 +138,11 @@ def replay_day(day: str, day_bars: Dict[str, Dict[str, tuple]],
         # 명부에 올린다. 매 분 비우면 "하루의 첫 2건"만 사게 된다 — 실거래
         # (`main.py`)와 같은 구조를 써야 측정이 실거래를 예측한다.
         for sig in fired:
-            w.add_candidate(sig, sig.freshness)
+            # 점수 공급자를 바꿔 끼운다. `scores`가 없으면 신선도 고정 공식이다.
+            # 같은 날짜·같은 슬롯 제약에서 두 방식을 비교해야 답이 나온다 —
+            # 기존 모델 측정은 "하루가 끝난 뒤 상위 2개"라 미래를 보고 골랐다.
+            sc = sig.freshness if scores is None else scores.get((sig.symbol, day), 0.0)
+            w.add_candidate(sig, sc)
 
         # --- 청산 (진입보다 먼저. 자리를 비워야 다음이 들어간다) ---
         for sym in list(held):
@@ -186,9 +191,10 @@ def replay_day(day: str, day_bars: Dict[str, Dict[str, tuple]],
                         unfilled += 1
                         continue
                     entry = min(limit, bar[0])  # 시가가 더 싸면 시가에 체결
-                held[sig.symbol] = {"entry": entry, "qty_w": weight,
-                                    "score": sig.freshness}
-                w.open_watch(sig.symbol, entry, sig.freshness)
+                sc = (sig.freshness if scores is None
+                      else scores.get((sig.symbol, day), 0.0))
+                held[sig.symbol] = {"entry": entry, "qty_w": weight, "score": sc}
+                w.open_watch(sig.symbol, entry, sc)
                 diag_minutes.append(sig.trig_minute)
                 diag_speed.append(sig.speed)
             # --- 교체: 슬롯이 꽉 찼고 명부에 훨씬 좋은 후보가 있으면 ---
@@ -238,6 +244,10 @@ def main() -> int:
                     help="돌파 기준을 덮어쓴다(0=설정값 사용)")
     ap.add_argument("--ttl", type=int, default=-1,
                     help="후보 명부 보관 분(−1=설정값). 0이면 그 분에 발동한 것만 본다")
+    ap.add_argument("--select", default="freshness", choices=["freshness", "model"],
+                    help="돌파 사건 선정 점수. freshness=고정 공식 / model=분봉 모델")
+    ap.add_argument("--train-frac", type=float, default=0.4,
+                    help="model 선택 시 앞쪽 몇 비율을 학습에 쓸지(나머지를 재연)")
     ap.add_argument("--no-fill-sim", action="store_true",
                     help="지정가 미체결을 모사하지 않는다(이전 동작, 비교용)")
     ap.add_argument("--out", default="reports/replay_intraday.json")
@@ -328,6 +338,58 @@ def main() -> int:
 
     trig = args.trigger or s.INTRADAY_TRIGGER_PCT
     vmult = args.vol_mult or s.INTRADAY_VOL_MULT
+    # --- 모델 점수(선택 시) ---
+    #
+    # 앞쪽 `train_frac`을 학습에, 나머지를 재연에 쓴다. **학습 구간은 재연 구간보다
+    # 앞선다** — 섞이면 룩어헤드다.
+    #
+    # 점수를 미리 (종목, 날짜)로 계산해 둔다. 트리거는 데이터와 설정이 같으면
+    # 결정적이므로 재연 중 발동하는 사건과 1:1로 맞는다. 루프 안에서 피처를
+    # 다시 만들면 느리고, 무엇보다 **감시기에 피처 계산을 넣지 않기 위해서다**
+    # (순수 로직 유지).
+    model_scores: Optional[Dict[Tuple[str, str], float]] = None
+    if args.select == "model":
+        from scripts.minute_skill import build_events
+        from strategy.minute_features import MINUTE_FEATURES
+
+        cut = days[max(1, int(len(days) * args.train_frac)) - 1]
+        logger.info(f"[Replay] 모델 선택 — 학습 ~{cut} / 재연 {cut}~ "
+                    f"(학습 비율 {args.train_frac:.0%})")
+        ev = build_events(daily, args.minute_dir, trig, "close",
+                          200, vmult)
+        if ev.empty:
+            logger.error("[Replay] 사건이 없어 모델을 학습할 수 없습니다")
+            return 1
+        ev["ret"] = ev["ret"] - cost
+        feats = [c for c in MINUTE_FEATURES if c in ev.columns]
+        tr = ev[ev["day"] <= cut]
+        te = ev[ev["day"] > cut]
+        if len(tr) < 500 or te.empty:
+            logger.error(f"[Replay] 학습 {len(tr)}건 · 재연 {len(te)}건 — 부족합니다")
+            return 1
+        thr = float(tr["ret"].quantile(0.75))
+        y = (tr["ret"] >= thr).astype(int).to_numpy()
+        try:
+            import lightgbm as lgb
+            m = lgb.LGBMClassifier(n_estimators=400, learning_rate=0.05,
+                                   num_leaves=15, min_child_samples=60,
+                                   subsample=0.8, colsample_bytree=0.8,
+                                   reg_lambda=1.0, verbose=-1, random_state=16)
+            m.fit(tr[feats].to_numpy(float), y)
+            p_te = m.predict_proba(te[feats].to_numpy(float))[:, 1]
+        except ImportError:
+            from sklearn.ensemble import HistGradientBoostingClassifier
+            m = HistGradientBoostingClassifier(max_iter=400, learning_rate=0.05,
+                                               max_leaf_nodes=15, random_state=16)
+            m.fit(np.nan_to_num(tr[feats].to_numpy(float)), y)
+            p_te = m.predict_proba(np.nan_to_num(te[feats].to_numpy(float)))[:, 1]
+        model_scores = {(r.symbol, r.day): float(p)
+                        for r, p in zip(te.itertuples(), p_te)}
+        logger.info(f"[Replay] 학습 {len(tr):,}건(문턱 {thr * 100:+.2f}% · "
+                    f"양성 {y.mean():.1%}) → 재연 점수 {len(model_scores):,}건")
+        # 재연 구간만 돌린다. 학습 구간을 재연하면 in-sample이다.
+        days = [d for d in days if d > cut]
+
     w = IntradayWatcher(
         trigger_pct=trig, vol_mult=vmult,
         target_pct=s.INTRADAY_TARGET_PCT, stop_pct=s.INTRADAY_STOP_PCT,
@@ -353,7 +415,8 @@ def main() -> int:
         prev = {sym: prev_map.get(sym, {}).get(day, (0.0, 0.0)) for sym in index}
         r = replay_day(day, day_slice(day), prev, w, s,
                        args.per_day, args.weight, cost,
-                       buy_band=(0.0 if args.no_fill_sim else s.BUY_LIMIT_BAND))
+                       buy_band=(0.0 if args.no_fill_sim else s.BUY_LIMIT_BAND),
+                       scores=model_scores)
         all_trades.extend(r["trades"])          # type: ignore[arg-type]
         tot_trig += int(r["triggers"])          # type: ignore[arg-type]
         overnight.extend(r["overnight"])        # type: ignore[arg-type]

@@ -121,8 +121,46 @@ def build_events(daily: Dict[str, pd.DataFrame], minute_dir: str,
     return pd.DataFrame(rows).sort_values(["day", "symbol"]).reset_index(drop=True)
 
 
+# 피처 집합 — 전 표본 중요도·변별력 측정(18,269건) 결과로 나눈다.
+#
+# | 피처 | 중요도 | 상위25% vs 하위75% 차이 |
+# |---|---|---|
+# | speed_5pct | 3.4% | **57.1%** |
+# | trig_minute | 5.5% | **50.9%** |
+# | turnover_vs_prev | 9.2% | **49.3%** |
+# | gap_trigger | 0.0% | **41.5%** |
+# | vol_burst | 6.9% | **34.2%** |
+# | gap_open | 5.4% | 31.0% |
+# | high_breaks | 3.6% | 26.2% |
+# | ... | | |
+# | trig_close_level | 7.8% | 9.2% |
+# | vol_trend | 3.8% | 7.2% |
+# | range_pos | 5.4% | **2.7%** |
+# | run_from_open | 7.1% | **2.4%** |
+# | straight_run | 1.6% | **0.9%** |
+# | body_ratio | 7.8% | **0.7%** |
+#
+# 아래 넷이 중요도의 **21.9%**를 쓰면서 변별력이 3% 미만이다. 정보 없는 피처로
+# 분기를 만들면 학습 구간 노이즈에 맞춰지고 평가 구간에서 역방향으로 작동한다.
+#
+# **다만 단변량 차이로 빼면 상호작용을 놓친다** — `body_ratio` 단독으로는 차이가
+# 없어도 `vol_burst`가 클 때만 의미가 있을 수 있다. 그래서 집합을 바꿔 끼워
+# 워크포워드 AUC·스킬을 비교해 판정한다.
+NOISE_FEATURES = ["body_ratio", "run_from_open", "range_pos", "straight_run"]
+SIGNAL_FEATURES = ["speed_5pct", "trig_minute", "turnover_vs_prev", "gap_trigger",
+                   "vol_burst", "gap_open", "high_breaks"]
+
+
+def select_features(mode: str) -> List[str]:
+    if mode == "signal":
+        return list(SIGNAL_FEATURES)
+    if mode == "drop-noise":
+        return [c for c in MINUTE_FEATURES if c not in NOISE_FEATURES]
+    return list(MINUTE_FEATURES)
+
+
 def walkforward_scores(ev: pd.DataFrame, cost: float, n_folds: int,
-                       label_q: float) -> pd.DataFrame:
+                       label_q: float, feat_mode: str = "all") -> pd.DataFrame:
     """날짜 순서로 접어가며 과거만으로 학습하고 미래 사건에 점수를 매긴다.
 
     라벨은 **그 학습 구간 안에서의 상위 `label_q` 분위**다. 절대 문턱(+10% 등)을
@@ -137,7 +175,7 @@ def walkforward_scores(ev: pd.DataFrame, cost: float, n_folds: int,
         return pd.DataFrame()
     bounds = [days[int(len(days) * (i + 1) / (n_folds + 1))] for i in range(n_folds)]
 
-    feats = [c for c in MINUTE_FEATURES if c in ev.columns]
+    feats = [c for c in select_features(feat_mode) if c in ev.columns]
     out = []
     for i, start in enumerate(bounds):
         end = bounds[i + 1] if i + 1 < len(bounds) else None
@@ -204,6 +242,10 @@ def main() -> int:
     ap.add_argument("--per-day", type=int, default=2, help="하루 선택 종목 수")
     ap.add_argument("--weight", type=float, default=0.45)
     ap.add_argument("--trials", type=int, default=40000)
+    ap.add_argument("--features", default="all",
+                    choices=["all", "signal", "drop-noise"],
+                    help="all=18종 전부 / signal=변별력 확인된 7종 / "
+                         "drop-noise=차이 3%% 미만 4종 제외")
     ap.add_argument("--out", default="reports/minute_skill.json")
     args = ap.parse_args()
 
@@ -231,7 +273,7 @@ def main() -> int:
     logger.info(f"[Skill] 사건 {len(ev):,}건 · {ev['day'].nunique()}일 · "
                 f"하루 평균 {len(ev) / max(1, ev['day'].nunique()):.1f}건")
 
-    scored = walkforward_scores(ev, cost, args.folds, args.label_q)
+    scored = walkforward_scores(ev, cost, args.folds, args.label_q, args.features)
     if scored.empty:
         logger.error("[Skill] 워크포워드 실패")
         return 1
@@ -252,7 +294,8 @@ def main() -> int:
     print()
     print("=" * 100)
     print(f" 분봉 모델 스킬 — 트리거 +{args.trigger:.0%} · 청산 {args.exit} · "
-          f"{len(have)}종목 · 사건 {len(ev):,}건")
+          f"{len(have)}종목 · 사건 {len(ev):,}건 · 피처 {args.features}"
+          f"({len(select_features(args.features))}종)")
     print("=" * 100)
     print(f" 워크포워드 평가 사건      {len(scored):,}건 ({scored['fold'].nunique()}폴드)")
     print(f" AUC                     {a:.4f}   (0.5 = 분별력 없음)")
@@ -291,7 +334,9 @@ def main() -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({
         "config": {"trigger": args.trigger, "vol_mult": args.vol_mult,
-                   "exit": args.exit, "symbols": len(have),
+                   "exit": args.exit, "features": args.features,
+                   "n_features": len(select_features(args.features)),
+                   "symbols": len(have),
                    "events": int(len(ev)), "folds": args.folds,
                    "label_q": args.label_q, "per_day": args.per_day,
                    "weight": args.weight, "cost": cost},
