@@ -267,8 +267,53 @@ sklearn HistGBDT 폴백을 쓴다.
 | 리플레이 | 오버나이트 0건 (마감 정리 정상) |
 | 공개 | 준비 완료, **대회 종료(11/20) 후 전환** |
 
-**확정된 값**: 트리거 +3% · 거래량 12배 · 2종목 × 42% 고정 · 청산 없음 + 15:15
-마감 정리 · 매수 지정가 +2.0% / 매도 −0.4% · 명부 TTL 1분 · 교체 OFF.
+### 확정된 `.env` 설정 (전체)
+
+```
+# 전략
+USE_INTRADAY=true
+INTRADAY_TRIGGER_PCT=0.03        돌파 기준
+INTRADAY_VOL_MULT=12.0           돌파 분 거래량 ÷ 전일 분당 평균
+INTRADAY_SCAN_HHMM=0905          아침 후보 스캔
+INTRADAY_SCAN_TOP=40
+INTRADAY_FLATTEN_HHMM=1515       마감 정리
+INTRADAY_CANDIDATE_TTL=1         후보 명부 보관(분)
+INTRADAY_MAX_SWAPS=0             교체 OFF
+
+# 사이징
+SIZING_MODE=fixed
+FIXED_POSITION_WEIGHT=0.42
+MAX_POSITIONS=2
+MAX_POSITION_WEIGHT=0.42
+
+# 주문 (비대칭)
+BUY_LIMIT_BAND=0.02              매수 0.4%는 체결률 61.5%뿐
+SELL_LIMIT_BAND=0.004            매도는 0.4%에서 99.71%
+
+# 리스크 매니저 청산 — **분봉에서는 해제해야 한다**
+STOP_LOSS_PCT=0.12               남긴다(단일 종목 붕괴 방어)
+TAKE_PROFIT_PCT=0.0              해제 — 9%는 상승을 자른다
+TRAILING_ACTIVATE_PCT=0.0        해제 — 2.5%는 너무 이르다
+CRASH_DROP_PCT=0.30              완화 — 4.5%는 급등주 정상 변동폭
+MDD_SOFT_LIMIT=1.0               해제 — 익스포저 84%에서 쉽게 닿는다
+MDD_HARD_LIMIT=1.0               해제
+DAILY_LOSS_LIMIT=1.0             해제 — 3%면 HALT + 전량 청산 + 쿨다운
+SIGNAL_SELL_THRESHOLD=-9.9       해제 — 일봉 점수로 장중 청산(개념 불일치)
+
+# 대회
+COMP_START=2026-10-12  COMP_END=2026-11-20  PHASE1_END=2026-10-16
+MIN_TRADE_COUNT=5  MIN_TRADE_AMOUNT=500000000  MIN_TRADE_DAYS=5  MIN_TRADE_SYMBOLS=5
+PHASE1_TOP_K=2  PHASE2_TOP_K=2
+```
+
+**리스크 매니저 청산 해제가 이 세션의 큰 발견이다.** 리플레이에 리스크 매니저가
+없어 측정에 전혀 나타나지 않았고, 여섯 개를 전수 점검으로 찾았다. 특히
+`DAILY_LOSS_LIMIT=0.03`은 보유가 평균 3.6%만 내려도 그날 거래를 끝냈고,
+`TAKE_PROFIT_PCT=0.09`는 측정에서 "꼬리를 구조적으로 없앤다"고 확인한 규칙이다.
+
+그리고 **앞서 "MDD가 꺼져 있다"고 판단한 것은 틀렸다** — 존재하지 않는 필드명
+(`SOFT_MDD_LIMIT`)을 조회해 `None`을 받았다. 실제는 `MDD_SOFT_LIMIT=0.07`로
+살아 있었다.
 
 ---
 
