@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-python scripts/selftest.py                    # 전체 검증 (16개 항목) — 변경 후 필수로 실행
+python scripts/selftest.py                    # 전체 검증 (18개 항목) — 변경 후 필수로 실행
 python scripts/train_model.py --days 1500     # AI 모델 학습 → models/alpha_gbdt.pkl
 python scripts/train_model.py --source data/cache --no-flow   # 수급 피처 제외(측정용)
 python scripts/run_backtest.py --days 1000    # 백테스트 → reports/
