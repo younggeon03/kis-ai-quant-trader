@@ -215,6 +215,8 @@ def main() -> int:
                          "하한이 낮으면 09:00 노이즈가 전부 통과한다")
     ap.add_argument("--trigger", type=float, default=0.0,
                     help="돌파 기준을 덮어쓴다(0=설정값 사용)")
+    ap.add_argument("--ttl", type=int, default=-1,
+                    help="후보 명부 보관 분(−1=설정값). 0이면 그 분에 발동한 것만 본다")
     ap.add_argument("--out", default="reports/replay_intraday.json")
     args = ap.parse_args()
 
@@ -249,20 +251,57 @@ def main() -> int:
         days = days[-args.days:]
     logger.info(f"[Replay] {len(days)}거래일 재연 ({days[0]}~{days[-1]})")
 
-    # 날짜별로 **한 번만** 분할한다. 날짜 루프 안에서 필터링하면 O(일수 x 전체행수)다.
-    want = set(days)
-    split: Dict[str, Dict[str, Dict[str, tuple]]] = {d: {} for d in days}
+    # 종목별로 **정렬된 배열 하나**만 들고, 날짜 구간은 이분탐색으로 잘라 쓴다.
+    #
+    # 처음에는 날짜 루프 안에서 DataFrame을 필터링해 O(일수 x 종목수 x 전체행수)가
+    # 되어 10분이 지나도 끝나지 않았다. 그래서 전 날짜를 미리 `{분ts: 튜플}` 사전으로
+    # 분할했는데, 985MB 분봉에서 **3.5GB를 쓰게 되어** 메모리 부족으로 다른 작업이
+    # 죽었다(파이썬 사전·튜플 객체 오버헤드가 원본의 몇 배다). 수집이 완주해 282종목이
+    # 되면 아예 돌지 않는다.
+    #
+    # 이분탐색은 둘 다 피한다 — 날짜당 종목당 O(log n)이고 메모리는 배열뿐이다.
+    import bisect
+
+    index: Dict[str, tuple] = {}
     for sym, df in bars.items():
-        sub = df[df["ts"].str[:8].isin(want)]
-        if sub.empty:
-            continue
-        for d, g in sub.groupby(sub["ts"].str[:8], sort=False):
-            split[str(d)][sym] = dict(zip(
-                g["ts"].tolist(),
-                zip(g["open"].astype(float), g["high"].astype(float),
-                    g["low"].astype(float), g["close"].astype(float),
-                    g["cum"].astype(float))))
-    logger.info("[Replay] 날짜별 분할 완료")
+        d = df.sort_values("ts")
+        index[sym] = (d["ts"].tolist(),
+                      d["open"].to_numpy(float), d["high"].to_numpy(float),
+                      d["low"].to_numpy(float), d["close"].to_numpy(float),
+                      d["cum"].to_numpy(float))
+    bars.clear()          # DataFrame을 놓아준다
+    logger.info(f"[Replay] 색인 완료 ({len(index)}종목)")
+
+    # --- 데이터 지문 ---
+    # **이걸 빼먹어 같은 코드가 +0.557%와 −0.442%로 갈렸다.** 수집이 계속 돌아
+    # 같은 종목의 추가 급등일이 들어오면 날짜별 후보 풀이 달라져 선택이 바뀐다.
+    # 두 실행 모두 "178종목 · 20250917~20260929"로 보였기 때문에 코드 차이를
+    # 몇 시간 뒤졌다. `scripts/ablate_exits.py`가 같은 이유로 지문을 찍는데
+    # 리플레이에 넣지 않아 같은 함정을 다시 밟았다.
+    import hashlib
+
+    h = hashlib.md5()
+    n_rows = 0
+    for sym in sorted(index):
+        ts, _o, _h, _l, c, _cum = index[sym]
+        h.update(sym.encode())
+        h.update(np.asarray(c, dtype=np.float64).tobytes())
+        n_rows += len(ts)
+    fingerprint = h.hexdigest()[:16]
+    logger.warning(f"[Replay] 데이터 지문 {fingerprint} "
+                   f"({len(index)}종목 · {n_rows:,}봉) — 지문이 다른 실행과는 비교할 수 없다")
+
+    def day_slice(day: str) -> Dict[str, Dict[str, tuple]]:
+        """그날의 `{종목: {분ts: (o,h,l,c,cum)}}`. 호출 뒤 버려지므로 메모리가 누적되지 않는다."""
+        out: Dict[str, Dict[str, tuple]] = {}
+        lo_key, hi_key = day + "0000", day + "9999"
+        for sym, (ts, o, h, l, c, cum) in index.items():
+            a = bisect.bisect_left(ts, lo_key)
+            b = bisect.bisect_right(ts, hi_key)
+            if a >= b:
+                continue
+            out[sym] = {ts[k]: (o[k], h[k], l[k], c[k], cum[k]) for k in range(a, b)}
+        return out
 
     trig = args.trigger or s.INTRADAY_TRIGGER_PCT
     vmult = args.vol_mult or s.INTRADAY_VOL_MULT
@@ -272,7 +311,7 @@ def main() -> int:
         trail_pct=s.INTRADAY_TRAIL_PCT,
         trail_activate_pct=s.INTRADAY_TRAIL_ACTIVATE_PCT,
         flatten_hhmm=s.INTRADAY_FLATTEN_HHMM,
-        candidate_ttl=s.INTRADAY_CANDIDATE_TTL,
+        candidate_ttl=(args.ttl if args.ttl >= 0 else s.INTRADAY_CANDIDATE_TTL),
         swap_margin=s.INTRADAY_SWAP_MARGIN,
         max_swaps=s.INTRADAY_MAX_SWAPS)
 
@@ -284,8 +323,11 @@ def main() -> int:
     tmins: List[int] = []
     speeds: List[int] = []
     for k, day in enumerate(days, 1):
-        prev = {sym: prev_map.get(sym, {}).get(day, (0.0, 0.0)) for sym in bars}
-        r = replay_day(day, split.get(day, {}), prev, w, s,
+        # `bars`가 아니라 `index`를 돈다 — 색인을 만든 뒤 `bars`를 비웠다.
+        # 여기서 `bars`를 쓰면 전일 종가가 전부 0이 되어 트리거가 하나도 안 걸린다
+        # (실제로 그렇게 깨져 거래 0건이 나왔다).
+        prev = {sym: prev_map.get(sym, {}).get(day, (0.0, 0.0)) for sym in index}
+        r = replay_day(day, day_slice(day), prev, w, s,
                        args.per_day, args.weight, cost)
         all_trades.extend(r["trades"])          # type: ignore[arg-type]
         tot_trig += int(r["triggers"])          # type: ignore[arg-type]
@@ -299,8 +341,9 @@ def main() -> int:
 
     print()
     print("=" * 100)
-    print(f" 분봉 리플레이 — {len(bars)}종목 · {len(days)}거래일 · "
+    print(f" 분봉 리플레이 — {len(index)}종목 · {len(days)}거래일 · "
           f"하루 {args.per_day}종목 x {args.weight:.0%} · 왕복비용 {cost:.3%}")
+    print(f" 데이터 지문 {fingerprint} ({n_rows:,}봉) — 지문이 다른 실행과는 비교할 수 없다")
     print("=" * 100)
     print(" [시각 기반 로직 검증]")
     print(f"  돌파 발동          {tot_trig:,}건  (하루 평균 {tot_trig / max(1, len(days)):.1f})")
@@ -344,7 +387,8 @@ def main() -> int:
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({
-        "config": {"symbols": len(bars), "days": len(days), "per_day": args.per_day,
+        "fingerprint": fingerprint, "rows": n_rows,
+        "config": {"symbols": len(index), "days": len(days), "per_day": args.per_day,
                    "weight": args.weight, "cost": cost,
                    "trigger": trig, "vol_mult": vmult,
                    "flatten": s.INTRADAY_FLATTEN_HHMM},
