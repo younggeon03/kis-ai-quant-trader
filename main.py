@@ -120,6 +120,8 @@ class TradingEngine:
         self._scanned_day: str = ""
         # 진입 시점 점수. 교체 판정에 쓰므로 체결 때까지 들고 있어야 한다.
         self._entry_scores: Dict[str, float] = {}
+        # 아침 스캔은 158초가 걸려 루프를 막으므로 별도 태스크로 돌린다.
+        self._scan_task: Optional[asyncio.Task] = None
         # 대시보드 자산곡선/유량 그래프용 링버퍼 (메모리 상한 고정)
         self.equity_history: deque = deque(maxlen=720)
         self.rps_history: deque = deque(maxlen=90)
@@ -716,7 +718,17 @@ class TradingEngine:
         if self.s.USE_INTRADAY and self._loops % BAR_REFRESH_LOOPS == 0:
             self._prime_intraday()
         # 아침 후보 스캔(하루 1회). 전일 기준 적재 뒤여야 상승률을 계산할 수 있다.
-        await self._scan_candidates(now)
+        #
+        # **await 하지 않고 별도 태스크로 띄운다.** 유니버스 284종목을 모의투자
+        # 유량(2건/초, 안전마진 후 1.8건/초)으로 조회하면 **158초**가 걸린다.
+        # `_tick()` 안에서 await 하면 그 2.6분 동안 돌파 감지도 청산도 처리되지
+        # 않는다 — 측정에서 이른 돌파가 좋고(상위군 36.8분 vs 하위군 74.9분)
+        # 진입 슬리피지가 크다고 나왔으므로 09:05~09:07을 날리는 것은 치명적이다.
+        #
+        # 재진입은 `_scanned_day`가 막는다(함수 진입 직후에 설정한다).
+        if self.s.USE_INTRADAY and self._scanned_day != now.strftime("%Y%m%d"):
+            if self._scan_task is None or self._scan_task.done():
+                self._scan_task = asyncio.create_task(self._scan_candidates(now))
 
         # --- 평가 및 리스크 상태 ---
         prices = {s: p for s, p in self.latest_prices.items() if p > 0}
@@ -1104,6 +1116,10 @@ class TradingEngine:
 
     # ================================================================== 종료
     async def shutdown(self) -> None:
+        # 아침 스캔 태스크가 남아 있으면 취소한다. 158초짜리 작업이라 종료가
+        # 그만큼 늦어지고, 종료 중 주문을 내면 안 된다.
+        if self._scan_task is not None and not self._scan_task.done():
+            self._scan_task.cancel()
         if not self._running:
             return
         self._running = False
