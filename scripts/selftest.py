@@ -907,6 +907,84 @@ def test_intraday():
             "청산 우선순위(손절>트레일>익절>마감) · 롤오버 모두 작동")
 
 
+@check("18. 장중 후보 명부·교체")
+def test_intraday_book():
+    """돌파 사건 선정의 핵심 경로. 틀리면 **조용히 잘못된 종목을 고른다.**
+
+    하루 돌파가 중앙 14건인데 보유 한도는 2종목이다. 27건을 버리는 그 선택이
+    전략의 거의 전부이고, `tail_optimizer` 기준 P(+100%)를 1.04%(무작위)에서
+    6.17%(스킬 20%)까지 바꾼다 — 구조보다 큰 레버다.
+
+    명부를 넣은 이유도 측정에서 나왔다. 발동 신호를 매 루프 비우면 **같은 분에
+    동시 발동한 것들 사이에서만** 고르게 되고, 2번째 돌파가 5분 안에 나는 날이
+    76.9%라 슬롯이 09:00~09:01에 차서 나머지가 선택 기회조차 없이 버려졌다.
+
+    여기서 보는 것: 점수 순 선택 · 슬롯 한도 · 보유 종목 제외 · 선택분 명부 제거 ·
+    TTL 만료 · 교체 여유(margin) · 하루 교체 한도 · 날짜 롤오버.
+    """
+    import datetime as dt
+    from strategy.intraday import IntradayWatcher, TriggerSignal
+
+    def sig(sym, ts, fresh):
+        return TriggerSignal(symbol=sym, price=1000.0, prev_close=970.0,
+                             minute_volume=5000.0, vol_floor=1000.0, ts=ts,
+                             freshness=fresh)
+
+    t0 = dt.datetime(2026, 10, 12, 9, 0)
+    w = IntradayWatcher(candidate_ttl=5, swap_margin=0.10, max_swaps=1)
+    w.reset_day("20261012")
+
+    # --- 점수 순 선택 + 슬롯 한도 + 명부 제거 ---
+    w.add_candidate(sig("AAA", t0, 0.50), 0.50)
+    w.add_candidate(sig("BBB", t0, 0.80), 0.80)
+    w.add_candidate(sig("CCC", t0, 0.65), 0.65)
+    got = w.pick_entries(t0, 2)
+    assert [s.symbol for s in got] == ["BBB", "CCC"], [s.symbol for s in got]
+    assert set(w.book) == {"AAA"}, f"선택분이 명부에 남았다: {sorted(w.book)}"
+
+    # --- 보유 종목은 제외한다 (중복 진입 방지) ---
+    w.open_watch("BBB", 1000.0, 0.80)
+    w.add_candidate(sig("BBB", t0, 0.99), 0.99)
+    assert [s.symbol for s in w.pick_entries(t0, 2)] == ["AAA"], "보유 종목을 또 골랐다"
+
+    # --- TTL 만료 ---
+    w2 = IntradayWatcher(candidate_ttl=5, max_swaps=0)
+    w2.reset_day("20261012")
+    w2.add_candidate(sig("OLD", t0, 0.9), 0.9)
+    w2.prune_book(t0 + dt.timedelta(minutes=4))
+    assert "OLD" in w2.book, "TTL 안인데 버려졌다"
+    w2.prune_book(t0 + dt.timedelta(minutes=6))
+    assert "OLD" not in w2.book, "TTL이 지났는데 남아 있다"
+
+    # --- 교체: 여유 미달이면 바꾸지 않는다 ---
+    w3 = IntradayWatcher(candidate_ttl=30, swap_margin=0.10, max_swaps=1)
+    w3.reset_day("20261012")
+    w3.open_watch("HELD", 1000.0, 0.60)
+    w3.add_candidate(sig("NEW", t0, 0.65), 0.65)      # 차이 0.05 < 0.10
+    assert w3.swap_target(t0) is None, "여유가 모자란데 교체했다"
+    w3.add_candidate(sig("BIG", t0, 0.80), 0.80)      # 차이 0.20 > 0.10
+    tgt = w3.swap_target(t0)
+    assert tgt is not None and tgt[0] == "HELD" and tgt[1].symbol == "BIG", tgt
+
+    # --- 하루 교체 한도 ---
+    w3.note_swap(tgt[1])
+    assert "BIG" in w3.book, "note_swap이 후보를 명부에서 빼버렸다(다음 루프에 사야 한다)"
+    assert w3.swap_target(t0) is None, "하루 한도를 넘겨 교체했다"
+
+    # --- max_swaps=0이면 교체하지 않는다 (현재 기본값) ---
+    w4 = IntradayWatcher(candidate_ttl=30, swap_margin=0.0, max_swaps=0)
+    w4.reset_day("20261012")
+    w4.open_watch("HELD", 1000.0, 0.10)
+    w4.add_candidate(sig("NEW", t0, 0.99), 0.99)
+    assert w4.swap_target(t0) is None, "max_swaps=0인데 교체했다"
+
+    # --- 날짜 롤오버가 명부·교체 카운터를 비운다 ---
+    w3.reset_day("20261013")
+    assert not w3.book and w3.swaps_today == 0, "롤오버가 명부/카운터를 안 비웠다"
+    return ("점수 순 선택 · 슬롯 한도 · 보유 제외 · 명부 제거 · TTL 만료 · "
+            "교체 여유/한도 · max_swaps=0 · 롤오버 모두 작동")
+
+
 @check("16. 패널 정렬 이력 하한")
 def test_panel_min_bars():
     """상장이 늦은 종목이 전체 백테스트 구간을 잘라내지 않는지.
@@ -947,7 +1025,7 @@ async def run_all() -> int:
         test_risk_manager, test_features, test_backtest, test_event_bus,
         test_live_client_offline, test_validation, test_weights_and_bets,
         test_competition_rules, test_selection_and_phase, test_panel_min_bars,
-        test_intraday,
+        test_intraday, test_intraday_book,
     ]
     print("\n" + "=" * 86)
     print(" KIS AI Quant Trader — 셀프 테스트")
