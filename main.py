@@ -122,6 +122,8 @@ class TradingEngine:
         self._entry_scores: Dict[str, float] = {}
         # 아침 스캔은 158초가 걸려 루프를 막으므로 별도 태스크로 돌린다.
         self._scan_task: Optional[asyncio.Task] = None
+        # 전일 종가·거래량. 패널은 실시간 가격으로 덮어써지므로 한 번만 떠서 보관한다.
+        self._prev_daily: Dict[str, tuple] = {}
         # 대시보드 자산곡선/유량 그래프용 링버퍼 (메모리 상한 고정)
         self.equity_history: deque = deque(maxlen=720)
         self.rps_history: deque = deque(maxlen=90)
@@ -147,22 +149,34 @@ class TradingEngine:
         """
         if not self.s.USE_INTRADAY:
             return
+        # --- 전일 기준값은 **한 번만** 떠서 보관한다 ---
+        #
+        # `_apply_latest_prices_to_panel()`이 패널 **마지막 봉**의 종가·고가·저가를
+        # 실시간 가격으로 덮어쓴다(당일 봉 형성). 그래서 패널에서 매번 다시 읽으면
+        # 전일 종가가 오염될 수 있다.
+        #
+        # 처음에는 `ts < 오늘`로 걸러 해결했다고 봤지만 그것으로는 부족하다 —
+        # 브로커가 당일 봉을 아직 주지 않으면 **마지막 봉이 어제 것**이고, 그 행이
+        # 덮어써진다. 그러면 필터가 오염된 어제 행을 그대로 집어 기준선이 현재가를
+        # 따라다니고, 트리거가 영원히 발동하지 않거나 즉시 발동한다.
+        #
+        # 그래서 `startup()`에서 **갓 적재한(아직 덮어쓰지 않은) 패널**로 한 번
+        # 떠 두고 이후에는 그 값을 쓴다. 날짜가 바뀌면 `startup()`이 다시 돈다.
         today = self._now().strftime("%Y%m%d")
+        if not self._prev_daily:
+            for symbol, df in self.panel.items():
+                if df is None or len(df) < 2:
+                    continue
+                hist = df[df["ts"].astype(str) < today]
+                if hist.empty:
+                    hist = df.iloc[:-1]
+                if hist.empty:
+                    continue
+                prev = hist.iloc[-1]
+                self._prev_daily[symbol] = (float(prev["close"]), float(prev["volume"]))
         primed = 0
-        for symbol, df in self.panel.items():
-            if df is None or len(df) < 2:
-                continue
-            # **마지막 봉이 오늘일 수 있다.** `_apply_latest_prices_to_panel()`이
-            # 마지막 봉의 종가·고가·저가를 실시간 가격으로 덮어쓰기 때문이다(당일 봉
-            # 형성). 그걸 전일 종가로 쓰면 기준선이 현재가를 따라다녀 트리거가
-            # 영원히 발동하지 않거나 즉시 발동한다. ts로 오늘을 걸러낸다.
-            hist = df[df["ts"].astype(str) < today]
-            if hist.empty:
-                hist = df.iloc[:-1]          # ts가 오늘이 아니어도 마지막 봉은 제외
-            if hist.empty:
-                continue
-            prev = hist.iloc[-1]
-            self.intraday.prime(symbol, float(prev["close"]), float(prev["volume"]))
+        for symbol, (pc, pv) in self._prev_daily.items():
+            self.intraday.prime(symbol, pc, pv)
             primed += 1
         if primed:
             logger.info(f"[장중] 전일 기준 {primed}종목 적재 "
@@ -712,7 +726,20 @@ class TradingEngine:
 
         # --- 시세 갱신 ---
         await self._refresh_quotes()
-        if self._loops % BAR_REFRESH_LOOPS == 0 and self._loops > 0 and not self.s.USE_MOCK_MODE:
+        # 일봉 재적재는 **장중 전략에서는 하지 않는다.**
+        #
+        # `_refresh_bars()`는 유니버스 전체(284종목) 일봉을 받으며 블로킹한다.
+        # 모의투자 유량 1.8건/초로 **158초**가 걸리고, `BAR_REFRESH_LOOPS=40`
+        # (약 2분)마다 돌면 장중의 절반 이상이 멈춘다.
+        #
+        # 그리고 분봉 전략에 **필요하지 않다.** 트리거가 쓰는 일봉 입력은 전일
+        # 종가·거래량뿐이고 그것은 하루 내내 고정이다. 장 마감 후 다음 날 시작
+        # 시점에 `startup()`이 새로 적재한다.
+        #
+        # 장중 호가는 `_refresh_quotes()`가 `QUOTE_CHUNK=4`로 루프당 4종목씩만
+        # 돌려 블로킹하지 않는다(그쪽은 안전하다).
+        if (self._loops % BAR_REFRESH_LOOPS == 0 and self._loops > 0
+                and not self.s.USE_MOCK_MODE and not self.s.USE_INTRADAY):
             await self._refresh_bars()
         self._apply_latest_prices_to_panel()
         if self.s.USE_INTRADAY and self._loops % BAR_REFRESH_LOOPS == 0:
@@ -1007,6 +1034,17 @@ class TradingEngine:
         `BAR_REFRESH_LOOPS` 주기로 일어나므로 하루 1회 수준이다.
         """
         if self._signals and self._signals_bar_ts == self._last_bar_ts:
+            return self._signals
+        # 장중 전략에서는 **한 번 계산하면 그날은 다시 하지 않는다.**
+        #
+        # 일봉 신호가 쓰이는 곳은 관심목록 씨앗(`_refresh_watchlist`)과 사이징 보조
+        # 값(`vol_map`·`atr_map`)뿐이다. 진입은 돌파가 결정하고 신호 반전 청산도
+        # 해제했으므로, 장중에 다시 계산할 이유가 없다.
+        #
+        # 그런데 비용이 크다 — 20종목에 **9~13초**(테마 군집이 42%)이고 유니버스가
+        # 넓어지면 더 늘어난다. 루프 간격은 3초다. Mock 스모크에서 이 계산 하나로
+        # 70초 동안 루프가 **1회**만 돌았다. 장중에 그렇게 멈추면 돌파를 놓친다.
+        if self.s.USE_INTRADAY and self._signals:
             return self._signals
         try:
             signals = self.strategy.generate_signals(
