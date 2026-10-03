@@ -90,10 +90,24 @@ def make_settings() -> Settings:
     s.REST_RATE_LIMIT = 20.0
     s.REST_BURST = 10
     s.MIN_TRADING_VALUE = 0.0
-    # 사이징 모드를 고정한다. `.env`가 `fixed`면 변동성 타게팅 검증이 성립하지
-    # 않는데, 테스트가 환경 설정에 좌우되면 무엇을 검증하는지 알 수 없어진다.
-    # fixed 모드는 같은 테스트 안에서 따로 검증한다.
-    s.SIZING_MODE = "vol_target"
+    # --- 환경 의존을 끊는다 ---
+    #
+    # 테스트가 `.env`를 읽으면 **환경 설정을 검증하는 것이 되어** 코드가 맞는지
+    # 알 수 없다. 실제로 두 번 깨졌다 — `.env`를 `SIZING_MODE=fixed`로 바꾸자
+    # 변동성 타게팅 검증이, 분봉 전략을 위해 리스크 청산을 해제하자 킬스위치·국면
+    # 검증이 깨졌다. 둘 다 코드 버그가 아니라 설정 변경이었다.
+    #
+    # 그래서 테스트가 단정하는 값은 **코드 기본값으로 고정**한다. 각 모드·규칙의
+    # on/off 동작은 해당 테스트 안에서 따로 검증한다.
+    fields = Settings.model_fields
+    for key in ("SIZING_MODE", "MDD_SOFT_LIMIT", "MDD_HARD_LIMIT", "DAILY_LOSS_LIMIT",
+                "TAKE_PROFIT_PCT", "TRAILING_ACTIVATE_PCT", "CRASH_DROP_PCT",
+                "STOP_LOSS_PCT", "MAX_POSITIONS", "MAX_POSITION_WEIGHT",
+                "MAX_SECTOR_WEIGHT", "USE_INTRADAY",
+                "COMP_START", "COMP_END", "PHASE1_END",
+                "PHASE1_TOP_K", "PHASE2_TOP_K"):
+        if key in fields:
+            setattr(s, key, fields[key].default)
     return s
 
 

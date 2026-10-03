@@ -375,6 +375,26 @@ class Settings(BaseSettings):
     # 0.03은 일봉 스윙 기준의 기본값이다. 분봉으로 돌릴 때는 `.env`에서 1.0으로
     # 사실상 해제한다(킬스위치는 남겨 단일 종목 붕괴만 막는다).
     MDD_SOFT_LIMIT: float = Field(default=0.07, description="소프트 MDD: 신규 진입 차단 + 익스포저 축소")
+    # **`USE_INTRADAY=true`로 쓸 때는 MDD·익절·트레일링·급락을 전부 해제해야 한다.**
+    #
+    # 분봉 설계는 "청산 없음 + 15:15 마감 정리"인데 `risk.evaluate_exits()`가 분봉
+    # 포지션에도 적용되고, PHASE2(10/19~11/20, 대회의 25일)에서는 손절류가 모두
+    # 켜진다(PHASE1은 `use_stop_loss=False`로 건너뛴다).
+    #
+    # | 규칙 | 기본값 | 분봉에 미치는 영향 |
+    # |---|---|---|
+    # | `TAKE_PROFIT_PCT` | 0.09 | **상승을 9%에서 자른다.** 측정에서 익절은 꼬리를 구조적으로 없앤다(익절 3%는 스킬 30%에서도 P(+100%)=0) |
+    # | `TRAILING_ACTIVATE_PCT` | 0.025 | +2.5%만 올라도 발동해 되돌림에 바로 잘린다 |
+    # | `MDD_SOFT_LIMIT` / `HARD` | 0.07 / 0.12 | 익스포저 84%에서 쉽게 닿는다. 소프트는 신규 진입 차단, 하드는 전량 청산 + 쿨다운 |
+    # | `CRASH_DROP_PCT` | 0.045 | 급등주의 정상 변동폭이다 |
+    # | `DAILY_LOSS_LIMIT` | 0.03 | 보유 종목이 평균 3.6%만 내려도 그날 거래가 끝난다 |
+    #
+    # `STOP_LOSS_PCT`(0.12)는 남긴다 — 단일 종목 붕괴를 막는 마지막 선이고
+    # 측정에서 수익을 깎지 않았다(−0.147 → 0.425).
+    #
+    # **세션 중에 한 번 잘못 봤다.** "MDD 한도가 꺼져 있다"고 판단했는데, 존재하지
+    # 않는 필드명(`SOFT_MDD_LIMIT`/`HARD_MDD_LIMIT`)을 조회해 `None`을 받은 것이었다.
+    # 설정값을 확인할 때는 **필드가 실제로 있는지** 먼저 봐야 한다.
     MDD_HARD_LIMIT: float = Field(default=0.12, description="하드 MDD: 전량 청산 + 쿨다운")
     DERISK_RATIO: float = Field(default=0.5, description="소프트 트리거 시 유지할 익스포저 비율")
     COOLDOWN_MINUTES: int = Field(default=60, description="킬스위치 이후 신규 진입 금지 시간(분)")
