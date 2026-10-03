@@ -89,7 +89,8 @@ def load_minutes(minute_dir: str, symbols: List[str]) -> Dict[str, pd.DataFrame]
 def replay_day(day: str, day_bars: Dict[str, Dict[str, tuple]],
                prev: Dict[str, Tuple[float, float]],
                w: IntradayWatcher, settings,
-               per_day: int, weight: float, cost: float) -> Dict[str, object]:
+               per_day: int, weight: float, cost: float,
+               buy_band: float = 0.0) -> Dict[str, object]:
     """하루를 재연한다. 반환은 그날의 거래 목록과 진단 수치.
 
     `day_bars`는 `{종목: {분ts: (open, high, low, close, cum)}}`로 **미리 잘려 있어야
@@ -116,6 +117,7 @@ def replay_day(day: str, day_bars: Dict[str, Dict[str, tuple]],
     trades: List[Dict[str, object]] = []
     triggers = 0
     swaps = 0
+    unfilled = 0
     diag_minutes: List[int] = []
     diag_speed: List[int] = []
     flatten_closes = 0
@@ -166,6 +168,24 @@ def replay_day(day: str, day_bars: Dict[str, Dict[str, tuple]],
                 entry = bar[0]
                 if entry <= 0:
                     continue
+                if buy_band > 0:
+                    # --- 지정가 체결 판정 ---
+                    #
+                    # 실거래는 **지정가 매수**를 낸다(`main.py::_submit`,
+                    # `BUY_LIMIT_BAND`). 가격이 지정가 위로 달아나면 **체결되지
+                    # 않는다** — 실측 33,482 사건에서 2.0%에도 14.3%가 미체결이다.
+                    # 모사하지 않으면 리플레이가 "고른 것은 반드시 산다"고 가정해
+                    # 그만큼 낙관적이 된다.
+                    #
+                    # 지정가 기준은 **돌파선**이다(`전일종가 × (1+트리거)`). 실거래에서
+                    # 돌파를 감지한 순간의 시세가 돌파선 근처이기 때문이다. 리플레이의
+                    # `sig.price`는 그 분의 **고가**(먼저 주입한 값)라 그대로 쓰면
+                    # 지정가가 실거래보다 높아져 체결이 과대평가된다.
+                    limit = sig.prev_close * (1.0 + w.trigger_pct) * (1.0 + buy_band)
+                    if bar[2] > limit:          # 다음 분 저가가 지정가 위 → 미체결
+                        unfilled += 1
+                        continue
+                    entry = min(limit, bar[0])  # 시가가 더 싸면 시가에 체결
                 held[sig.symbol] = {"entry": entry, "qty_w": weight,
                                     "score": sig.freshness}
                 w.open_watch(sig.symbol, entry, sig.freshness)
@@ -198,6 +218,7 @@ def replay_day(day: str, day_bars: Dict[str, Dict[str, tuple]],
         overnight.append(sym)
     return {"trades": trades, "triggers": triggers, "overnight": overnight,
             "flatten_closes": flatten_closes, "swaps": swaps,
+            "unfilled": unfilled,
             "trig_minutes": diag_minutes, "speeds": diag_speed}
 
 
@@ -217,6 +238,8 @@ def main() -> int:
                     help="돌파 기준을 덮어쓴다(0=설정값 사용)")
     ap.add_argument("--ttl", type=int, default=-1,
                     help="후보 명부 보관 분(−1=설정값). 0이면 그 분에 발동한 것만 본다")
+    ap.add_argument("--no-fill-sim", action="store_true",
+                    help="지정가 미체결을 모사하지 않는다(이전 동작, 비교용)")
     ap.add_argument("--out", default="reports/replay_intraday.json")
     args = ap.parse_args()
 
@@ -320,6 +343,7 @@ def main() -> int:
     overnight: List[str] = []
     flatten_closes = 0
     tot_swaps = 0
+    tot_unfilled = 0
     tmins: List[int] = []
     speeds: List[int] = []
     for k, day in enumerate(days, 1):
@@ -328,12 +352,14 @@ def main() -> int:
         # (실제로 그렇게 깨져 거래 0건이 나왔다).
         prev = {sym: prev_map.get(sym, {}).get(day, (0.0, 0.0)) for sym in index}
         r = replay_day(day, day_slice(day), prev, w, s,
-                       args.per_day, args.weight, cost)
+                       args.per_day, args.weight, cost,
+                       buy_band=(0.0 if args.no_fill_sim else s.BUY_LIMIT_BAND))
         all_trades.extend(r["trades"])          # type: ignore[arg-type]
         tot_trig += int(r["triggers"])          # type: ignore[arg-type]
         overnight.extend(r["overnight"])        # type: ignore[arg-type]
         flatten_closes += int(r["flatten_closes"])  # type: ignore[arg-type]
         tot_swaps += int(r["swaps"])            # type: ignore[arg-type]
+        tot_unfilled += int(r["unfilled"])      # type: ignore[arg-type]
         tmins.extend(r["trig_minutes"])         # type: ignore[arg-type]
         speeds.extend(r["speeds"])              # type: ignore[arg-type]
         if k % 50 == 0:
@@ -351,6 +377,12 @@ def main() -> int:
     print(f"  마감 정리로 청산    {flatten_closes:,}건")
     print(f"  교체               {tot_swaps:,}건  "
           f"(하루 한도 {s.INTRADAY_MAX_SWAPS}회 · 여유 {s.INTRADAY_SWAP_MARGIN})")
+    if args.no_fill_sim:
+        print(f"  지정가 미체결       모사 안 함 (--no-fill-sim) — 결과가 낙관적이다")
+    else:
+        tot_try = len(tmins) + tot_unfilled
+        print(f"  지정가 미체결       {tot_unfilled:,}건 / 시도 {tot_try:,}건 "
+              f"({tot_unfilled / max(1, tot_try):.1%}) · 매수 폭 {s.BUY_LIMIT_BAND:.1%}")
     print(f"  **오버나이트 잔여   {len(overnight):,}건**  "
           f"{'→ 정상(0건이어야 한다)' if not overnight else '→ 버그! 마감 정리가 동작하지 않는다'}")
     if tmins:
@@ -382,6 +414,7 @@ def main() -> int:
               f"P(-50%) {(eq <= -0.5).mean() * 100:.2f}%")
     print("=" * 100)
     print(" 리플레이는 분 전체 거래량으로 판정하므로 실거래(분 중간 누적)보다 관대하다.")
+    print(" **매도 미체결은 모사하지 않는다** — 실측 체결률 99.71%로 영향이 미미하다.")
     print(" 진입가는 다음 분 시가로 실거래(감지 즉시)보다 불리하다. 두 차이가 상쇄되지 않는다.")
 
     out = Path(args.out)
@@ -394,7 +427,9 @@ def main() -> int:
                    "flatten": s.INTRADAY_FLATTEN_HHMM},
         "validation": {"triggers": tot_trig, "entries": len(tmins),
                        "flatten_closes": flatten_closes,
-                       "overnight": len(overnight)},
+                       "overnight": len(overnight),
+                       "unfilled": tot_unfilled,
+                       "fill_sim": not args.no_fill_sim},
         "performance": ({"n": int(len(rets)), "win": float((rets > 0).mean()),
                          "mean": float(rets.mean()), "std": float(rets.std())}
                         if len(rets) else {}),
