@@ -50,7 +50,9 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
 import sys
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -256,6 +258,28 @@ def main() -> int:
     s = get_settings()
     setup_logging(s.LOG_DIR, s.LOG_LEVEL)
     cost = s.round_trip_cost
+
+    # --- 중복 실행 방지 ---
+    #
+    # 같은 리플레이가 두 번 돌아 **같은 출력 파일에 쓰는** 일이 있었다. 백그라운드
+    # 체인을 `nohup`으로 띄웠더니 래퍼의 종료 코드가 1로 보고돼 "실패"로 판단하고
+    # 같은 작업을 다시 시작했는데, 실제로는 자식 프로세스가 살아 있었다. 두
+    # 프로세스가 각각 1.8GB를 써서 가용 메모리가 0.7GB까지 떨어졌고, 결과 파일도
+    # 서로 덮어썼다.
+    #
+    # 출력 경로 기준으로 잠금 파일을 둔다. 리플레이는 몇 분이면 끝나므로 오래된
+    # 잠금은 무시한다(비정상 종료로 남은 것).
+    lock = Path(args.out).with_suffix(".lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    if lock.exists():
+        age = time.time() - lock.stat().st_mtime
+        if age < 3600:
+            logger.error(f"[Replay] 이미 실행 중으로 보입니다 — {lock} "
+                         f"({age / 60:.0f}분 전 생성). 중복 실행을 막습니다. "
+                         f"비정상 종료였다면 그 파일을 지우십시오")
+            return 3
+        logger.warning(f"[Replay] 오래된 잠금({age / 3600:.1f}시간) 무시: {lock}")
+    lock.write_text(str(os.getpid()), encoding="utf-8")
     syms = sorted(p.stem for p in Path(args.minute_dir).glob("*.csv"))
     if not syms:
         logger.error(f"[Replay] {args.minute_dir} 에 분봉이 없습니다")
@@ -498,6 +522,7 @@ def main() -> int:
                         if len(rets) else {}),
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     logger.success(f"[Replay] 저장 → {out.resolve()}")
+    lock.unlink(missing_ok=True)
     return 0 if not overnight else 2
 
 
