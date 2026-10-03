@@ -206,6 +206,17 @@ class Settings(BaseSettings):
     # 레짐(0.8) ≈ 3.3%로 공식 자체가 만든 값이었다(상한 18%는 닿지도 않았다).
     # 파라미터로 90%에 도달하려면 TARGET_VOLATILITY가 2.5 같은 값이 되어야 하므로
     # 모드를 분리한다. `strategy/risk_manager.py::evaluate_entry()`가 분기한다.
+    # --- 주문 지정가 폭 ---
+    # 매수와 매도가 비대칭이다. 매수는 올라가는 가격을 추격해야 하고(실측 +0.4%에서
+    # 체결률 61.5%), 매도는 내려가는 가격에 양보하는 쪽이다(−0.4%에서 99.71%).
+    # 근거 표는 `main.py::_submit()` 주석에 있다.
+    BUY_LIMIT_BAND: float = Field(
+        default=0.02,
+        description="매수 지정가 상한 폭. 체결률 85.7%·실제 체결가 중앙 +0.313%")
+    SELL_LIMIT_BAND: float = Field(
+        default=0.004,
+        description="매도 지정가 하한 폭. 0.4%에서 체결률 99.71%로 충분하다")
+
     # --- 장중 분봉 전략 (strategy/intraday.py) ---
     # 일봉 엔진과 별개 경로다. 장중에 조건이 충족되는 순간 진입하고 그날 안에 청산한다.
     # 기본 OFF — 켜면 일봉 신호 대신 장중 돌파가 진입을 결정한다.

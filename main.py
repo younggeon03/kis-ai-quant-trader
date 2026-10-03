@@ -565,7 +565,28 @@ class TradingEngine:
     async def _submit(self, symbol: str, side: Side, qty: int, price: float, reason: str) -> bool:
         if qty <= 0:
             return False
-        limit_price = round_to_tick(price * (1.004 if side is Side.BUY else 0.996))
+        # 지정가 폭은 **매수와 매도가 비대칭**이다 (실측 33,482 돌파 사건 · 13.4M 분봉)
+        #
+        # 매수: 가격이 올라가는 중에 그 아래로 걸어 추격해야 한다. +0.4%로는
+        # 체결률이 **61.5%**뿐이고, 못 사는 38.5%가 하필 "빠르게 뛴 급등"이다 —
+        # 측정에서 가장 좋았던 집단(속도 26.5분 vs 61.8분)을 골라서 놓친다.
+        #
+        # | 폭 | 체결률 | 실제 체결가(중앙) |
+        # |---|---|---|
+        # | 0.4% | 61.5% | +0.121% |
+        # | **2.0%** | **85.7%** | **+0.313%** |
+        # | 5.0% | 95.5% | +0.409% |
+        #
+        # 지정가는 **상한**이고 대부분 그보다 싸게 체결되므로, 폭을 0.4%→2.0%로
+        # 열면 체결률이 24%p 오르는 대신 체결가는 0.19%p만 불리해진다. 5%까지
+        # 열지 않는 이유는 돌파선 대비 5% 오른 종목까지 사는 것이 되어 신선도
+        # 신호와 반대 방향이기 때문이다.
+        #
+        # 매도: 가격이 내려가는 중에도 **아래로** 걸어 양보하는 쪽이라
+        # −0.4%에서 체결률 **99.71%**(마감구간 99.84%)다. 넓힐 이유가 없다.
+        band = self.s.BUY_LIMIT_BAND if side is Side.BUY else self.s.SELL_LIMIT_BAND
+        limit_price = round_to_tick(price * (1.0 + band if side is Side.BUY
+                                             else 1.0 - band))
         request = OrderRequest(symbol=symbol, side=side, qty=qty, price=float(limit_price),
                                order_type=OrderType.LIMIT, reason=reason)
         self.ledger.write("order", {
