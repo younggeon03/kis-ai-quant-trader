@@ -361,6 +361,19 @@ class Settings(BaseSettings):
     TRAILING_ACTIVATE_PCT: float = Field(default=0.025, description="트레일링 스톱 활성화 수익률")
     MAX_HOLDING_BARS: int = Field(default=30, description="최대 보유 봉 수(시간 손절)")
     DAILY_LOSS_LIMIT: float = Field(default=0.03, description="일중 손실 한도(당일 시작 자산 대비)")
+    # **`USE_INTRADAY=true`로 쓸 때는 반드시 올려야 한다.**
+    #
+    # `risk_manager.py`가 이것을 **하드 트리거와 동일 취급**해 HALT로 전이하고
+    # 전량 청산 + 쿨다운을 건다. 분봉 전략은 2종목 × 42% = 익스포저 84%이고
+    # 급등주의 일간 변동이 크므로, 보유 종목이 평균 3.6%만 내려도 포트폴리오가
+    # −3%가 되어 **그날 거래가 끝난다.**
+    #
+    # 세션 중에 실제로 놓쳤던 자리다. MDD 한도(SOFT/HARD)는 꺼 뒀는데 이 게이트만
+    # 살아 있었고, **리플레이가 리스크 매니저를 모사하지 않아 측정에 나타나지
+    # 않았다.** 측정과 실거래가 갈라지는 전형적인 지점이다.
+    #
+    # 0.03은 일봉 스윙 기준의 기본값이다. 분봉으로 돌릴 때는 `.env`에서 1.0으로
+    # 사실상 해제한다(킬스위치는 남겨 단일 종목 붕괴만 막는다).
     MDD_SOFT_LIMIT: float = Field(default=0.07, description="소프트 MDD: 신규 진입 차단 + 익스포저 축소")
     MDD_HARD_LIMIT: float = Field(default=0.12, description="하드 MDD: 전량 청산 + 쿨다운")
     DERISK_RATIO: float = Field(default=0.5, description="소프트 트리거 시 유지할 익스포저 비율")
