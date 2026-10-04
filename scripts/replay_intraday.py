@@ -248,6 +248,9 @@ def main() -> int:
                     help="후보 명부 보관 분(−1=설정값). 0이면 그 분에 발동한 것만 본다")
     ap.add_argument("--select", default="freshness", choices=["freshness", "model"],
                     help="돌파 사건 선정 점수. freshness=고정 공식 / model=분봉 모델")
+    ap.add_argument("--features", default="signal",
+                    choices=["all", "signal", "drop-noise"],
+                    help="model 선택 시 쓸 피처 집합(스킬 측정과 같게 둔다)")
     ap.add_argument("--train-frac", type=float, default=0.4,
                     help="model 선택 시 앞쪽 몇 비율을 학습에 쓸지(나머지를 재연)")
     ap.add_argument("--no-fill-sim", action="store_true",
@@ -374,8 +377,7 @@ def main() -> int:
     # (순수 로직 유지).
     model_scores: Optional[Dict[Tuple[str, str], float]] = None
     if args.select == "model":
-        from scripts.minute_skill import build_events
-        from strategy.minute_features import MINUTE_FEATURES
+        from scripts.minute_skill import build_events, select_features
 
         cut = days[max(1, int(len(days) * args.train_frac)) - 1]
         logger.info(f"[Replay] 모델 선택 — 학습 ~{cut} / 재연 {cut}~ "
@@ -387,7 +389,10 @@ def main() -> int:
             lock.unlink(missing_ok=True)
             return 1
         ev["ret"] = ev["ret"] - cost
-        feats = [c for c in MINUTE_FEATURES if c in ev.columns]
+        # 피처는 7종(`signal`)을 쓴다. 절제에서 18종과 성능이 사실상 같았고
+        # (AUC 0.5583 vs 0.5661) 과적합 여지가 작다. **스킬 측정과 같은 집합을
+        # 써야** 두 측정이 비교 가능하다.
+        feats = [c for c in select_features(args.features) if c in ev.columns]
         tr = ev[ev["day"] <= cut]
         te = ev[ev["day"] > cut]
         if len(tr) < 500 or te.empty:

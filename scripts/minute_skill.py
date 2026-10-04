@@ -146,6 +146,20 @@ def build_events(daily: Dict[str, pd.DataFrame], minute_dir: str,
 # **다만 단변량 차이로 빼면 상호작용을 놓친다** — `body_ratio` 단독으로는 차이가
 # 없어도 `vol_burst`가 클 때만 의미가 있을 수 있다. 그래서 집합을 바꿔 끼워
 # 워크포워드 AUC·스킬을 비교해 판정한다.
+# 절제 결과 (워크포워드 5폴드 · 사건 18,269건 · 지문 6a08188dca2d313b)
+#
+# | 집합 | AUC | 환산 스킬 | 선택 평균/회 |
+# |---|---|---|---|
+# | 18종(전부) | 0.5661 | 3.2% | −0.582% |
+# | 14종(노이즈 제거) | **0.5683** | 3.4% | −0.501% |
+# | **7종(신호만)** | 0.5583 | 3.3% | **−0.484%** |
+#
+# **세 집합이 사실상 같다.** 피처를 60% 줄여도 성능이 거의 같다 — 11개가 아무
+# 정보도 추가하지 않고 있었다. 그래서 기본값을 `signal`(7종)로 둔다. 성능이
+# 같으면서 과적합 여지가 작고, 18,269건으로 7개를 학습하는 것이 18개보다 안정적이다.
+#
+# **그리고 어느 집합이든 선택 평균이 전체(−0.200%)보다 나쁘다** — 모델이 고른
+# 것이 무작위보다 못하다. 모델의 문제는 피처 구성이 아니라 신호 자체가 약한 것이다.
 NOISE_FEATURES = ["body_ratio", "run_from_open", "range_pos", "straight_run"]
 SIGNAL_FEATURES = ["speed_5pct", "trig_minute", "turnover_vs_prev", "gap_trigger",
                    "vol_burst", "gap_open", "high_breaks"]
@@ -242,7 +256,7 @@ def main() -> int:
     ap.add_argument("--per-day", type=int, default=2, help="하루 선택 종목 수")
     ap.add_argument("--weight", type=float, default=0.45)
     ap.add_argument("--trials", type=int, default=40000)
-    ap.add_argument("--features", default="all",
+    ap.add_argument("--features", default="signal",
                     choices=["all", "signal", "drop-noise"],
                     help="all=18종 전부 / signal=변별력 확인된 7종 / "
                          "drop-noise=차이 3%% 미만 4종 제외")
