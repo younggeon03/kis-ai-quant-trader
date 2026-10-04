@@ -21,6 +21,7 @@ python scripts/minute_exit_grid.py            # 분봉 청산 규칙 격자
 python scripts/minute_skill.py                # 분봉 모델 스킬(AUC·상위사분위 적중률)
 python scripts/surge_study.py                 # 급등 포착 조건별 선행 수익률 분포
 python scripts/tail_optimizer.py              # P(+100%) 최대 구조 탐색
+python scripts/preflight.py                   # 대회 직전 점검 (--live 로 실서버까지 요구)
 python -m compileall -q config core api strategy backtest utils monitor scripts main.py
 ```
 
