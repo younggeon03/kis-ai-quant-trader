@@ -335,15 +335,26 @@ python scripts/collect_minute.py     # 중단되면 같은 명령으로 이어�
 **토스 IP가 여덟 번 끊겼다**(x.x.x.x / x.x.x.x / x.x.x.x / x.x.x.x).
 403을 만나면 전역 중단 + 종료코드 2로 끝나며 잔여량을 보고한다.
 
-### 1. 완주 후 일괄 재측정 (같은 지문)
+### 1. 완주 후 일괄 재측정 (같은 지문 `a10f19093a158548`)
 
 ```bash
-python scripts/replay_intraday.py --days 250 --vol-mult 12   # 거래량 하한 재확정
-python scripts/minute_exit_grid.py                            # 청산 16종
-python scripts/minute_skill.py                                # 모델 스킬
+python scripts/replay_intraday.py                             # 기준선(신선도 선정)
+python scripts/minute_skill.py --features signal              # 모델 스킬
+python scripts/replay_intraday.py --select model --features signal   # 모델 선정 비교
+python scripts/minute_exit_grid.py                            # 청산 격자
+python scripts/replay_intraday.py --vol-mult 8|20|30          # 거래량 하한 재확정(2차)
 ```
 
-전부 지문을 찍으므로 서로 비교할 수 있다. 리플레이는 5초, 격자·스킬은 수 분이다.
+전부 지문을 찍으므로 서로 비교할 수 있다. 순서는 **결정적인 것부터**다 — 지금 열린
+질문은 "분봉이 스윙을 이기는가"이고 그에 답하는 것은 선정 방식과 스킬이다.
+
+**런타임이 바뀌었다.** 봉이 13.4M → **34,460,159봉**(2.6배)이 되어 리플레이가 5초에서
+**약 25분**이고 메모리가 **3.2GB**다. 두 가지가 따라온다.
+
+- **동시에 돌리지 않는다.** 과거에 측정이 메모리 부족으로 세 번 전손했다.
+- **timeout을 짧게 걸지 않는다.** `timeout 900`을 걸어 800/1158일에서 죽었는데
+  래퍼의 종료코드가 0으로 보여 완료로 착각했다(같은 함정을 두 번째로 밟았다 —
+  nohup 래퍼 때도 같았다). 종료코드 124를 따로 확인한다.
 
 ### 2. 노이즈 피처 제거 — 워크포워드로 판정
 
