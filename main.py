@@ -67,6 +67,7 @@ from utils.market_rules import round_to_tick
 BAR_REFRESH_LOOPS = 40      # 전체 일봉 재적재 주기(루프 수)
 QUOTE_CHUNK = 4             # 루프당 현재가 갱신 종목 수(유량 보호)
 RECONCILE_LOOPS = 30        # 브로커 잔고 대조 주기
+FLATTEN_ORDER_TTL = 30.0    # 마감 정리 구간의 미체결 매도 취소 기준(초)
 FILL_POLL_LOOPS = 5         # 체결 폴링 주기(실서버)
 
 
@@ -811,10 +812,13 @@ class TradingEngine:
             exits.extend(self._rotation_exits(signals, prices, exits))
         for order in exits:
             price = prices.get(order.symbol, order.price)
-            ok = await self._submit(order.symbol, Side.SELL, order.qty, price,
+            qty = self._sellable_qty(order.symbol, order.qty)
+            if qty <= 0:
+                continue  # 이미 낸 매도가 체결 대기 중이다
+            ok = await self._submit(order.symbol, Side.SELL, qty, price,
                                     f"{order.reason.value}|{order.detail}")
             if ok:
-                self.ledger.write("exit", {"symbol": order.symbol, "qty": order.qty,
+                self.ledger.write("exit", {"symbol": order.symbol, "qty": qty,
                                            "reason": order.reason.value, "detail": order.detail})
 
         # --- 장중 청산 (분봉 전략) ---
@@ -831,9 +835,12 @@ class TradingEngine:
                 reason = self.intraday.exit_reason(symbol, price, now)
                 if reason is None:
                     continue
-                ok = await self._submit(symbol, Side.SELL, pos.qty, price, f"INTRADAY|{reason}")
+                qty = self._sellable_qty(symbol, pos.qty)
+                if qty <= 0:
+                    continue  # 이미 낸 매도가 체결 대기 중이다
+                ok = await self._submit(symbol, Side.SELL, qty, price, f"INTRADAY|{reason}")
                 if ok:
-                    self.ledger.write("exit", {"symbol": symbol, "qty": pos.qty,
+                    self.ledger.write("exit", {"symbol": symbol, "qty": qty,
                                                "reason": "intraday", "detail": reason})
 
         # --- 장중 진입 (분봉 전략) ---
@@ -942,6 +949,14 @@ class TradingEngine:
         if self._loops % RECONCILE_LOOPS == 0 and self._loops > 0:
             await self._sync_portfolio()
             await self._sync_open_orders()
+        elif (self.s.USE_INTRADAY and self.intraday.should_flatten(now)
+              and any(o.get("side") == Side.SELL.value for o in self.open_orders.values())):
+            # **마감 정리 구간만 촘촘하게 본다.** 미체결 매도는 취소되고 나서야
+            # 다시 접수되는데(`_sellable_qty` 가드), 평시 주기는 90초이고 TTL은
+            # 180초라 15:15~15:30의 재시도가 4회뿐이다. 이 구간의 미체결은
+            # **오버나이트로 직결**되므로 TTL을 짧게 잡고 매 루프 확인한다.
+            # 비용은 미체결 조회(P1) 한 건이고, 매도 주문이 남아 있을 때만 돈다.
+            await self._sync_open_orders(max_age_seconds=FLATTEN_ORDER_TTL)
 
         # --- 상태 저장 ---
         if self._loops % 5 == 0:
@@ -1112,6 +1127,22 @@ class TradingEngine:
 
     def open_orders_symbols(self) -> set:
         return {o["symbol"] for o in self.open_orders.values()}
+
+    def _pending_sell_qty(self, symbol: str) -> int:
+        """미체결 **매도** 주문의 잔량 합.
+
+        청산 판정은 포지션 수량을 보는데, 주문을 낸 직후에도 체결되기 전까지
+        수량이 그대로 남아 있다. 가드가 없으면 매 루프 같은 수량을 다시 접수해
+        `40320000 주문가능수량을 초과했습니다`가 쌓인다 — 실측에서 매도 4건에
+        거부 15건이 났다. 하필 마감 정리(15:15~15:30)에 집중되는데, 그 구간은
+        주문 레인(P0)을 낭비하면 안 되는 구간이다.
+        """
+        return sum(int(o.get("qty", 0)) for o in self.open_orders.values()
+                   if o.get("symbol") == symbol and o.get("side") == Side.SELL.value)
+
+    def _sellable_qty(self, symbol: str, pos_qty: int) -> int:
+        """지금 추가로 낼 수 있는 매도 수량. 보류 잔량을 뺀다."""
+        return max(0, int(pos_qty) - self._pending_sell_qty(symbol))
 
     def _pending_notional(self) -> Dict[str, float]:
         """미체결 매수 주문의 평가금액. 리스크 한도가 체결 지연 동안 뚫리지 않게 한다."""
