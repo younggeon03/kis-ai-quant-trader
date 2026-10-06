@@ -288,6 +288,12 @@ class TradingEngine:
         """Mock은 가상 시계(봉 1개 = 1거래일), 실서버는 KST 실제 시각."""
         if self.s.USE_MOCK_MODE and self.broker is not None and getattr(self.broker, "is_mock", False):
             cursor = self.broker.sim.cursor  # type: ignore[attr-defined]
+            step = int(self.s.MOCK_MINUTES_PER_LOOP)
+            if step > 0:
+                # 테스트 전용: 날짜를 고정하고 루프마다 분을 전진시킨다. 이렇게
+                # 해야 아침 스캔(09:05)·마감 정리(15:15)가 실제로 발동한다
+                # (기본 동작은 일 단위라 가상 시각이 항상 09:00이다).
+                return self._mock_epoch + dt.timedelta(minutes=self._loops * step)
             return self._mock_epoch + dt.timedelta(days=cursor)
         return self.calendar.now()
 
