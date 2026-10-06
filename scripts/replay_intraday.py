@@ -240,7 +240,7 @@ def main() -> int:
     ap.add_argument("--weight", type=float, default=0.42)
     ap.add_argument("--vol-mult", type=float, default=0.0,
                     help="돌파 봉 거래량 하한 배수를 덮어쓴다(0=설정값 사용). "
-                         "장 시작 직후는 거래가 원래 많아(10분에 하루의 9.7%) "
+                         "장 시작 직후는 거래가 원래 많아(10분에 하루의 9.7%%) "
                          "하한이 낮으면 09:00 노이즈가 전부 통과한다")
     ap.add_argument("--trigger", type=float, default=0.0,
                     help="돌파 기준을 덮어쓴다(0=설정값 사용)")

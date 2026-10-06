@@ -213,7 +213,13 @@ async def run(args) -> int:
             have, have_days = _load_existing(path)
             todo = [d for d in days if d not in have_days]
             if not todo:
+                # **진척 로그보다 먼저 continue 하지 않는다.** 그렇게 두면 받을
+                # 것이 없는 종목 구간에서 로그가 완전히 조용해져, 14분 동안
+                # 멈춘 것인지 도는 것인지 구분할 수 없었다(실제로 그랬다).
                 skipped += len(days)
+                if i % 20 == 0 or i == len(targets):
+                    logger.info(f"[Minute] {i}/{len(targets)}종목 · 수집 {done_days:,}일 "
+                                f"({saved_rows:,}봉) · 기존 {skipped:,}일 · 실패 {failed}")
                 continue
             frames = [have] if not have.empty else []
             for day in todo:
