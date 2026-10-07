@@ -79,17 +79,25 @@ def check(settings, live: bool) -> List[Tuple[str, str, str, str]]:
         f"트리거 +{s.INTRADAY_TRIGGER_PCT:.0%} · 거래량 x{s.INTRADAY_VOL_MULT} · "
         f"스캔 {s.INTRADAY_SCAN_HHMM} · 마감 {s.INTRADAY_FLATTEN_HHMM}",
         "꺼져 있으면 일봉 스윙으로 돈다")
-    add(FATAL, "고정 사이징", s.SIZING_MODE == "fixed",
-        f"{s.SIZING_MODE} · {s.MAX_POSITIONS}종목 x {s.FIXED_POSITION_WEIGHT:.0%}",
-        "vol_target 이면 종목당 3%로 들어가 익스포저가 6%대가 된다")
+    # **사이징 검사는 전략별로 갈린다.** 분봉은 고정 2종목 x 42%, 스윙은 8슬롯
+    # 변동성 타게팅으로 측정했다. 전략과 무관하게 한쪽을 요구하면 다른 쪽이
+    # 통과할 수 없고, 실제로 스윙 분기와 모순됐다.
     gross = s.MAX_POSITIONS * s.FIXED_POSITION_WEIGHT
-    add(FATAL, "익스포저 여유", gross <= s.MAX_GROSS_EXPOSURE - 0.02,
-        f"{s.MAX_POSITIONS} x {s.FIXED_POSITION_WEIGHT:.0%} = {gross:.0%} "
-        f"(상한 {s.MAX_GROSS_EXPOSURE:.0%})",
-        "여유가 없으면 부분 체결 중 두 번째 진입이 '주문가능금액 부족'으로 거부된다")
-    add(FATAL, "단일 종목 규정", s.FIXED_POSITION_WEIGHT <= 0.50,
-        f"{s.FIXED_POSITION_WEIGHT:.0%} (규정 50%)",
-        "슬리피지로 넘치면 규정 위반이다")
+    if s.USE_INTRADAY:
+        add(FATAL, "고정 사이징", s.SIZING_MODE == "fixed",
+            f"{s.SIZING_MODE} · {s.MAX_POSITIONS}종목 x {s.FIXED_POSITION_WEIGHT:.0%}",
+            "vol_target 이면 종목당 3%로 들어가 익스포저가 6%대가 된다")
+        add(FATAL, "익스포저 여유", gross <= s.MAX_GROSS_EXPOSURE - 0.02,
+            f"{s.MAX_POSITIONS} x {s.FIXED_POSITION_WEIGHT:.0%} = {gross:.0%} "
+            f"(상한 {s.MAX_GROSS_EXPOSURE:.0%})",
+            "여유가 없으면 부분 체결 중 두 번째 진입이 '주문가능금액 부족'으로 거부된다")
+        add(FATAL, "단일 종목 규정", s.FIXED_POSITION_WEIGHT <= 0.50,
+            f"{s.FIXED_POSITION_WEIGHT:.0%} (규정 50%)",
+            "슬리피지로 넘치면 규정 위반이다")
+    else:
+        add(FATAL, "단일 종목 규정", s.MAX_POSITION_WEIGHT <= 0.50,
+            f"{s.MAX_POSITION_WEIGHT:.0%} (규정 50%)",
+            "슬리피지로 넘치면 규정 위반이다")
 
     # --- 리스크 해제 (장중 전략일 때만) ---
     if s.USE_INTRADAY:
@@ -115,6 +123,44 @@ def check(settings, live: bool) -> List[Tuple[str, str, str, str]]:
         add(WARN, "손절 유지", s.STOP_LOSS_PCT > 0,
             f"{s.STOP_LOSS_PCT:.0%}",
             "단일 종목 붕괴를 막는 마지막 선이다")
+    else:
+        # --- 일봉 스윙으로 돌아왔을 때 ---
+        #
+        # **이 분기가 없으면 스윙 복귀가 조용히 잘못된 설정으로 돈다.** 분봉용으로
+        # 풀어 둔 게이트(익절 0 · 트레일링 0 · MDD 1.0 · 일일손실 1.0)는 스윙에서
+        # 검증된 설정이 **아니다.** 절제 실험(21구간 x 30봉, 40종목):
+        #
+        # | 설정 | Sharpe | 누적 |
+        # |---|---|---|
+        # | 원래 기준선(손절 3.5% · 익절 9%) | −0.348 | −9.2% |
+        # | **손절 12% + 익절 제거** | **0.873** | **+33.2%** |
+        # | 손절 12% + 익절 + **트레일링** 제거 | 0.799 | +31.1% |
+        # | 트레일링 제거만 | −0.255 | −7.2% |
+        #
+        # 즉 스윙에서 트레일링은 **유지**해야 하고 익절은 **제거**해야 한다.
+        add(FATAL, "익절 제거(스윙)", s.TAKE_PROFIT_PCT == 0.0,
+            f"{s.TAKE_PROFIT_PCT}",
+            "익절 9%는 상위 20%의 10봉 상승 +16.1% 중 +8.9%만 실현해 45%를 버린다")
+        add(FATAL, "트레일링 유지(스윙)", s.TRAILING_ACTIVATE_PCT > 0,
+            f"{s.TRAILING_ACTIVATE_PCT}",
+            "분봉용으로 꺼 둔 채 스윙으로 내리면 Sharpe 0.873이 아니라 −0.255 설정이다")
+        add(FATAL, "변동성 사이징(스윙)", s.SIZING_MODE == "vol_target",
+            f"{s.SIZING_MODE}",
+            "fixed 2종목 x 42%는 분봉 전용이다. 스윙은 8슬롯 변동성 타게팅으로 측정했다")
+        add(WARN, "MDD 게이트(스윙)", s.MDD_SOFT_LIMIT < 1.0,
+            f"소프트 {s.MDD_SOFT_LIMIT} · 하드 {s.MDD_HARD_LIMIT}",
+            "30봉 구간에서는 발동하지 않는 것으로 측정됐지만, 분봉용 1.0을 그대로 두면 "
+            "익스포저가 커질 때 보호가 없다")
+        add(WARN, "일일 손실(스윙)", s.DAILY_LOSS_LIMIT < 1.0,
+            f"{s.DAILY_LOSS_LIMIT}",
+            "분봉용으로 풀어 둔 값이다")
+        add(WARN, "신호 반전(스윙)", s.SIGNAL_SELL_THRESHOLD > -1.0,
+            f"{s.SIGNAL_SELL_THRESHOLD}",
+            "스윙에서는 일봉 점수 반전이 정상 청산 사유다 — 분봉용 −9.9는 그것을 끈다")
+        add(WARN, "유니버스 단서(스윙)", len(s.UNIVERSE) <= 60,
+            f"{len(s.UNIVERSE)}종목",
+            "검증된 0.873/+33.2% 는 **40종목**에서 측정했다(reports/ablate_exits.json "
+            "config.symbols=40). 284종목 스윙은 미측정이다")
 
     # --- 주문 ---
     add(FATAL, "지정가 비대칭", s.BUY_LIMIT_BAND > s.SELL_LIMIT_BAND,
