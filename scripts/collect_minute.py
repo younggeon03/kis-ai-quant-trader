@@ -243,6 +243,7 @@ async def run(args) -> int:
     saved_rows = 0
     skipped = 0
     failed = 0
+    empty = 0
     aborted = False
     async with TossDataClient(s) as cli:
         for i, (sym, days) in enumerate(sorted(targets.items()), 1):
@@ -256,7 +257,7 @@ async def run(args) -> int:
                 skipped += len(days)
                 if i % 20 == 0 or i == len(targets):
                     logger.info(f"[Minute] {i}/{len(targets)}종목 · 수집 {done_days:,}일 "
-                                f"({saved_rows:,}봉) · 기존 {skipped:,}일 · 실패 {failed}")
+                                f"({saved_rows:,}봉) · 기존 {skipped:,}일 · 빈응답 {empty} · 실패 {failed}")
                 continue
             frames = [have] if not have.empty else []
             for day in todo:
@@ -276,6 +277,12 @@ async def run(args) -> int:
                         break
                     continue
                 if got.empty:
+                    # **빈 응답을 세야 한다.** 세지 않으면 성공도 실패도 아닌 것이
+                    # 되어 "완료 · 실패 0"으로 보고되고, 사실은 받지 못했다는 것이
+                    # 가려진다. 실제로 그렇게 커버리지가 84%였는데 완료로 보였다.
+                    # 토스는 문서상 2022-01-03까지지만 **종목별 실제 보유 시작이 더
+                    # 늦다** — 2022년 커버리지가 월별 38~65%, 2023년 이후 94.8%다.
+                    empty += 1
                     continue
                 frames.append(got)
                 done_days += 1
@@ -287,7 +294,7 @@ async def run(args) -> int:
                 merged.to_csv(path, index=False)
             if i % 20 == 0 or i == len(targets):
                 logger.info(f"[Minute] {i}/{len(targets)}종목 · 수집 {done_days:,}일 "
-                            f"({saved_rows:,}봉) · 기존 {skipped:,}일 · 실패 {failed}")
+                            f"({saved_rows:,}봉) · 기존 {skipped:,}일 · 빈응답 {empty} · 실패 {failed}")
             if aborted:
                 break
     remaining = total_days - done_days - skipped
@@ -299,7 +306,12 @@ async def run(args) -> int:
         logger.warning(f"[Minute] 완료(실패 {failed}건) — {done_days:,}일 "
                        f"{saved_rows:,}봉 → {out_dir}")
     else:
-        logger.success(f"[Minute] 완료 — {done_days:,}일 {saved_rows:,}봉 → {out_dir}")
+        if empty:
+            logger.warning(f"[Minute] 완료 — {done_days:,}일 {saved_rows:,}봉 → {out_dir} "
+                           f"(빈 응답 {empty:,}일 — 토스가 그 날 데이터를 주지 않는다. "
+                           "종목별 보유 시작이 문서상 한계보다 늦다)")
+        else:
+            logger.success(f"[Minute] 완료 — {done_days:,}일 {saved_rows:,}봉 → {out_dir}")
     return 0
 
 

@@ -1225,6 +1225,69 @@ def test_orderbook_recorder():
             "쓰기 실패 격리(예외 미전파) 모두 작동")
 
 
+@check("21. 장중 burst 배관 (main.py)")
+def test_burst_wiring():
+    """`_prime_intraday` → `turnover_med20` → `_feed_intraday` → 대기열.
+
+    **Mock으로는 이 경로를 검증할 수 없다.** Mock 합성 데이터의 거래대금 10배
+    폭증은 0.0723%(46/63,600)뿐이라 73일 x 40종목 스모크에서 기댓값이 2.1건이고,
+    실제로 0건이 나왔다. 실데이터는 약 2.6%로 **36배 더 자주** 터진다. 그래서
+    데이터에 의존하지 않고 **배관만** 고정한다.
+
+    17번이 `IntradayWatcher`를 직접 검증하지만, `main.py`가 20봉 거래대금 중앙값을
+    계산해 `prime()`에 넘기는 구간은 아무도 보지 않았다. **분모가 0이면 그 종목은
+    조용히 영원히 발동하지 않는다.**
+    """
+    import datetime as dt
+
+    import pandas as pd
+
+    from main import TradingEngine
+
+    s = make_settings()
+    s.USE_INTRADAY = True
+    s.INTRADAY_ENTRY_MODE = "burst"
+    s.INTRADAY_BURST_MULT = 10.0
+    s.INTRADAY_FLATTEN = False
+    eng = TradingEngine(s, enable_dashboard=False)
+
+    # 20봉 거래대금 중앙값이 1,000만원이 되도록 패널을 만든다
+    # (종가 1,000원 x 거래량 10,000주). 마지막 봉은 '오늘'이라 기준에서 빠져야 한다.
+    days = [f"2026090{i}" if i < 10 else f"202609{i}" for i in range(1, 26)]
+    base = pd.DataFrame({
+        "ts": days,
+        "open": [1000.0] * len(days), "high": [1010.0] * len(days),
+        "low": [990.0] * len(days), "close": [1000.0] * len(days),
+        "volume": [10_000.0] * len(days),
+    })
+    eng.panel = {"AAA": base.copy()}
+    eng._prev_daily = {}
+    eng._now = lambda: dt.datetime(2026, 9, 26, 9, 5)   # 패널 마지막 봉보다 뒤
+    eng._prime_intraday()
+
+    st = eng.intraday.states.get("AAA")
+    assert st is not None, "prime 이 종목 상태를 만들지 않았다"
+    assert st.turnover_med20 > 0, "거래대금 중앙값이 0 — burst 가 영원히 발동하지 않는다"
+    assert abs(st.turnover_med20 - 10_000_000.0) < 1.0,         f"중앙값 계산 오류: {st.turnover_med20:,.0f} (기대 10,000,000)"
+
+    now = dt.datetime(2026, 9, 26, 9, 5)
+    # 임계 = 1,000만 x 10 = 1억. 가격 1,000원이면 10만주가 필요하다.
+    eng._intraday_queue.clear()
+    eng._feed_intraday("AAA", 1000.0, 50_000.0, now)       # 5,000만 — 미달
+    assert not eng._intraday_queue, "임계 미달인데 대기열에 들어갔다"
+    eng._feed_intraday("AAA", 1000.0, 110_000.0, now + dt.timedelta(minutes=1))
+    assert len(eng._intraday_queue) == 1,         f"임계 초과인데 발동하지 않았다 (대기열 {len(eng._intraday_queue)})"
+
+    # USE_INTRADAY 가 꺼져 있으면 아무것도 흐르지 않는다
+    eng._intraday_queue.clear()
+    eng.intraday.reset_day("20260927")
+    s.USE_INTRADAY = False
+    eng._feed_intraday("AAA", 1000.0, 999_999.0, now + dt.timedelta(days=1))
+    assert not eng._intraday_queue, "USE_INTRADAY=False 인데 흘렀다"
+    return ("20봉 거래대금 중앙값 전달 · 임계 미달/초과 판정 · "
+            "USE_INTRADAY 분기 모두 작동 (Mock 데이터는 폭증이 0.07%뿐이라 검증 불가)")
+
+
 # ============================================================ 실행
 
 async def run_all() -> int:
@@ -1236,7 +1299,7 @@ async def run_all() -> int:
         test_live_client_offline, test_validation, test_weights_and_bets,
         test_competition_rules, test_selection_and_phase, test_panel_min_bars,
         test_intraday, test_intraday_book, test_decay_exits,
-        test_orderbook_recorder,
+        test_orderbook_recorder, test_burst_wiring,
     ]
     print("\n" + "=" * 86)
     print(" KIS AI Quant Trader — 셀프 테스트")

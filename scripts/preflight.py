@@ -81,17 +81,31 @@ def check(settings, live: bool) -> List[Tuple[str, str, str, str]]:
     # 요구하면 다른 쪽이 통과할 수 없다(실제로 catalyst가 스윙 분기로 떨어져
     # "트레일링 유지"와 "vol_target"을 치명으로 요구받았다 — 둘 다 반대다).
     #
-    # | 모드 | 사이징 | 익절 | 트레일링 | 보유 |
-    # |---|---|---|---|---|
-    # | intraday | fixed 2 x 42% | 제거 | 제거 | 당일 청산 |
-    # | catalyst | fixed 2 x 45% | 제거 | 제거 | 6봉 시간손절 |
-    # | swing | vol_target 8슬롯 | 갈림(WARN) | **유지** | 30봉 |
-    mode = ("intraday" if s.USE_INTRADAY
-            else ("catalyst" if s.ENTRY_MODE == "catalyst" else "swing"))
-    add(WARN, "전략 모드", mode in ("intraday", "catalyst"),
-        f"{mode} (USE_INTRADAY={s.USE_INTRADAY} · ENTRY_MODE={s.ENTRY_MODE})",
-        "swing 은 30일당 +0.75~0.86%로 측정됐고 P(+100%)가 0.96%다 — "
-        "catalyst 1.67% 보다 낮다")
+    # | 모드 | 진입 | 사이징 | 트레일링 | 청산 경로 | P(+100%) |
+    # |---|---|---|---|---|---|
+    # | intraday | 장중 돌파 | fixed 2 x 42% | 제거 | 당일 15:15 | **0.00%** |
+    # | catalyst | 일봉 폭증(T+1 시가) | fixed 2 x 45% | 유지 | 일봉 6봉 | 1.40~1.67% |
+    # | **burst** | **장중 폭증(당일)** | fixed 2 x 45% | 유지 | 일봉 6봉 | **2.09%** |
+    # | swing | 일봉 모델 점수 | vol_target 8슬롯 | **유지** | 30봉 | 0.96% |
+    #
+    # `burst`는 `USE_INTRADAY=true` + `INTRADAY_FLATTEN=false`다. 장중에 진입하고
+    # **청산은 일봉 경로**(손절 + 감쇠 3종 + 시간손절)가 맡는다. 그래서 출구 요구
+    # 사항이 `intraday`가 아니라 `catalyst`와 같다 — 분류를 틀리면 "트레일링 해제"를
+    # 치명으로 요구받는데 그것은 감쇠 청산과 정반대다.
+    if s.USE_INTRADAY and s.INTRADAY_FLATTEN:
+        mode = "intraday"
+    elif s.USE_INTRADAY:
+        mode = "burst"
+    elif s.ENTRY_MODE == "catalyst":
+        mode = "catalyst"
+    else:
+        mode = "swing"
+    daily_exit = mode in ("catalyst", "burst")
+    add(WARN, "전략 모드", mode == "burst",
+        f"{mode} (USE_INTRADAY={s.USE_INTRADAY} · FLATTEN={s.INTRADAY_FLATTEN} · "
+        f"ENTRY_MODE={s.ENTRY_MODE})",
+        "측정 최선은 burst 2.09%다 (catalyst 1.40% · 스윙 0.96% · 분봉 단타 0.00%). "
+        "대응 비교에서 장중 진입이 T+1보다 P(+100%) +0.74%p, McNemar p=0.039")
     intra_cond = (f"거래대금 x{s.INTRADAY_BURST_MULT:g}(장중 누적)"
                   if s.INTRADAY_ENTRY_MODE == "burst"
                   else f"트리거 +{s.INTRADAY_TRIGGER_PCT:.0%} · 거래량 x{s.INTRADAY_VOL_MULT}")
@@ -111,7 +125,7 @@ def check(settings, live: bool) -> List[Tuple[str, str, str, str]]:
     # 변동성 타게팅으로 측정했다. 전략과 무관하게 한쪽을 요구하면 다른 쪽이
     # 통과할 수 없고, 실제로 스윙 분기와 모순됐다.
     gross = s.MAX_POSITIONS * s.FIXED_POSITION_WEIGHT
-    if mode in ("intraday", "catalyst"):
+    if mode in ("intraday", "catalyst", "burst"):
         add(FATAL, "고정 사이징", s.SIZING_MODE == "fixed",
             f"{s.SIZING_MODE} · {s.MAX_POSITIONS}종목 x {s.FIXED_POSITION_WEIGHT:.0%}",
             "vol_target 이면 종목당 3%로 들어가 익스포저가 6%대가 된다")
@@ -128,8 +142,8 @@ def check(settings, live: bool) -> List[Tuple[str, str, str, str]]:
             "슬리피지로 넘치면 규정 위반이다")
 
     # --- 리스크 해제 (intraday · catalyst 공통) ---
-    # 둘 다 꼬리를 사는 전략이라 상승을 자르는 규칙을 전부 끈다.
-    if mode in ("intraday", "catalyst"):
+    # 셋 다 꼬리를 사는 전략이라 상승을 자르는 규칙을 전부 끈다.
+    if mode in ("intraday", "catalyst", "burst"):
         add(FATAL, "익절 해제", s.TAKE_PROFIT_PCT == 0.0, f"{s.TAKE_PROFIT_PCT}",
             "9%면 상승을 거기서 자른다 — 꼬리가 구조적으로 사라진다")
         # **트레일링은 모드마다 반대다.** 분봉은 당일 청산이라 되돌림 청산이 겹쳐
@@ -158,7 +172,7 @@ def check(settings, live: bool) -> List[Tuple[str, str, str, str]]:
             f"{s.STOP_LOSS_PCT:.0%}",
             "단일 종목 붕괴를 막는 마지막 선이다")
 
-    if mode == "catalyst":
+    if daily_exit:
         # --- 꼬리 전수 탐색의 승자 구조가 실제로 그 값인지 확인한다 ---
         #
         # 지문 22d557320d0e640d · 284종목 · 조건 6종 x 종목수 4 x 회전 5 · 시행 8만.
@@ -204,6 +218,24 @@ def check(settings, live: bool) -> List[Tuple[str, str, str, str]]:
         add(WARN, "급락 임계값", 0.0 < s.CRASH_DROP_PCT < 1.0,
             f"최근 {s.CRASH_LOOKBACK}봉 고점 대비 −{s.CRASH_DROP_PCT:.0%}",
             "1.0 이상이면 crash 가 목록에 있어도 발동하지 않는다")
+
+    if mode == "burst":
+        # --- 장중 진입이 측정된 설정인지 ---
+        #
+        # 지문 8e0104239f174a6e · 2023-01-01~ · 258종목 · 커버리지 94.8% ·
+        # 사건 4,082건. 배수 스윕에서 10/20/30배는 **통계적으로 구분되지 않았고**
+        # (z≈1.2) 10배가 커버리지·표본이 가장 크다. 보유는 6~10봉이 평평하다
+        # (3봉 1.58% · 6봉 2.09% · 10봉 2.19% · 15봉 1.70%).
+        add(FATAL, "장중 진입 모드", s.INTRADAY_ENTRY_MODE == "burst",
+            f"{s.INTRADAY_ENTRY_MODE}",
+            "breakout(가격 +3% 돌파)은 P(+100%) 0.00%로 측정됐다")
+        add(WARN, "장중 폭증 배수", abs(s.INTRADAY_BURST_MULT - 10.0) < 1e-9,
+            f"x{s.INTRADAY_BURST_MULT:g}",
+            "10/20/30배는 구분되지 않는다 — 10배가 커버리지 94.8%로 가장 신뢰할 만하다")
+        add(WARN, "일봉 폭증 배수 일치", abs(s.INTRADAY_BURST_MULT
+                                      - s.CATALYST_BURST_MULT) < 1e-9,
+            f"장중 x{s.INTRADAY_BURST_MULT:g} / 일봉 x{s.CATALYST_BURST_MULT:g}",
+            "두 경로가 다른 집단을 보면 측정과 실거래가 갈린다")
     if mode == "swing":
         # --- 일봉 스윙(모델 진입)으로 돌아왔을 때 ---
         #

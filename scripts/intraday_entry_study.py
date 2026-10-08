@@ -131,6 +131,11 @@ def main() -> int:
     ap.add_argument("--burst-mult", type=float, default=10.0)
     ap.add_argument("--hold", type=int, default=6, help="보유 일수(일봉 기준)")
     ap.add_argument("--warmup", type=int, default=300)
+    ap.add_argument("--since", default="20230101",
+                    help="이 날짜 이후의 폭증일만 쓴다. **커버리지 편향을 막는 장치다** — "
+                         "토스 분봉은 종목별 보유 시작이 문서상 한계(2022-01-03)보다 "
+                         "늦어, 2021년 0% · 2022년 월별 38~65% · 2023년 이후 94.8%다. "
+                         "구간을 넓히면 분봉 있는 날만 골라 보게 된다")
     ap.add_argument("--trials", type=int, default=40000)
     ap.add_argument("--per-day", type=int, default=2, help="동시 보유 종목 수")
     ap.add_argument("--out", default="reports/intraday_entry_study.json")
@@ -155,6 +160,9 @@ def main() -> int:
         fp_src[sym] = d["close"].to_numpy(float)
         idx, thresh = burst_days(d, args.burst_mult, args.warmup)
         idx = idx[(idx + args.hold) < len(d)]
+        if args.since:
+            days_arr = d["ts"].astype(str).to_numpy()
+            idx = idx[days_arr[idx] >= args.since]
         if not len(idx):
             continue
         n_burst += len(idx)
@@ -213,7 +221,7 @@ def main() -> int:
         "config": {"burst_mult": args.burst_mult, "hold": args.hold,
                    "rounds": rounds, "per_day": args.per_day, "weight": w,
                    "trials": args.trials, "round_trip_cost": cost,
-                   "warmup": args.warmup},
+                   "warmup": args.warmup, "since": args.since},
         "coverage": {"burst_days": n_burst, "with_minute": n_cover,
                      "detected": n_detect, "usable": int(len(fr))},
         "detect_min": {q: float(np.percentile(fr["detect_min"], q))
@@ -251,8 +259,11 @@ def main() -> int:
           f"{rounds}라운드 · {args.per_day}종목 x {w:.0%} · 왕복비용 {cost:.3%}")
     print(f" 데이터 지문 {fp} ({len(fp_src)}종목) — 지문이 다른 실행과는 비교할 수 없다")
     print("=" * 104)
-    print(f" 폭증일 {n_burst:,} → 분봉 보유 {n_cover:,} ({n_cover / max(1, n_burst):.1%}) "
-          f"→ 감지 {n_detect:,} → 사용 {len(fr):,}")
+    print(f" 구간 {args.since}~ · 폭증일 {n_burst:,} → 분봉 보유 {n_cover:,} "
+          f"({n_cover / max(1, n_burst):.1%}) → 감지 {n_detect:,} → 사용 {len(fr):,}")
+    if n_cover < n_burst * 0.9:
+        print(f" **커버리지 {n_cover / max(1, n_burst):.1%} — 90% 미만이면 "
+              f"'분봉 있는 날'만 보는 편향이 남는다. --since 를 늦춰라**")
     dm = out["detect_min"]
     print(f" 감지 시각(09:00 기준 분)  p10 {dm[10]:.0f} · p25 {dm[25]:.0f} · "
           f"중앙 {dm[50]:.0f} · p75 {dm[75]:.0f} · p90 {dm[90]:.0f}")
