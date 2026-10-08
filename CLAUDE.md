@@ -23,6 +23,8 @@ python scripts/surge_study.py                 # 급등 포착 조건별 선행 �
 python scripts/tail_optimizer.py              # P(+100%) 최대 구조 탐색(조건 1종)
 python scripts/tail_grid.py                   # 꼬리 구조 전수 탐색(조건 6종 x 종목수 x 회전)
 python scripts/ablate_exits.py --set catalyst # catalyst 진입 구조를 실엔진으로 확인
+python scripts/intraday_entry_study.py        # 장중 진입 vs T+1 진입(다일 보유)
+python scripts/collect_minute.py --select turnover  # 거래대금 폭증일 분봉 수집
 python scripts/preflight.py                   # 대회 직전 점검 (--live 로 실서버까지 요구)
 python -m compileall -q config core api strategy backtest utils monitor scripts main.py
 ```

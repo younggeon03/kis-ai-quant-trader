@@ -183,9 +183,11 @@ class TradingEngine:
                     continue
                 prev = hist.iloc[-1]
                 # 20봉 거래대금 중앙값 — `burst` 모드의 분모다.
-                # 정의를 `strategy/catalyst_features.py`와 맞춘다
-                # (`turnover = 종가 x 거래량`, 20봉 **중앙값**). 갈리면 장중
-                # 조건과 일봉 조건이 다른 것을 보게 된다.
+                # `turnover = 종가 x 거래량` 정의는 `catalyst_features`와 같지만
+                # **창이 한 칸 다르다**: 일봉 피처는 `rolling(20)`으로 당일을
+                # 포함하는데(인과적이지만 09:00에는 모르는 값), 여기서는
+                # `hist`(전일까지)의 마지막 20봉을 쓴다. 폭증일 자신이 중앙값에
+                # 들어가지 않으므로 같은 배수에서 약간 더 쉽게 발동한다.
                 tail = hist.tail(20)
                 med20 = float(
                     (tail["close"].astype(float) * tail["volume"].astype(float)).median()
