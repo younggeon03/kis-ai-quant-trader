@@ -20,7 +20,9 @@ python scripts/replay_intraday.py --days 250  # 분봉 리플레이(장중 전�
 python scripts/minute_exit_grid.py            # 분봉 청산 규칙 격자
 python scripts/minute_skill.py                # 분봉 모델 스킬(AUC·상위사분위 적중률)
 python scripts/surge_study.py                 # 급등 포착 조건별 선행 수익률 분포
-python scripts/tail_optimizer.py              # P(+100%) 최대 구조 탐색
+python scripts/tail_optimizer.py              # P(+100%) 최대 구조 탐색(조건 1종)
+python scripts/tail_grid.py                   # 꼬리 구조 전수 탐색(조건 6종 x 종목수 x 회전)
+python scripts/ablate_exits.py --set catalyst # catalyst 진입 구조를 실엔진으로 확인
 python scripts/preflight.py                   # 대회 직전 점검 (--live 로 실서버까지 요구)
 python -m compileall -q config core api strategy backtest utils monitor scripts main.py
 ```

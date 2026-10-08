@@ -25,6 +25,7 @@ python scripts/preflight.py --live     # 실서버 전환 여부까지 요구한
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 from typing import List, Tuple
@@ -181,6 +182,16 @@ def check(settings, live: bool) -> List[Tuple[str, str, str, str]]:
     n = len(s.UNIVERSE)
     add(FATAL, "유니버스", n >= 50, f"{n}종목 (파일 {s.UNIVERSE_FILE or '없음'})",
         "비어 있거나 기본 40종목이면 확장 효과가 없다")
+    # **종목코드가 숫자 6자리인지 본다.** 유니버스에 `0035S0`·`0010F0` 같은 코드가
+    # 8개 섞여 있다(전부 실제 코스닥 기업이고 최근 상장이라 임시 코드로 보인다).
+    # KIS 주문은 **단축코드 6자리**를 요구하므로 이 코드로는 주문이 거부될 수 있고,
+    # 백테스트에서는 이력 하한 필터가 조용히 걸러 내므로 측정에 나타나지 않는다.
+    odd = [c for c in s.UNIVERSE if not re.fullmatch(r"\d{6}", str(c))]
+    add(WARN, "종목코드 형식", not odd,
+        f"비표준 {len(odd)}개" + (f" ({', '.join(odd[:5])}…)" if odd else ""),
+        "KIS 주문은 단축코드 6자리를 요구한다 — 실거래에서 거부될 수 있다. "
+        "유니버스 재생성 시 제외하거나 주문 전 개별 확인이 필요하다")
+
     blob = s._universe_blob() or {}
     as_of = str(blob.get("as_of") or "")
     fresh = bool(as_of) and (not s.COMP_START or as_of >= "2026-10-01")
