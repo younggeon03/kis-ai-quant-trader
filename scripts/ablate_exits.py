@@ -327,22 +327,31 @@ _CAT = {
     "MAX_GROSS_EXPOSURE": 0.95,          # 2 x 45% = 90%, 부분체결 여유 5%p
     "USE_TOP_K": False, "MIN_HOLDING_BARS": 0,
     "TAKE_PROFIT_PCT": 0.0,              # 꼬리를 자르지 않는다
-    "TRAILING_ACTIVATE_PCT": 0.0,
     "SIGNAL_SELL_THRESHOLD": -9.9,       # 청산은 시간·손절만 담당한다
     "MDD_SOFT_LIMIT": 1.0, "MDD_HARD_LIMIT": 1.0, "DAILY_LOSS_LIMIT": 1.0,
-    "CRASH_DROP_PCT": 0.30,
+    # **감쇠 청산은 전부 끈다 — 측정 결과다.** 사건 단위 측정(4,082건)에서
+    # 거래량 감소·상승 감쇠·급격한 하락이 모두 꼬리를 깎았고, 거래량 감소는
+    # 발동률 80.9%로 P(+100%)를 2.09% → 1.01%로 반토막냈다.
+    # 느슨하게 하면 "거의 안 걸리는 상태"로 수렴하고 조이면 단조적으로 나빠진다.
+    "EXIT_RULES": "", "TRAILING_ACTIVATE_PCT": 0.0, "CRASH_DROP_PCT": 0.30,
+    "EXIT_VOL_DECAY_RATIO": 0.0,
 }
 
 CATALYST_CONFIGS: List[Dict[str, Any]] = [
     {"name": "기준선(.env 그대로)", "delta": {}},
-    # 승자 구조. 부트스트랩에는 손절이 없었으므로 손절 유무를 따로 가른다.
-    {"name": "catalyst 2x45% 6봉 손절12",
-     "delta": {**_CAT, "MAX_HOLDING_BARS": 6, "STOP_LOSS_PCT": 0.12}},
-    {"name": "catalyst 2x45% 6봉 손절없음",
+    # **확정 구조.** 손절 25%는 꼬리를 0.02%p만 깎고(2.09→2.07) 단일 종목 붕괴를
+    # 막는 보험이다. 2종목 x 45%에서 한 종목 반토막이 계좌 −22.5%다.
+    {"name": "확정 2x45% 6봉 손절25",
+     "delta": {**_CAT, "MAX_HOLDING_BARS": 6, "STOP_LOSS_PCT": 0.25}},
+    # 손절 유무 — 부트스트랩에는 손절이 없었다. 보험 비용을 실엔진에서 확인한다.
+    {"name": "손절없음 (상한 확인)",
      "delta": {**_CAT, "MAX_HOLDING_BARS": 6, "STOP_LOSS_PCT": _NO_STOP}},
-    # 2위 구조. 보유 길이만 바꾼 단일 변수 비교다.
-    {"name": "catalyst 2x45% 10봉 손절12",
-     "delta": {**_CAT, "MAX_HOLDING_BARS": 10, "STOP_LOSS_PCT": 0.12}},
+    # 기각된 값 — 사건 단위에서 2.09 → 1.89%였다. 실엔진에서도 나쁜지 본다.
+    {"name": "손절12 (기각값 재확인)",
+     "delta": {**_CAT, "MAX_HOLDING_BARS": 6, "STOP_LOSS_PCT": 0.12}},
+    # 보유 길이만 바꾼 단일 변수 비교(사건 단위에서 6봉 2.09% vs 10봉 2.19%, 노이즈).
+    {"name": "확정 + 보유 10봉",
+     "delta": {**_CAT, "MAX_HOLDING_BARS": 10, "STOP_LOSS_PCT": 0.25}},
 ]
 
 CONFIG_SETS: Dict[str, List[Dict[str, Any]]] = {
