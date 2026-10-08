@@ -449,6 +449,37 @@ class Settings(BaseSettings):
     COOLDOWN_MINUTES: int = Field(default=60, description="킬스위치 이후 신규 진입 금지 시간(분)")
     CRASH_DROP_PCT: float = Field(default=0.045, description="단기 급락 감지 임계(전량 청산 트리거)")
     CRASH_LOOKBACK: int = Field(default=10, description="급락 감지 룩백(봉 수)")
+
+    # ------------------------------------------------- 감쇠 기반 청산 (exit_rules)
+    #
+    # 규칙 구현은 `strategy/exit_rules.py`에 있다. 청산 규칙이 관문 코드
+    # (`risk_manager.evaluate_exits`) 안에 하드코딩돼 있어서, 파인튜닝 대상인데
+    # 가장 조심해야 하는 곳을 건드려야 했다. 그래서 분리했다.
+    #
+    # `EXIT_RULES`는 **순서 있는 목록**이다. 같은 봉에서 둘이 동시에 충족될 때
+    # 어느 쪽으로 기록되느냐가 달라지므로 순서도 설정으로 노출한다.
+    #
+    # | 규칙 | 보는 것 | 근거 |
+    # |---|---|---|
+    # | `crash` | 최근 `CRASH_LOOKBACK`봉 고점 대비 `CRASH_DROP_PCT` 하락 | 급등주 붕괴는 단발로 온다 |
+    # | `trailing` | 고점 − `TRAILING_ATR_MULT` x ATR | 절제 실험에서 **트레일링 제거가 두 실행 모두 악화**(−0.255 / −0.089) |
+    # | `vol_decay` | 거래대금이 보유 중 고점의 `EXIT_VOL_DECAY_RATIO` 아래 | 신규. 폭증이 식으면 상승 동력이 사라진다 |
+    #
+    # 기본값을 `crash,trailing`으로 둔 것은 **기존 동작을 보존**하기 위해서다
+    # (분리 전 `evaluate_exits`의 순서가 급락 → 트레일링이었다). `vol_decay`는
+    # 측정 전이라 기본 OFF다(`EXIT_VOL_DECAY_RATIO=0`).
+    EXIT_RULES: str = Field(
+        default="crash,trailing",
+        description="감쇠 청산 규칙의 순서 있는 목록(쉼표 구분). "
+                    "가능: crash, trailing, vol_decay / 빈 문자열이면 전부 끈다")
+    EXIT_VOL_DECAY_RATIO: float = Field(
+        default=0.0,
+        description="거래대금이 보유 중 고점의 이 비율 아래로 줄면 청산(0=끔). "
+                    "예: 0.3 이면 고점의 30% 미만")
+    EXIT_VOL_DECAY_MIN_BARS: int = Field(
+        default=2,
+        description="거래량 감소 청산의 최소 보유 봉 수. 진입 직후 거래가 적다고 "
+                    "바로 털리지 않게 한다")
     USE_TOP_K: bool = Field(
         default=False,
         description="점수 상위 K개를 골라 목표 익스포저를 채운다. False면 기존 절대 "

@@ -46,6 +46,7 @@ class ExitReason(str, Enum):
     TIME_STOP = "TIME_STOP"
     SIGNAL = "SIGNAL"
     CRASH_GUARD = "CRASH_GUARD"
+    VOL_DECAY = "VOL_DECAY"        # 거래대금이 보유 중 고점 대비 줄어 상승 동력 소멸
     KILL_SWITCH = "KILL_SWITCH"
     DERISK = "DERISK"
     EOD = "EOD"

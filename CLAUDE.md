@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-python scripts/selftest.py                    # 전체 검증 (18개 항목) — 변경 후 필수로 실행
+python scripts/selftest.py                    # 전체 검증 (19개 항목) — 변경 후 필수로 실행
 python scripts/train_model.py --days 1500     # AI 모델 학습 → models/alpha_gbdt.pkl
 python scripts/train_model.py --source data/cache --no-flow   # 수급 피처 제외(측정용)
 python scripts/run_backtest.py --days 1000    # 백테스트 → reports/
@@ -186,6 +186,41 @@ KIS 유량: 실전 20건/초, **모의투자 2건/초**. 기본값은 모의투�
   대신 미체결을 영원히 기다리면 오버나이트가 되므로, 마감 정리 구간에서는
   `_sync_open_orders`를 매 루프 `FLATTEN_ORDER_TTL=30`초로 돌려 취소·재접수한다.
 
+### 9-1. 청산 규칙은 `strategy/exit_rules.py`에 있다
+
+청산은 **두 경로**가 따로 있다.
+
+- 일봉/catalyst: `strategy/risk_manager.py::evaluate_exits()`
+- 장중 분봉: `strategy/intraday.py::exit_reason()` (15:15 마감 정리 포함)
+
+감쇠 기반 규칙 세 개는 모듈로 분리했다. **순수 로직이라 주문도 포트폴리오도
+모르고**, 가격·거래대금·ATR을 받아 사유만 돌려준다(셀프테스트 19번).
+
+| 규칙 | 보는 것 | 설정 |
+|---|---|---|
+| `crash` | 최근 `CRASH_LOOKBACK`봉 고점 대비 하락 | `CRASH_DROP_PCT` |
+| `trailing` | 고점 − `TRAILING_ATR_MULT` x ATR | `TRAILING_ACTIVATE_PCT` |
+| `vol_decay` | 거래대금이 **보유 중 고점**의 비율 아래 | `EXIT_VOL_DECAY_RATIO` |
+
+`EXIT_RULES`가 **순서 있는 목록**이다(`crash,trailing,vol_decay`). 같은 봉에서
+둘이 동시에 충족될 때 앞쪽 규칙으로 기록되므로 **순서가 사유별 통계를 바꾼다.**
+
+알아야 할 네 가지.
+
+- **우선순위가 바뀌었다.** 분리 전에는 급락이 손절보다 먼저였고 지금은
+  `킬스위치 > 손절 > 감쇠 > 익절 > 시간손절 > 신호반전`이다. 급락 임계값이
+  손절보다 크면 손절이 먼저 걸려 사유 라벨이 바뀐다(청산 자체는 일어난다).
+- **`check()`는 매 봉 한 번만 부른다.** 고점·거래대금 고점·가격 버퍼를 그 안에서
+  갱신하므로, 건너뛰면 되돌림 기준이 멈추고 두 번 부르면 룩백 창이 두 배로 흐른다.
+- **미보유 종목의 상태를 반드시 버린다.** 남기면 과거 폭증일의 거래대금 고점이
+  살아 있어 같은 종목 **재진입 첫 봉에 `vol_decay`가 바로 걸린다.**
+  `evaluate_exits()`가 매 호출마다 정리한다.
+- **`turnover_map`을 백테스트와 실거래 양쪽에서 넘겨야 한다.** 한쪽만 넘기면
+  그 규칙이 조용히 꺼지고 두 경로가 갈린다. 정의는 양쪽 모두 **가격 x 거래량**이며
+  `catalyst_features.py`의 `turnover`와 같다(정의가 갈리면 진입 조건과 청산 조건이
+  다른 것을 본다). 실거래는 `Quote.volume`(KIS `acml_vol`, 당일 누적)을 쓴다 —
+  패널 마지막 봉의 거래량은 `_apply_latest_prices_to_panel()`이 갱신하지 않는다.
+
 ### 10. 측정 전에 데이터 지문을 확인한다
 
 `scripts/ablate_exits.py`와 `scripts/replay_intraday.py`가 실행마다 패널 지문
@@ -262,3 +297,9 @@ KIS 유량: 실전 20건/초, **모의투자 2건/초**. 기본값은 모의투�
   질문은 **중요한 순으로 하나씩**, 선택지마다 **무엇이 바뀌고 무엇을 포기하는지** 적어서 낸다.
   "진행해도 되나요" 같은 빈 확인은 묻지 않는다 — 답이 작업을 실제로 줄이는 것만 묻는다.
 - 작은 작업(버그 수정, 로그 추가, 문서 최신화, 셀프테스트 보강)은 묻지 않고 한다.
+- **구현을 전부 끝낸 뒤에 측정한다.** 시스템을 다 만들어 놓고 파인튜닝하는 순서다.
+  측정과 구현을 번갈아 하면 지문이 갈리고(§10) 무엇이 기여했는지 알 수 없다.
+- **파인튜닝 대상은 모듈로 분리한다.** 튜닝할 값이 관문 코드 안에 있으면 값을
+  바꿀 때마다 모든 주문의 최종 결정권자를 건드려야 한다. 실제로 청산 규칙이
+  `risk_manager.evaluate_exits()` 안에 하드코딩돼 있어서 `strategy/exit_rules.py`로
+  분리했다. 순수 로직만 두면 네트워크 없이 셀프테스트로 검증된다.

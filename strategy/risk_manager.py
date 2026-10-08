@@ -23,6 +23,8 @@ import numpy as np
 
 from config.settings import Settings, get_settings
 from core.events import ExitReason, Fill, Portfolio, Position, RiskDecision, Side, Signal
+from strategy.exit_rules import (RULE_CRASH, RULE_TRAILING, RULE_VOL_DECAY,
+                                 DecayExitTracker)
 from utils.krx_calendar import KST
 from utils.logger import logger
 from utils.market_rules import affordable_qty
@@ -76,6 +78,14 @@ class RiskSnapshot:
         }
 
 
+# 감쇠 규칙 이름 → 청산 사유. `exit_rules`는 순수 로직이라 `ExitReason`을 모른다.
+_DECAY_REASON = {
+    RULE_CRASH: ExitReason.CRASH_GUARD,
+    RULE_TRAILING: ExitReason.TRAILING_STOP,
+    RULE_VOL_DECAY: ExitReason.VOL_DECAY,
+}
+
+
 class RiskManager:
     def __init__(self, settings: Optional[Settings] = None):
         self.s = settings or get_settings()
@@ -85,7 +95,11 @@ class RiskManager:
         self.kill_switch_count = 0
         self._recent_trades: Deque[float] = deque(maxlen=60)  # 수익률 기록(Kelly 추정)
         self._reasons: Deque[str] = deque(maxlen=50)
-        self._price_history: Dict[str, Deque[float]] = {}
+        # 감쇠 청산(거래량 감소·상승 감쇠·급락)은 `strategy/exit_rules.py`가 맡는다.
+        # 규칙을 관문 코드 안에 두면 파인튜닝 때마다 모든 주문의 최종
+        # 결정권자를 건드려야 한다. 상태(고점·거래대금 고점·가격 버퍼)도
+        # 그쪽이 들고 있어 여기서 중복 추적하지 않는다.
+        self.decay = DecayExitTracker(self.s)
         self._last_day: Optional[dt.date] = None
         self._halt_equity: float = 0.0
         self._phase = None   # 대회 국면(strategy/phase.PhaseConfig). None이면 평소 규칙
@@ -186,10 +200,13 @@ class RiskManager:
         self._reasons.append(f"{new_state}: {reason}")
 
     def track_price(self, symbol: str, price: float) -> None:
-        """급락 감지를 위한 가격 버퍼."""
-        buf = self._price_history.setdefault(symbol, deque(maxlen=max(2, self.s.CRASH_LOOKBACK)))
-        if price > 0:
-            buf.append(price)
+        """하위 호환용 — 가격 버퍼는 이제 `exit_rules`가 `check()`에서 직접 채운다.
+
+        **여기서 또 채우면 안 된다.** 룩백 창이 두 배로 빨리 흘러 급락 감지가
+        실제보다 짧은 구간만 보게 된다. 호출부를 지우지 않고 남겨 둔 것은
+        외부에서 부르는 경로가 있을 때 조용히 깨지지 않게 하기 위해서다.
+        """
+        return None
 
     # ================================================================== 포지션 사이징
     _MIN_KELLY_SAMPLES = 12
@@ -430,15 +447,36 @@ class RiskManager:
         atr_map: Optional[Dict[str, float]] = None,
         signals: Optional[Dict[str, float]] = None,
         now: Optional[dt.datetime] = None,
+        turnover_map: Optional[Dict[str, float]] = None,
     ) -> List[ExitOrder]:
         """보유 포지션에 대한 청산 주문 목록을 생성한다.
 
-        우선순위: 킬스위치 > 급락 > 손절 > 트레일링 > 익절 > 시간손절 > 신호청산 > 디리스킹
+        우선순위: **킬스위치 > 손절 > 감쇠(`EXIT_RULES` 순서) > 익절 > 시간손절
+        > 신호청산 > 디리스킹**
+
+        감쇠 규칙(급락·상승 감쇠·거래량 감소)은 `strategy/exit_rules.py`가 맡고
+        순서는 `EXIT_RULES` 설정이 정한다. 분리 전에는 급락이 손절보다 먼저였는데
+        **지금은 손절이 먼저다.** 급락 임계값(기본 4.5%, catalyst 30%)이 손절
+        (12%)보다 크면 손절이 먼저 걸리므로 사유 라벨이 CRASH_GUARD에서
+        STOP_LOSS로 바뀐다. 청산 자체는 어느 쪽이든 일어나므로 수익에는 영향이
+        없지만 **사유별 통계는 달라진다.**
+
+        `turnover_map`은 거래량 감소 규칙(`vol_decay`)의 입력이다. 넘기지 않으면
+        그 규칙만 조용히 비활성화된다 — 백테스트와 실거래 **양쪽 호출부에서
+        같이 넘겨야 한다**(한쪽만 넘기면 두 경로가 갈린다).
         """
         atr_map = atr_map or {}
         signals = signals or {}
+        turnover_map = turnover_map or {}
         exits: List[ExitOrder] = []
         open_positions = portfolio.open_positions()
+
+        # **보유하지 않는 종목의 감쇠 상태를 버린다.** 남겨 두면 같은 종목에 다시
+        # 진입할 때 묵은 거래대금 고점이 그대로 살아 있어 `vol_decay`가 첫 봉에서
+        # 바로 걸린다(고점은 과거 폭증일, 현재는 평상 거래량이므로 비율이 낮다).
+        for sym in list(self.decay.states):
+            if sym not in open_positions:
+                self.decay.close(sym)
 
         # --- 하드 킬스위치: 전량 청산 ---
         if self.state == RiskState.HALT:
@@ -459,22 +497,28 @@ class RiskManager:
             pos.mark(price)
             atr = atr_map.get(symbol, 0.0)
 
-            # 1) 급락 감지 — 1단계에서는 손절류를 전부 건너뛴다
+            # 감쇠 규칙 평가. **판정보다 먼저, 매 봉 한 번만** 부른다 —
+            # `check()`가 고점·거래대금 고점·가격 버퍼를 갱신하므로 건너뛰면
+            # 되돌림 기준이 멈추고, 두 번 부르면 룩백 창이 두 배로 빨리 흐른다.
+            decay = self.decay.check(symbol, price,
+                                     turnover=turnover_map.get(symbol, 0.0),
+                                     atr=atr, entry=pos.avg_price)
+            # 트레일링이 제시한 손절선을 단방향으로만 올린다(내리지 않는다).
+            trail = self.decay.trail_stop(symbol, atr)
+            if trail > 0:
+                pos.stop_price = max(pos.stop_price, trail)
+                if not pos.trailing_active:
+                    pos.trailing_active = True
+                    self._reasons.append(f"TRAIL_ON: {symbol} @{pos.pnl_pct:.2%}")
+
+            # 1단계(초기화 옵션이 하방을 덮는 구간)에서는 손절류를 전부 건너뛴다.
             if not self.use_stop_loss:
                 if pos.bars_held >= self.s.MAX_HOLDING_BARS:
                     exits.append(ExitOrder(symbol, pos.qty, ExitReason.TIME_STOP, price,
                                            f"보유 {pos.bars_held}봉 초과"))
                 continue
 
-            buf = self._price_history.get(symbol)
-            if buf and len(buf) >= 3:
-                peak = max(buf)
-                if peak > 0 and (peak - price) / peak >= self.s.CRASH_DROP_PCT:
-                    exits.append(ExitOrder(symbol, pos.qty, ExitReason.CRASH_GUARD, price,
-                                           f"단기 급락 {(peak - price) / peak:.2%}"))
-                    continue
-
-            # 2) 고정 손절
+            # 1) 고정 손절
             if pos.stop_price > 0 and price <= pos.stop_price:
                 exits.append(ExitOrder(symbol, pos.qty, ExitReason.STOP_LOSS, price,
                                        f"손절선 {pos.stop_price:,.0f} 이탈"))
@@ -484,20 +528,11 @@ class RiskManager:
                                        f"손실률 {pos.pnl_pct:.2%}"))
                 continue
 
-            # 3) 트레일링 스톱
-            trail_on = self.s.TRAILING_ACTIVATE_PCT > 0
-            if trail_on and not pos.trailing_active and pos.pnl_pct >= self.s.TRAILING_ACTIVATE_PCT:
-                pos.trailing_active = True
-                self._reasons.append(f"TRAIL_ON: {symbol} @{pos.pnl_pct:.2%}")
-            if trail_on and pos.trailing_active:
-                trail_dist = self.s.TRAILING_ATR_MULT * atr if atr > 0 else pos.peak_price * 0.03
-                trail_stop = pos.peak_price - trail_dist
-                # 트레일링 스톱은 손절선을 아래로 내리지 않는다(단방향 상향)
-                pos.stop_price = max(pos.stop_price, trail_stop)
-                if price <= pos.stop_price:
-                    exits.append(ExitOrder(symbol, pos.qty, ExitReason.TRAILING_STOP, price,
-                                           f"고점 {pos.peak_price:,.0f} 대비 {trail_dist:,.0f} 하락"))
-                    continue
+            # 2) 감쇠 청산 — 거래량 감소 · 상승 감쇠 · 급격한 하락
+            if decay is not None:
+                exits.append(ExitOrder(symbol, pos.qty, _DECAY_REASON[decay.rule],
+                                       price, decay.reason))
+                continue
 
             # 4) 익절
             if self.s.TAKE_PROFIT_PCT > 0 and pos.pnl_pct >= self.s.TAKE_PROFIT_PCT:
@@ -587,7 +622,7 @@ class RiskManager:
     def reset(self) -> None:
         self.state = RiskState.NORMAL
         self.cooldown_until = None
-        self._price_history.clear()
+        self.decay.reset()
 
     # ================================================================== 스냅샷
     def snapshot(self, portfolio: Optional[Portfolio] = None) -> Dict[str, Any]:

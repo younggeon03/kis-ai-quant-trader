@@ -256,6 +256,8 @@ class BacktestEngine:
         closes = {s: self.panel[s]["close"].to_numpy(dtype=float) for s in symbols}
         opens = {s: self.panel[s]["open"].to_numpy(dtype=float) for s in symbols}
         lows = {s: self.panel[s]["low"].to_numpy(dtype=float) for s in symbols}
+        # 거래량 감소 청산(`EXIT_RULES`의 vol_decay) 입력용
+        volumes = {s: self.panel[s]["volume"].to_numpy(dtype=float) for s in symbols}
         ts_list = self.panel[symbols[0]]["ts"].astype(str).tolist()
         atrs = {
             s: (featured[s]["atr_abs"].to_numpy(dtype=float)
@@ -298,9 +300,16 @@ class BacktestEngine:
             )
             score_map = {sig.symbol: sig.score for sig in signals}
             atr_map = {s: float(atrs[s][i]) if np.isfinite(atrs[s][i]) else 0.0 for s in symbols}
+            # 거래량 감소 청산(`EXIT_RULES`의 vol_decay)의 입력. 거래대금 = 종가 x 거래량으로
+            # `strategy/catalyst_features.py`의 `turnover`와 같은 정의를 쓴다 —
+            # 정의가 갈리면 진입 조건과 청산 조건이 다른 것을 보게 된다.
+            # **실거래 경로(`main.py`)에도 같이 넘겨야 한다.** 한쪽만 넘기면 두 경로가 갈린다.
+            turnover_map = {s: float(prices.get(s, 0.0)) * float(volumes[s][i])
+                            if np.isfinite(volumes[s][i]) else 0.0 for s in symbols}
 
             # --- 청산 심사 → 다음 봉 시가 체결 ---
-            exits = self.risk.evaluate_exits(self.portfolio, prices, atr_map, score_map, now)
+            exits = self.risk.evaluate_exits(self.portfolio, prices, atr_map, score_map, now,
+                                             turnover_map=turnover_map)
             if self.s.USE_TOP_K:
                 exits.extend(self._rotation_exits(signals, prices, regime, exits))
             for order in exits:

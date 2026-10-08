@@ -76,6 +76,22 @@ def check(settings, live: bool) -> List[Tuple[str, str, str, str]]:
             "--live 로 점검하면 FATAL 로 판정한다")
 
     # --- 전략 ---
+    #
+    # **세 가지 모드가 있고 요구 설정이 서로 모순된다.** 전략과 무관하게 한쪽을
+    # 요구하면 다른 쪽이 통과할 수 없다(실제로 catalyst가 스윙 분기로 떨어져
+    # "트레일링 유지"와 "vol_target"을 치명으로 요구받았다 — 둘 다 반대다).
+    #
+    # | 모드 | 사이징 | 익절 | 트레일링 | 보유 |
+    # |---|---|---|---|---|
+    # | intraday | fixed 2 x 42% | 제거 | 제거 | 당일 청산 |
+    # | catalyst | fixed 2 x 45% | 제거 | 제거 | 6봉 시간손절 |
+    # | swing | vol_target 8슬롯 | 갈림(WARN) | **유지** | 30봉 |
+    mode = ("intraday" if s.USE_INTRADAY
+            else ("catalyst" if s.ENTRY_MODE == "catalyst" else "swing"))
+    add(WARN, "전략 모드", mode in ("intraday", "catalyst"),
+        f"{mode} (USE_INTRADAY={s.USE_INTRADAY} · ENTRY_MODE={s.ENTRY_MODE})",
+        "swing 은 30일당 +0.75~0.86%로 측정됐고 P(+100%)가 0.96%다 — "
+        "catalyst 1.67% 보다 낮다")
     add(WARN, "장중 전략", s.USE_INTRADAY,
         f"트리거 +{s.INTRADAY_TRIGGER_PCT:.0%} · 거래량 x{s.INTRADAY_VOL_MULT} · "
         f"스캔 {s.INTRADAY_SCAN_HHMM} · 마감 {s.INTRADAY_FLATTEN_HHMM}",
@@ -84,7 +100,7 @@ def check(settings, live: bool) -> List[Tuple[str, str, str, str]]:
     # 변동성 타게팅으로 측정했다. 전략과 무관하게 한쪽을 요구하면 다른 쪽이
     # 통과할 수 없고, 실제로 스윙 분기와 모순됐다.
     gross = s.MAX_POSITIONS * s.FIXED_POSITION_WEIGHT
-    if s.USE_INTRADAY:
+    if mode in ("intraday", "catalyst"):
         add(FATAL, "고정 사이징", s.SIZING_MODE == "fixed",
             f"{s.SIZING_MODE} · {s.MAX_POSITIONS}종목 x {s.FIXED_POSITION_WEIGHT:.0%}",
             "vol_target 이면 종목당 3%로 들어가 익스포저가 6%대가 된다")
@@ -100,14 +116,19 @@ def check(settings, live: bool) -> List[Tuple[str, str, str, str]]:
             f"{s.MAX_POSITION_WEIGHT:.0%} (규정 50%)",
             "슬리피지로 넘치면 규정 위반이다")
 
-    # --- 리스크 해제 (장중 전략일 때만) ---
-    if s.USE_INTRADAY:
-        for name, value, limit, why in (
-            ("익절", s.TAKE_PROFIT_PCT, 0.0, "9%면 상승을 거기서 자른다"),
-            ("트레일링", s.TRAILING_ACTIVATE_PCT, 0.0, "2.5%면 되돌림에 바로 잘린다"),
-        ):
-            add(FATAL, f"{name} 해제", value == limit, f"{value}",
-                why + " — 꼬리가 구조적으로 사라진다")
+    # --- 리스크 해제 (intraday · catalyst 공통) ---
+    # 둘 다 꼬리를 사는 전략이라 상승을 자르는 규칙을 전부 끈다.
+    if mode in ("intraday", "catalyst"):
+        add(FATAL, "익절 해제", s.TAKE_PROFIT_PCT == 0.0, f"{s.TAKE_PROFIT_PCT}",
+            "9%면 상승을 거기서 자른다 — 꼬리가 구조적으로 사라진다")
+        # **트레일링은 모드마다 반대다.** 분봉은 당일 청산이라 되돌림 청산이 겹쳐
+        # 2.5%에 바로 잘리므로 꺼야 한다. catalyst는 6봉 보유라 "상승이 식으면
+        # 청산"이 설계의 일부이고, 절제 실험에서 트레일링 제거가 두 실행 모두
+        # 악화였다(−0.255 / −0.089). 구현은 `strategy/exit_rules.py`다.
+        if mode == "intraday":
+            add(FATAL, "트레일링 해제", s.TRAILING_ACTIVATE_PCT == 0.0,
+                f"{s.TRAILING_ACTIVATE_PCT}",
+                "당일 청산과 겹쳐 되돌림에 바로 잘린다 — 꼬리가 사라진다")
         for name, value, why in (
             ("MDD 소프트", s.MDD_SOFT_LIMIT, "신규 진입 차단"),
             ("MDD 하드", s.MDD_HARD_LIMIT, "전량 청산 + 쿨다운"),
@@ -118,14 +139,62 @@ def check(settings, live: bool) -> List[Tuple[str, str, str, str]]:
         add(WARN, "신호 반전 해제", s.SIGNAL_SELL_THRESHOLD <= -1.0,
             f"{s.SIGNAL_SELL_THRESHOLD}",
             "일봉 점수로 장중 포지션을 청산한다(개념 불일치)")
-        add(WARN, "급락 완화", s.CRASH_DROP_PCT >= 0.20,
-            f"{s.CRASH_DROP_PCT:.0%}",
-            "4.5%는 급등주의 정상 변동폭이다")
+        if mode == "intraday":
+            add(WARN, "급락 완화", s.CRASH_DROP_PCT >= 0.20,
+                f"{s.CRASH_DROP_PCT:.0%}",
+                "4.5%는 급등주의 정상 변동폭이다")
         add(WARN, "손절 유지", s.STOP_LOSS_PCT > 0,
             f"{s.STOP_LOSS_PCT:.0%}",
             "단일 종목 붕괴를 막는 마지막 선이다")
-    else:
-        # --- 일봉 스윙으로 돌아왔을 때 ---
+
+    if mode == "catalyst":
+        # --- 꼬리 전수 탐색의 승자 구조가 실제로 그 값인지 확인한다 ---
+        #
+        # 지문 22d557320d0e640d · 284종목 · 조건 6종 x 종목수 4 x 회전 5 · 시행 8만.
+        # 승자는 **거래대금 10배 x 2종목 x 45% x 6봉 보유**로 P(+100%) 1.67%다
+        # (2위 10봉 1.57% · 스윙 0.96% · 분봉 단타 0.00%).
+        #
+        # 값이 하나만 어긋나도 측정한 구조가 아니게 되는데, 로그에는 아무 경고도
+        # 나오지 않는다. 그래서 기대값과 실제값을 코드로 비교한다.
+        add(FATAL, "catalyst 폭증 하한", abs(s.CATALYST_BURST_MULT - 10.0) < 1e-9,
+            f"x{s.CATALYST_BURST_MULT:g} (측정 최적 x10)",
+            "8/12/20/30배를 분봉에서 쓸어 본 결과 하한은 효과가 단조롭지 않다 — "
+            "일봉 폭증도 측정값에서 벗어나면 다른 구조다")
+        add(FATAL, "보유 봉 수", s.MAX_HOLDING_BARS in (6, 10),
+            f"{s.MAX_HOLDING_BARS}봉 (측정 최적 6봉 · 2위 10봉)",
+            "30봉이면 1라운드가 되어 P(+100%)가 0.90%로 떨어진다. "
+            "회전은 중간이 최적이다")
+        add(FATAL, "동시 보유 종목 수", s.MAX_POSITIONS == 2,
+            f"{s.MAX_POSITIONS}종목 (측정 최적 2종목)",
+            "1종목은 50%만 투자되고 40%가 현금으로 남아 0.93%, 3종목은 분산이 "
+            "꼬리를 깎아 0.89%다")
+        add(WARN, "진입 잠금", s.MIN_HOLDING_BARS == 0,
+            f"{s.MIN_HOLDING_BARS}봉",
+            "잠금이 있으면 시간손절과 겹쳐 회전이 의도보다 느려진다")
+
+        # --- 감쇠 청산 (strategy/exit_rules.py) ---
+        #
+        # 거래량 감소 · 상승 감쇠 · 급격한 하락을 셋 다 쓰는 설계다. 임계값은
+        # **아직 측정되지 않은 초기값**이므로 FATAL이 아니라 WARN으로 둔다 —
+        # 켜져 있는지만 확인하고, 값은 측정으로 정한다.
+        rules = [r.strip() for r in str(s.EXIT_RULES or "").split(",") if r.strip()]
+        add(WARN, "감쇠 청산 규칙", len(rules) == 3,
+            ", ".join(rules) or "(없음)",
+            "거래량 감소·상승 감쇠·급격한 하락 셋 다 쓰는 설계다 "
+            "(EXIT_RULES=crash,trailing,vol_decay)")
+        add(WARN, "거래량 감소 하한", s.EXIT_VOL_DECAY_RATIO > 0,
+            f"고점의 {s.EXIT_VOL_DECAY_RATIO:.0%} 미만" if s.EXIT_VOL_DECAY_RATIO > 0
+            else "0 (꺼짐)",
+            "0이면 vol_decay 가 목록에 있어도 발동하지 않는다")
+        add(WARN, "상승 감쇠 무장", s.TRAILING_ACTIVATE_PCT > 0,
+            f"+{s.TRAILING_ACTIVATE_PCT:.1%} 이후 · 고점 −{s.TRAILING_ATR_MULT}xATR"
+            if s.TRAILING_ACTIVATE_PCT > 0 else "0 (꺼짐)",
+            "0이면 trailing 이 목록에 있어도 발동하지 않는다")
+        add(WARN, "급락 임계값", 0.0 < s.CRASH_DROP_PCT < 1.0,
+            f"최근 {s.CRASH_LOOKBACK}봉 고점 대비 −{s.CRASH_DROP_PCT:.0%}",
+            "1.0 이상이면 crash 가 목록에 있어도 발동하지 않는다")
+    if mode == "swing":
+        # --- 일봉 스윙(모델 진입)으로 돌아왔을 때 ---
         #
         # **이 분기가 없으면 스윙 복귀가 조용히 잘못된 설정으로 돈다.** 분봉용으로
         # 풀어 둔 게이트(익절 0 · 트레일링 0 · MDD 1.0 · 일일손실 1.0)는 스윙에서

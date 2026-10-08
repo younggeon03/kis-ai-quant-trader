@@ -93,6 +93,11 @@ class TradingEngine:
         self.watchlist: List[str] = []
         self.panel: Dict[str, pd.DataFrame] = {}
         self.latest_prices: Dict[str, float] = {}
+        # 당일 **누적** 거래량(`Quote.volume` = KIS `acml_vol`). 거래량 감소
+        # 청산(`EXIT_RULES`의 vol_decay)의 입력이다. 패널 마지막 봉의 거래량은
+        # `_apply_latest_prices_to_panel()`이 갱신하지 않으므로(종가·고가·저가만
+        # 덮는다) 여기에 따로 들고 간다.
+        self.latest_volumes: Dict[str, float] = {}
         self.atr_map: Dict[str, float] = {}
         self.vol_map: Dict[str, float] = {}
         # 대회 국면 — 날짜로 결정되며 기간 밖에서는 OFF(평소 동작)다.
@@ -415,6 +420,7 @@ class TradingEngine:
     async def _on_ws_quote(self, quote: Quote) -> None:
         if quote.price > 0:
             self.latest_prices[quote.symbol] = quote.price
+            self.latest_volumes[quote.symbol] = float(quote.volume or 0.0)
             # `Quote.volume`은 KIS `acml_vol`(누적거래량)이다. 감시기가 분이 바뀔 때
             # 기준값을 잡고 차분으로 이번 분의 거래량을 만든다.
             self._feed_intraday(quote.symbol, quote.price, quote.volume, self._now())
@@ -496,6 +502,7 @@ class TradingEngine:
                 quote = await self.broker.get_quote(symbol)
                 if quote and quote.price > 0:
                     self.latest_prices[symbol] = quote.price
+                    self.latest_volumes[symbol] = float(quote.volume or 0.0)
                     self._feed_intraday(symbol, quote.price, quote.volume, self._now())
             except Exception as exc:
                 logger.debug(f"[Quote] {symbol} 조회 실패: {exc}")
@@ -807,7 +814,15 @@ class TradingEngine:
             await self.bus.publish(TOPIC_SIGNAL, signals[0])
 
         # --- 청산(리스크 우선) ---
-        exits = self.risk.evaluate_exits(self.portfolio, prices, self.atr_map, self.score_map, now)
+        # 거래량 감소 청산(`EXIT_RULES`의 vol_decay) 입력.
+        # 거래대금 = 현재가 x 당일 누적 거래량으로, 백테스트
+        # (`backtest/engine.py`: 종가 x 거래량)와 **같은 정의**를 쓴다.
+        # 한쪽만 넘기면 두 경로가 갈려 측정이 실거래를 반영하지 못한다.
+        turnover_map = {sym: float(px) * float(self.latest_volumes.get(sym, 0.0))
+                        for sym, px in prices.items()}
+        exits = self.risk.evaluate_exits(self.portfolio, prices, self.atr_map,
+                                         self.score_map, now,
+                                         turnover_map=turnover_map)
         if self.s.USE_TOP_K:
             exits.extend(self._rotation_exits(signals, prices, exits))
         for order in exits:

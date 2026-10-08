@@ -1029,6 +1029,112 @@ def test_panel_min_bars():
     return (f"하한 없음 {len(without)}종목x30봉 → 하한 적용 {len(with_floor)}종목x{kept}봉 (상대 하한으로 짧은 패널 보호)")
 
 
+@check("19. 감쇠 청산(거래량·상승·급락)")
+def test_decay_exits():
+    """감쇠 청산 모듈 — 거래량 감소 · 상승 감쇠 · 급격한 하락.
+
+    `strategy/exit_rules.py`는 주문도 포트폴리오도 모르는 순수 로직이라 네트워크
+    없이 검증된다. 보는 것은 (1) 세 규칙이 각각 발동하는가, (2) `EXIT_RULES`의
+    **순서**가 결과를 바꾸는가, (3) 임계값이 0이면 꺼지는가, (4) 같은 종목에
+    재진입할 때 **묵은 거래대금 고점이 지워지는가**다.
+
+    (4)가 중요하다. 상태를 남겨 두면 과거 폭증일의 거래대금 고점이 살아 있어
+    재진입 첫 봉에서 `vol_decay`가 바로 걸린다(지금은 평상 거래량이므로 비율이
+    낮다). 실제로 그렇게 될 수 있는 구조였고 `evaluate_exits`가 매 호출마다
+    미보유 종목의 상태를 버리도록 고쳤다.
+    """
+    from strategy.exit_rules import (RULE_CRASH, RULE_TRAILING, RULE_VOL_DECAY,
+                                     DecayExitTracker)
+
+    s = make_settings()
+    s.CRASH_DROP_PCT = 0.10
+    s.CRASH_LOOKBACK = 10
+    s.TRAILING_ACTIVATE_PCT = 0.05
+    s.TRAILING_ATR_MULT = 2.0
+    s.EXIT_VOL_DECAY_RATIO = 0.30
+    s.EXIT_VOL_DECAY_MIN_BARS = 2
+
+    # --- 1) 거래량 감소 ---
+    s.EXIT_RULES = RULE_VOL_DECAY
+    t = DecayExitTracker(s)
+    t.open("A", 10_000.0)
+    assert t.check("A", 10_000.0, turnover=1_000e6) is None, "첫 봉에 걸려선 안 된다"
+    assert t.check("A", 10_200.0, turnover=900e6) is None, "고점의 90%는 기준 위다"
+    hit = t.check("A", 10_100.0, turnover=200e6)      # 고점의 20% < 30%
+    assert hit is not None and hit.rule == RULE_VOL_DECAY, f"거래량 감소 미작동: {hit}"
+    # 최소 보유 봉 수 — 1봉만 지난 상태에서는 걸리지 않아야 한다
+    t2 = DecayExitTracker(s)
+    t2.open("B", 10_000.0)
+    assert t2.check("B", 10_000.0, turnover=10e6) is None, "최소 봉 수 미적용"
+
+    # --- 2) 상승 감쇠(트레일링) ---
+    s.EXIT_RULES = RULE_TRAILING
+    t = DecayExitTracker(s)
+    t.open("A", 10_000.0)
+    assert t.check("A", 10_200.0, atr=100.0) is None, "+2%는 무장 전이다"
+    assert t.check("A", 11_000.0, atr=100.0) is None, "고점 갱신 중에는 청산이 아니다"
+    assert t.trail_stop("A", atr=100.0) == 11_000.0 - 200.0, "트레일링 손절선 계산 오류"
+    hit = t.check("A", 10_700.0, atr=100.0)           # 고점 11,000 − 2x100 = 10,800
+    assert hit is not None and hit.rule == RULE_TRAILING, f"상승 감쇠 미작동: {hit}"
+    assert hit.stop_price == 10_800.0, f"손절선 전달 오류: {hit.stop_price}"
+
+    # --- 3) 급격한 하락 ---
+    s.EXIT_RULES = RULE_CRASH
+    t = DecayExitTracker(s)
+    t.open("A", 10_000.0)
+    for px in (10_000.0, 10_500.0, 11_000.0):
+        assert t.check("A", px) is None, "상승 중에 급락이 걸려선 안 된다"
+    hit = t.check("A", 9_800.0)                        # 고점 11,000 대비 −10.9%
+    assert hit is not None and hit.rule == RULE_CRASH, f"급락 미작동: {hit}"
+
+    # --- 4) 순서가 결과를 바꾼다 ---
+    #
+    # 같은 봉에서 급락과 거래량 감소가 동시에 충족되게 만들고, `EXIT_RULES`의
+    # 앞쪽에 둔 규칙으로 기록되는지 본다. 사유별 통계가 순서에 의존한다.
+    def first_rule(order: str) -> str:
+        s.EXIT_RULES = order
+        tr = DecayExitTracker(s)
+        tr.open("A", 10_000.0)
+        tr.check("A", 10_000.0, turnover=1_000e6)
+        tr.check("A", 11_000.0, turnover=1_000e6)
+        h = tr.check("A", 9_700.0, turnover=100e6)     # 급락 −11.8% + 거래 10%
+        assert h is not None, f"어느 규칙도 걸리지 않았다({order})"
+        return h.rule
+
+    assert first_rule(f"{RULE_CRASH},{RULE_VOL_DECAY}") == RULE_CRASH, "순서 무시됨"
+    assert first_rule(f"{RULE_VOL_DECAY},{RULE_CRASH}") == RULE_VOL_DECAY, "순서 무시됨"
+
+    # --- 5) 임계값 0이면 꺼진다 / 빈 목록이면 전부 꺼진다 ---
+    s.EXIT_RULES = f"{RULE_CRASH},{RULE_TRAILING},{RULE_VOL_DECAY}"
+    s.EXIT_VOL_DECAY_RATIO = 0.0
+    s.TRAILING_ACTIVATE_PCT = 0.0
+    s.CRASH_DROP_PCT = 1.0
+    t = DecayExitTracker(s)
+    t.open("A", 10_000.0)
+    for px, tv in ((10_000.0, 1_000e6), (12_000.0, 1_000e6), (8_000.0, 1e6)):
+        assert t.check("A", px, turnover=tv, atr=100.0) is None,             f"임계값 0/1인데 발동했다 (price={px})"
+    s.EXIT_RULES = ""
+    s.CRASH_DROP_PCT = 0.10
+    t = DecayExitTracker(s)
+    t.open("A", 10_000.0)
+    for px in (10_000.0, 11_000.0, 8_000.0):
+        assert t.check("A", px) is None, "빈 목록인데 발동했다"
+
+    # --- 6) 재진입 시 묵은 고점이 지워진다 ---
+    s.EXIT_RULES = RULE_VOL_DECAY
+    s.EXIT_VOL_DECAY_RATIO = 0.30
+    s.EXIT_VOL_DECAY_MIN_BARS = 2
+    t = DecayExitTracker(s)
+    t.open("A", 10_000.0)
+    t.check("A", 10_000.0, turnover=1_000e6)      # 폭증일 고점 1,000억
+    t.close("A")                                   # 청산
+    t.open("A", 9_000.0)                           # 같은 종목 재진입(평상 거래량)
+    assert t.check("A", 9_000.0, turnover=50e6) is None, "재진입 첫 봉에 걸렸다"
+    assert t.check("A", 9_100.0, turnover=50e6) is None,         "묵은 거래대금 고점이 남아 재진입 직후 청산됐다"
+    return ("거래량 감소 · 상승 감쇠(손절선 전달) · 급락 · EXIT_RULES 순서 반영 · "
+            "임계값 0 비활성 · 재진입 상태 초기화 모두 작동")
+
+
 # ============================================================ 실행
 
 async def run_all() -> int:
@@ -1039,7 +1145,7 @@ async def run_all() -> int:
         test_risk_manager, test_features, test_backtest, test_event_bus,
         test_live_client_offline, test_validation, test_weights_and_bets,
         test_competition_rules, test_selection_and_phase, test_panel_min_bars,
-        test_intraday, test_intraday_book,
+        test_intraday, test_intraday_book, test_decay_exits,
     ]
     print("\n" + "=" * 86)
     print(" KIS AI Quant Trader — 셀프 테스트")
