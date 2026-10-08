@@ -889,9 +889,19 @@ class TradingEngine:
         # 한쪽만 넘기면 두 경로가 갈려 측정이 실거래를 반영하지 못한다.
         turnover_map = {sym: float(px) * float(self.latest_volumes.get(sym, 0.0))
                         for sym, px in prices.items()}
+        # `vol_alive` 입력 — 거래대금 / **전일까지** 20봉 중앙값.
+        # 분모는 `_prime_intraday`가 이미 계산해 둔 값을 재사용한다(세 번째 정의를
+        # 만들면 진입 조건과 청산 조건이 다른 것을 보게 된다).
+        burst_map = {}
+        for sym, tv in turnover_map.items():
+            med = self._prev_daily.get(sym, (0.0, 0.0, 0.0))
+            med20 = med[2] if len(med) > 2 else 0.0
+            if med20 > 0 and tv > 0:
+                burst_map[sym] = tv / med20
         exits = self.risk.evaluate_exits(self.portfolio, prices, self.atr_map,
                                          self.score_map, now,
-                                         turnover_map=turnover_map)
+                                         turnover_map=turnover_map,
+                                         burst_map=burst_map)
         if self.s.USE_TOP_K:
             exits.extend(self._rotation_exits(signals, prices, exits))
         for order in exits:

@@ -76,6 +76,35 @@ from utils.indicators import atr as atr_fn  # noqa: E402
 from utils.logger import enable_utf8_console, logger  # noqa: E402
 
 COMP_BARS = 30            # 대회 거래일
+LIMIT_UP = 0.295          # 상한가 판정 — 가격제한폭 30%(utils/market_rules.PRICE_LIMIT_PCT)
+                          # 에서 호가단위 반올림만큼 여유를 둔다
+
+
+def load_flow_net(flow_dir: Path, sym: str, ts: np.ndarray) -> np.ndarray:
+    """일봉 인덱스에 맞춘 **외국인+기관 순매수**. 없으면 NaN 배열.
+
+    **1거래일 지연시킨다.** 수급은 T일 장마감 후에 공시되므로 T일 종가로 판단할
+    때는 쓸 수 없다(`strategy/flow_features.py::merge_flow`가 같은 이유로
+    `FLOW_LAG_DAYS=1`을 적용한다). 지연 없이 붙이면 미래 정보다.
+    """
+    out = np.full(len(ts), np.nan)
+    path = flow_dir / f"{sym}.csv"
+    if not path.exists():
+        return out
+    try:
+        fl = pd.read_csv(path, dtype={"ts": str})
+    except Exception:
+        return out
+    cols = [c for c in fl.columns
+            if c in ("inv_foreigner_netBuyVolume", "inv_institution_netBuyVolume")]
+    if not cols or "ts" not in fl.columns:
+        return out
+    net = fl[cols].astype(float).sum(axis=1)
+    m = dict(zip(fl["ts"].astype(str), net))
+    vals = np.array([m.get(t, np.nan) for t in ts], dtype=float)
+    out[1:] = vals[:-1]          # 1거래일 지연
+    return out
+
 ARMS = ("intraday", "next_open", "day_open")
 
 
@@ -142,6 +171,55 @@ class _ExitCfg:
         self.TRAILING_ATR_MULT = trail_mult
         self.EXIT_VOL_DECAY_RATIO = vol_decay
         self.EXIT_VOL_DECAY_MIN_BARS = vol_min_bars
+
+
+def hold_by_state(entry_px: float, i: int, max_hold: int, stop_pct: float,
+                  o: np.ndarray, c: np.ndarray, burst: np.ndarray,
+                  flow_net: np.ndarray, limit_up: np.ndarray,
+                  w: tuple[float, float, float], thresh: float, vol_n: float,
+                  cost: float) -> tuple[float, int, str]:
+    """**기간이 아니라 상태가 청산을 정한다.** (수익률, 보유일수, 사유).
+
+    "얼마나 들고 있다가 팔자"를 미리 정하지 않고, 폭증을 만든 것이 **아직 살아
+    있는 동안** 들고 간다. 지금까지의 측정은 전부 6봉 시간손절 **위에 얹은**
+    규칙이어서 "더 일찍 자를까"만 물었고, 그래서 전부 꼬리를 깎았다. 상태 기반은
+    반대로 **더 오래 들고 갈 수도** 있다 — 보유 10봉이 28구간 중 유일하게 2배를
+    넘긴 구간(+116.8%)을 만든 것이 그 방향의 증거다.
+
+    생존 점수 = `w_vol x I(거래대금 >= 20일중앙값 x vol_n)`
+              `+ w_flow x I(외국인+기관 순매수 > 0)`
+              `+ w_limit x I(상한가)`
+
+    점수가 `thresh` 아래로 떨어지면 청산한다. 가중치와 임계값으로 조합이 정해진다
+    — (1,1,1)/1 은 OR, (1,1,1)/3 은 AND, (1,1,1)/2 는 "셋 중 둘"이다.
+
+    판정은 **봉 t 종가**, 체결은 **봉 t+1 시가**다(백테스트 규약).
+    `max_hold`는 무한 보유를 막는 안전장치이고 전략의 일부가 아니다.
+    """
+    wv, wf, wl = w
+    for t in range(i, i + max_hold):
+        px = float(c[t])
+        if px <= 0 or not np.isfinite(px):
+            continue
+        reason = ""
+        if stop_pct > 0 and px / entry_px - 1.0 <= -stop_pct:
+            reason = "stop"
+        else:
+            live = 0.0
+            if wv > 0 and vol_n > 0 and np.isfinite(burst[t]) and burst[t] >= vol_n:
+                live += wv
+            if wf > 0 and np.isfinite(flow_net[t]) and flow_net[t] > 0:
+                live += wf
+            if wl > 0 and limit_up[t]:
+                live += wl
+            if live < thresh:
+                reason = "state"
+        if reason:
+            nxt = float(o[t + 1]) if (t + 1) < len(o) else px
+            if not (np.isfinite(nxt) and nxt > 0):
+                nxt = px
+            return nxt / entry_px - 1.0 - cost, t - i + 1, reason
+    return (float(c[i + max_hold]) / entry_px - 1.0 - cost, max_hold, "cap")
 
 
 def hold_with_exits(entry_px: float, i: int, hold: int, cfg: _ExitCfg,
@@ -215,6 +293,19 @@ def main() -> int:
                     help="거래대금이 보유 중 고점의 이 비율 아래면 청산(0=끔)")
     ap.add_argument("--vol-min-bars", type=int, default=2)
     ap.add_argument("--stop", type=float, default=0.12, help="손절(0=끔)")
+    # --- 상태 기반 보유 (기간을 정해두지 않는다) ---
+    ap.add_argument("--state", action="store_true",
+                    help="보유를 기간이 아니라 **상태**가 정한다. 켜면 --hold 는 "
+                         "안전 상한(--max-hold)으로만 쓰인다")
+    ap.add_argument("--hold-vol", type=float, default=2.0,
+                    help="거래대금이 20일 중앙값의 이 배수 이상이면 '살아 있음'")
+    ap.add_argument("--weights", default="1,1,1",
+                    help="생존 점수 가중치 w_vol,w_flow,w_limit")
+    ap.add_argument("--threshold", type=float, default=1.0,
+                    help="점수가 이 값 아래면 청산. (1,1,1)에서 1=OR · 2=셋 중 둘 · 3=AND")
+    ap.add_argument("--max-hold", type=int, default=30,
+                    help="무한 보유를 막는 안전 상한(전략의 일부가 아니다)")
+    ap.add_argument("--flow-dir", default="data/cache/flow")
     ap.add_argument("--out", default="reports/intraday_entry_study.json")
     args = ap.parse_args()
 
@@ -229,18 +320,28 @@ def main() -> int:
                    args.trail_activate, args.trail_mult, args.vol_decay,
                    args.vol_min_bars)
     reasons: Dict[str, int] = {}
+    holds: List[int] = []
+    wts = tuple(float(x) for x in args.weights.split(","))
+    if len(wts) != 3:
+        logger.error("[EntryStudy] --weights 는 w_vol,w_flow,w_limit 세 개다")
+        return 1
+    fdir = Path(args.flow_dir)
+    # **집단을 모드와 무관하게 고정한다.** 길이 필터를 보유 방식에 따라 바꾸면
+    # 종목·사건 집단이 달라져 지문이 바뀌고, 시간 보유와 상태 보유를 비교할 수
+    # 없게 된다(실제로 그렇게 지문이 258 → 257종목으로 갈렸다).
+    span = max(args.hold, args.max_hold)
 
     rows: List[Dict[str, Any]] = []
     n_burst = n_cover = n_detect = 0
     fp_src: Dict[str, np.ndarray] = {}
 
     for k, (sym, df) in enumerate(sorted(panel.items()), 1):
-        if df is None or len(df) < args.warmup + args.hold + 5:
+        if df is None or len(df) < args.warmup + span + 5:
             continue
         d = df.reset_index(drop=True)
         fp_src[sym] = d["close"].to_numpy(float)
         idx, thresh = burst_days(d, args.burst_mult, args.warmup)
-        idx = idx[(idx + args.hold) < len(d)]
+        idx = idx[(idx + span) < len(d)]
         if args.since:
             days_arr = d["ts"].astype(str).to_numpy()
             idx = idx[days_arr[idx] >= args.since]
@@ -264,6 +365,19 @@ def main() -> int:
         tov = c * d["volume"].to_numpy(float)
         atrs = (atr_fn(d["high"].to_numpy(float), d["low"].to_numpy(float), c)
                 if args.exits else np.zeros(len(d)))
+        if args.state:
+            # 생존 판정 입력. 분모는 **전일까지**의 20봉 중앙값으로 진입 조건과
+            # 같은 기준을 쓴다 — `vol_decay` 가 "보유 중 고점"을 분모로 써서
+            # 발동률 80.9%가 된 실패를 반복하지 않는다.
+            med = (pd.Series(tov).rolling(20, min_periods=10).median()
+                   .shift(1).to_numpy(float))
+            with np.errstate(invalid="ignore", divide="ignore"):
+                burst_lv = tov / np.where(med > 0, med, np.nan)
+            prev_c = np.concatenate([[np.nan], c[:-1]])
+            limit_up = np.nan_to_num(c >= prev_c * (1.0 + LIMIT_UP), nan=0.0).astype(bool)
+            flow_net = load_flow_net(fdir, sym, ts)
+        else:
+            burst_lv = limit_up = flow_net = np.zeros(len(d))
         for i in idx:
             day = ts[i]
             g = by_day.get(day)
@@ -275,11 +389,30 @@ def main() -> int:
                 continue
             n_detect += 1
             mins, entry_px, day_open = got
+            # **`span` 은 데이터 길이 필터 전용이다.** 청산 지평에 쓰면 `--hold` 가
+            # 무시된다(실제로 그렇게 6봉 대신 30봉을 들어 숫자가 16%로 폭발했다).
             exit_px = c[i + args.hold]
             if not (np.isfinite(exit_px) and exit_px > 0 and entry_px > 0):
                 continue
             nxt_open = o[i + 1] if (i + 1) < len(o) else np.nan
-            if args.exits:
+            if args.state:
+                # **세 arm 모두 같은 생존 규칙으로 들고 간다.** 비교 arm만
+                # 종료일을 고정하면 "진입 시점 비교"가 아니라 "보유 방식 비교"가
+                # 섞여 숫자가 뒤집힌다(실제로 T+1 이 11%로 보였다).
+                r_intra, hd, why = hold_by_state(
+                    entry_px, i, args.max_hold, args.stop, o, c, burst_lv,
+                    flow_net, limit_up, wts, args.threshold, args.hold_vol, cost)
+                reasons[why] = reasons.get(why, 0) + 1
+                holds.append(hd)
+                r_next = (hold_by_state(float(nxt_open), i + 1, args.max_hold - 1,
+                                        args.stop, o, c, burst_lv, flow_net,
+                                        limit_up, wts, args.threshold,
+                                        args.hold_vol, cost)[0]
+                          if np.isfinite(nxt_open) and nxt_open > 0 else np.nan)
+                r_dayopen = hold_by_state(
+                    day_open, i, args.max_hold, args.stop, o, c, burst_lv,
+                    flow_net, limit_up, wts, args.threshold, args.hold_vol, cost)[0]
+            elif args.exits:
                 r_intra, why = hold_with_exits(entry_px, i, args.hold, cfg,
                                                args.stop, o, c, tov, atrs, cost)
                 reasons[why] = reasons.get(why, 0) + 1
@@ -289,9 +422,11 @@ def main() -> int:
                 "symbol": sym, "day": day, "detect_min": mins,
                 "entry_vs_open": entry_px / max(day_open, 1e-9) - 1.0,
                 "intraday": r_intra,
-                "next_open": (exit_px / nxt_open - 1.0 - cost
-                              if np.isfinite(nxt_open) and nxt_open > 0 else np.nan),
-                "day_open": exit_px / max(day_open, 1e-9) - 1.0 - cost,
+                "next_open": (r_next if args.state else
+                              (exit_px / nxt_open - 1.0 - cost
+                               if np.isfinite(nxt_open) and nxt_open > 0 else np.nan)),
+                "day_open": (r_dayopen if args.state else
+                             exit_px / max(day_open, 1e-9) - 1.0 - cost),
             })
         if k % 50 == 0:
             logger.info(f"[EntryStudy] {k}/{len(panel)}종목 · 사건 {len(rows):,}")
@@ -302,7 +437,15 @@ def main() -> int:
 
     fr = pd.DataFrame(rows)
     fp = _fingerprint(fp_src)
-    rounds = max(1, COMP_BARS // max(1, args.hold))
+    if args.state and holds:
+        # **보유일수가 거래마다 다르다.** 부트스트랩은 고정 라운드를 가정하므로
+        # 중앙 보유일수로 라운드를 환산한다 — **근사다.** 실제로는 짧은 거래가
+        # 많은 날과 긴 거래가 몰리는 날이 섞인다. 그래서 보유 분포를 같이 찍어
+        # 환산이 얼마나 거친지 드러낸다.
+        med_hold = int(np.median(holds))
+        rounds = max(1, COMP_BARS // max(1, med_hold))
+    else:
+        rounds = max(1, COMP_BARS // max(1, args.hold))
     w = min(MAX_SINGLE, MAX_GROSS / max(1, args.per_day))
     rng = np.random.default_rng(16)
 
@@ -312,6 +455,9 @@ def main() -> int:
                    "rounds": rounds, "per_day": args.per_day, "weight": w,
                    "trials": args.trials, "round_trip_cost": cost,
                    "warmup": args.warmup, "since": args.since,
+                   "state": args.state, "hold_vol": args.hold_vol,
+                   "weights": args.weights, "threshold": args.threshold,
+                   "max_hold": args.max_hold,
                    "exits": args.exits, "exit_rules": args.exit_rules,
                    "stop": args.stop, "crash": args.crash,
                    "trail_activate": args.trail_activate,
@@ -379,6 +525,14 @@ def main() -> int:
               f"{a['median'] * 100:+9.2f}%{a['win'] * 100:7.1f}%"
               f"{a['port_median'] * 100:+9.1f}%{a['port_p50up'] * 100:9.2f}%"
               f"{a['port_p100up'] * 100:10.2f}%")
+    if holds:
+        hq = {q: float(np.percentile(holds, q)) for q in (10, 50, 90)}
+        out["hold_days"] = {"mean": float(np.mean(holds)), **{str(k): v
+                                                              for k, v in hq.items()}}
+        print(f" 보유일수   평균 {np.mean(holds):.1f}일 · p10 {hq[10]:.0f} · "
+              f"중앙 {hq[50]:.0f} · p90 {hq[90]:.0f}  → 라운드 {rounds}회로 환산(근사)")
+        print(f" 생존 조건  거래대금 >= 20일중앙x{args.hold_vol:g} · 수급 순매수 · 상한가"
+              f"  가중 [{args.weights}] 임계 {args.threshold:g}")
     if reasons:
         tot = sum(reasons.values())
         parts = " · ".join(f"{k} {v / tot:.1%}"

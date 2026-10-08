@@ -258,6 +258,15 @@ class BacktestEngine:
         lows = {s: self.panel[s]["low"].to_numpy(dtype=float) for s in symbols}
         # 거래량 감소 청산(`EXIT_RULES`의 vol_decay) 입력용
         volumes = {s: self.panel[s]["volume"].to_numpy(dtype=float) for s in symbols}
+        # `vol_alive` 입력 — 거래대금 / **전일까지** 20봉 중앙값.
+        # `.shift(1)`이 있어야 09:00에 알 수 있는 값이 된다(진입 조건과 같은 창).
+        _tov = {s: closes[s] * volumes[s] for s in symbols}
+        bursts = {}
+        for s in symbols:
+            med = (pd.Series(_tov[s]).rolling(20, min_periods=10).median()
+                   .shift(1).to_numpy(dtype=float))
+            with np.errstate(invalid="ignore", divide="ignore"):
+                bursts[s] = _tov[s] / np.where(med > 0, med, np.nan)
         ts_list = self.panel[symbols[0]]["ts"].astype(str).tolist()
         atrs = {
             s: (featured[s]["atr_abs"].to_numpy(dtype=float)
@@ -308,8 +317,11 @@ class BacktestEngine:
                             if np.isfinite(volumes[s][i]) else 0.0 for s in symbols}
 
             # --- 청산 심사 → 다음 봉 시가 체결 ---
+            burst_map = {s: float(bursts[s][i]) if np.isfinite(bursts[s][i]) else 0.0
+                         for s in symbols}
             exits = self.risk.evaluate_exits(self.portfolio, prices, atr_map, score_map, now,
-                                             turnover_map=turnover_map)
+                                             turnover_map=turnover_map,
+                                             burst_map=burst_map)
             if self.s.USE_TOP_K:
                 exits.extend(self._rotation_exits(signals, prices, regime, exits))
             for order in exits:

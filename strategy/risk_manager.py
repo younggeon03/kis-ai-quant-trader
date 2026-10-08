@@ -23,8 +23,8 @@ import numpy as np
 
 from config.settings import Settings, get_settings
 from core.events import ExitReason, Fill, Portfolio, Position, RiskDecision, Side, Signal
-from strategy.exit_rules import (RULE_CRASH, RULE_TRAILING, RULE_VOL_DECAY,
-                                 DecayExitTracker)
+from strategy.exit_rules import (RULE_CRASH, RULE_TRAILING, RULE_VOL_ALIVE,
+                                 RULE_VOL_DECAY, DecayExitTracker)
 from utils.krx_calendar import KST
 from utils.logger import logger
 from utils.market_rules import affordable_qty
@@ -83,6 +83,7 @@ _DECAY_REASON = {
     RULE_CRASH: ExitReason.CRASH_GUARD,
     RULE_TRAILING: ExitReason.TRAILING_STOP,
     RULE_VOL_DECAY: ExitReason.VOL_DECAY,
+    RULE_VOL_ALIVE: ExitReason.VOL_DECAY,   # 같은 성격(거래 소멸)이라 사유를 공유한다
 }
 
 
@@ -448,6 +449,7 @@ class RiskManager:
         signals: Optional[Dict[str, float]] = None,
         now: Optional[dt.datetime] = None,
         turnover_map: Optional[Dict[str, float]] = None,
+        burst_map: Optional[Dict[str, float]] = None,
     ) -> List[ExitOrder]:
         """보유 포지션에 대한 청산 주문 목록을 생성한다.
 
@@ -468,6 +470,10 @@ class RiskManager:
         atr_map = atr_map or {}
         signals = signals or {}
         turnover_map = turnover_map or {}
+        # `vol_alive` 입력 — 거래대금 / 20봉 중앙값. **넘기지 않으면 그 규칙만
+        # 조용히 비활성화된다**(배수 0은 "모른다"로 처리한다). 백테스트와 실거래
+        # 양쪽 호출부에서 같이 넘겨야 한다.
+        burst_map = burst_map or {}
         exits: List[ExitOrder] = []
         open_positions = portfolio.open_positions()
 
@@ -502,7 +508,8 @@ class RiskManager:
             # 되돌림 기준이 멈추고, 두 번 부르면 룩백 창이 두 배로 빨리 흐른다.
             decay = self.decay.check(symbol, price,
                                      turnover=turnover_map.get(symbol, 0.0),
-                                     atr=atr, entry=pos.avg_price)
+                                     atr=atr, entry=pos.avg_price,
+                                     burst=burst_map.get(symbol, 0.0))
             # 트레일링이 제시한 손절선을 단방향으로만 올린다(내리지 않는다).
             trail = self.decay.trail_stop(symbol, atr)
             if trail > 0:

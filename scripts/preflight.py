@@ -185,10 +185,21 @@ def check(settings, live: bool) -> List[Tuple[str, str, str, str]]:
             f"x{s.CATALYST_BURST_MULT:g} (측정 최적 x10)",
             "8/12/20/30배를 분봉에서 쓸어 본 결과 하한은 효과가 단조롭지 않다 — "
             "일봉 폭증도 측정값에서 벗어나면 다른 구조다")
-        add(FATAL, "보유 봉 수", s.MAX_HOLDING_BARS in (6, 10),
-            f"{s.MAX_HOLDING_BARS}봉 (측정 최적 6봉 · 2위 10봉)",
-            "30봉이면 1라운드가 되어 P(+100%)가 0.90%로 떨어진다. "
-            "회전은 중간이 최적이다")
+        # **주 청산이 `vol_alive`면 보유 상한은 안전장치다.** 고정 기간이 주
+        # 청산일 때는 6봉이 최적이었지만(30봉은 1라운드가 되어 0.90%로 떨어진다),
+        # 상태 기반에서는 6봉이 상태를 무력화한다 — 살아 있어도 6일에 잘린다.
+        # 그래서 두 경우를 갈라서 본다.
+        state_exit = "vol_alive" in str(s.EXIT_RULES or "")
+        if state_exit:
+            add(FATAL, "보유 상한", s.MAX_HOLDING_BARS >= 20,
+                f"{s.MAX_HOLDING_BARS}봉 (안전 상한 — 주 청산은 vol_alive)",
+                "6봉으로 두면 상태 기반이 무력화된다(살아 있어도 6일에 잘린다). "
+                "측정은 상한 30봉에서 했고 실제 중앙 보유일수는 6일이다")
+        else:
+            add(FATAL, "보유 봉 수", s.MAX_HOLDING_BARS in (6, 10),
+                f"{s.MAX_HOLDING_BARS}봉 (고정 기간 최적 6봉 · 2위 10봉)",
+                "30봉이면 1라운드가 되어 P(+100%)가 0.90%로 떨어진다. "
+                "회전은 중간이 최적이다")
         add(FATAL, "동시 보유 종목 수", s.MAX_POSITIONS == 2,
             f"{s.MAX_POSITIONS}종목 (측정 최적 2종목)",
             "1종목은 50%만 투자되고 40%가 현금으로 남아 0.93%, 3종목은 분산이 "
@@ -213,10 +224,20 @@ def check(settings, live: bool) -> List[Tuple[str, str, str, str]]:
         # 2종목 x 45%로 2배를 만들려면 평균 +111%가 필요해 소수의 2배 사건에
         # 전부 기댄다. 어떤 청산이든 그것을 자를 확률이 있다.
         rules = [r.strip() for r in str(s.EXIT_RULES or "").split(",") if r.strip()]
-        add(FATAL, "감쇠 청산 해제", not rules,
+        bad = [r for r in rules if r != "vol_alive"]
+        # **보유를 기간이 아니라 상태가 정한다.** `vol_alive`만 켠다 — 나머지
+        # 셋(급락·상승감쇠·거래량 고점대비)은 전부 꼬리를 깎았다(2.09% → 1.01%).
+        add(FATAL, "청산 규칙", rules == ["vol_alive"],
             ", ".join(rules) or "없음",
-            "셋 다 켜면 P(+100%)가 2.09% → 1.01%로 절반이 된다. "
-            "거래량 감소는 발동률 80.9%다(분모가 보유 중 고점이고 폭증일이 그 고점이다)")
+            "vol_alive 만 켠다. crash/trailing/vol_decay 는 전부 꼬리를 깎았고, "
+            "vol_decay 는 분모가 보유 중 고점이라 발동률 80.9%다"
+            + (f" / 잘못된 규칙: {bad}" if bad else ""))
+        add(FATAL, "거래 생존 기준", abs(s.EXIT_VOL_ALIVE_MULT - 2.0) < 1e-9,
+            f"20봉중앙 x{s.EXIT_VOL_ALIVE_MULT:g}",
+            "측정 최적 x2. 올리면 포트 수치는 오르지만 **단일 2배 비율은 떨어지고** "
+            "(0.94%→0.69%) 상승분은 라운드 환산 artifact다. x2가 라운드 5회로 "
+            "검증된 기준선과 같아 왜곡이 없는 유일한 지점이다")
+
         add(FATAL, "손절 폭", s.STOP_LOSS_PCT >= 0.20,
             f"{s.STOP_LOSS_PCT:.0%}",
             "12%는 발동률 21.5%로 회복할 종목을 잘라 꼬리를 1.89%로 깎는다. "

@@ -51,13 +51,16 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Deque, Dict, List, Optional
 
+import numpy as np
+
 _EPS = 1e-12
 
 # 규칙 이름 — `EXIT_RULES` 설정이 이 이름을 쓴다.
 RULE_CRASH = "crash"
 RULE_TRAILING = "trailing"
 RULE_VOL_DECAY = "vol_decay"
-ALL_RULES: List[str] = [RULE_CRASH, RULE_TRAILING, RULE_VOL_DECAY]
+RULE_VOL_ALIVE = "vol_alive"
+ALL_RULES: List[str] = [RULE_CRASH, RULE_TRAILING, RULE_VOL_DECAY, RULE_VOL_ALIVE]
 
 
 @dataclass
@@ -74,6 +77,7 @@ class DecayState:
     turnover_peak: float = 0.0
     bars_seen: int = 0
     armed: bool = False
+    burst: float = 0.0             # 거래대금 / 20봉 중앙값 (vol_alive 입력, 외부 주입)
     prices: Deque[float] = field(default_factory=lambda: deque(maxlen=10))
 
     def observe(self, price: float, turnover: float) -> None:
@@ -136,7 +140,8 @@ class DecayExitTracker:
     # ------------------------------------------------------------ 평가
     def check(self, symbol: str, price: float, turnover: float = 0.0,
               atr: float = 0.0, entry: Optional[float] = None,
-              ts: Optional[dt.datetime] = None) -> Optional[DecayExit]:
+              ts: Optional[dt.datetime] = None,
+              burst: float = 0.0) -> Optional[DecayExit]:
         """청산해야 하면 `DecayExit`, 아니면 `None`.
 
         감시가 없으면 `entry`로 즉석 시작한다 — 재시작·잔고 대조로 포지션이 먼저
@@ -151,6 +156,7 @@ class DecayExitTracker:
             self.open(symbol, entry)
             st = self.states[symbol]
         st.observe(price, turnover)
+        st.burst = float(burst) if np.isfinite(burst) else 0.0
 
         for name in self.order():
             hit = self._rule(name, st, price, turnover, atr)
@@ -166,6 +172,8 @@ class DecayExitTracker:
             return self._trailing(st, price, atr)
         if name == RULE_VOL_DECAY:
             return self._vol_decay(st, turnover)
+        if name == RULE_VOL_ALIVE:
+            return self._vol_alive(st)
         return None
 
     # --- 급격한 하락 ---
@@ -215,6 +223,37 @@ class DecayExitTracker:
         if cur < ratio:
             return DecayExit(RULE_VOL_DECAY,
                              f"거래 감소 (고점의 {cur:.0%} < 기준 {ratio:.0%})")
+        return None
+
+    # --- 거래대금 생존: "폭증을 만든 것이 아직 살아 있는가" ---
+    def _vol_alive(self, st: DecayState) -> Optional[DecayExit]:
+        """거래대금이 **20봉 중앙값** 대비 기준 아래로 떨어지면 청산.
+
+        `vol_decay`와 **분모가 다르고, 그것이 전부다.** `vol_decay`는 "보유 중
+        거래대금 고점"을 분모로 썼는데 **폭증일 자신이 그 고점**이라 다음 날부터
+        거의 항상 깨졌다(발동률 80.9%, P(+100%) 2.09% → 1.01%). 여기서는 진입
+        조건과 **같은 분모**(20봉 중앙값)를 써서 "아직 평소보다 거래가 많다"를
+        판정한다.
+
+        이 규칙이 `MAX_HOLDING_BARS`를 대체한다 — 기간을 미리 정하지 않고 **죽은
+        종목은 일찍 내보내고 살아 있는 종목은 더 들고 간다.** 측정에서 중앙
+        보유일수는 고정 6봉과 같은 6일인데 단일 2배 확률이 0.64% → 0.86%
+        (2배 사건 25 → 34건), 포트 P(+100%)가 2.21% → 4.06%였다(라운드 5회 고정).
+
+        **기준을 올려도 좋아지지 않는다.** x1.5/x2/x3/x5에서 단일 2배 비율은
+        0.94% → 0.69%로 **떨어지고**, 포트 수치가 오르는 것은 라운드 환산이
+        4 → 10으로 늘어난 측정 근사의 artifact다. x2가 라운드 5회로 검증된
+        기준선과 같아 왜곡이 없는 유일한 지점이다.
+        """
+        mult = float(getattr(self.s, "EXIT_VOL_ALIVE_MULT", 0.0))
+        if mult <= 0:
+            return None
+        min_bars = max(1, int(getattr(self.s, "EXIT_VOL_ALIVE_MIN_BARS", 1)))
+        if st.bars_seen < min_bars or st.burst <= 0:
+            return None      # 배수를 못 받았으면(0) 판정하지 않는다 — 조용한 오작동 방지
+        if st.burst < mult:
+            return DecayExit(RULE_VOL_ALIVE,
+                             f"거래 소멸 (20봉중앙 x{st.burst:.1f} < 기준 x{mult:g})")
         return None
 
     # ------------------------------------------------------------ 관측

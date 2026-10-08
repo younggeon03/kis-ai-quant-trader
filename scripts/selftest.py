@@ -1150,6 +1150,34 @@ def test_decay_exits():
     for px in (10_000.0, 11_000.0, 8_000.0):
         assert t.check("A", px) is None, "빈 목록인데 발동했다"
 
+    # --- 5-1) vol_alive — 분모가 20봉 중앙값이다(보유 중 고점이 아니다) ---
+    #
+    # `vol_decay`와 **분모만 다르고 그것이 전부다.** `vol_decay`는 보유 중 고점을
+    # 분모로 써서 폭증일 자신이 고점이 되어 발동률 80.9%가 됐다(P(+100%) 2.09%
+    # → 1.01%). `vol_alive`는 진입 조건과 같은 분모를 써서 "아직 평소보다 거래가
+    # 많다"를 판정하고, 이것이 `MAX_HOLDING_BARS`를 대체한다
+    # (측정: 같은 라운드에서 단일 2배 0.64% → 0.86%, 포트 2.21% → 4.06%).
+    from strategy.exit_rules import RULE_VOL_ALIVE
+
+    s.EXIT_RULES = RULE_VOL_ALIVE
+    s.EXIT_VOL_ALIVE_MULT = 2.0
+    s.EXIT_VOL_ALIVE_MIN_BARS = 1
+    t = DecayExitTracker(s)
+    t.open("A", 10_000.0)
+    for b in (10.0, 5.0, 2.5):
+        assert t.check("A", 10_000.0, turnover=1e9, burst=b) is None,             f"배수 x{b}는 기준 x2 위인데 청산했다"
+    hit = t.check("A", 10_000.0, turnover=1e9, burst=1.9)
+    assert hit is not None and hit.rule == RULE_VOL_ALIVE, f"vol_alive 미작동: {hit}"
+    # **배수를 못 받으면(0) 판정하지 않는다.** 배관이 끊겼을 때 전 종목이 첫 봉에
+    # 청산되는 것을 막는 장치다 — 0을 "거래 소멸"로 읽으면 그렇게 된다.
+    t2 = DecayExitTracker(s)
+    t2.open("B", 10_000.0)
+    assert t2.check("B", 10_000.0, turnover=1e9, burst=0.0) is None,         "배수 0(모름)을 거래 소멸로 읽었다 — 배관이 끊기면 전 종목이 털린다"
+    s.EXIT_VOL_ALIVE_MULT = 0.0
+    t3 = DecayExitTracker(s)
+    t3.open("C", 10_000.0)
+    assert t3.check("C", 10_000.0, turnover=1e9, burst=0.1) is None, "배수 0인데 발동"
+
     # --- 6) 재진입 시 묵은 고점이 지워진다 ---
     s.EXIT_RULES = RULE_VOL_DECAY
     s.EXIT_VOL_DECAY_RATIO = 0.30
@@ -1161,8 +1189,9 @@ def test_decay_exits():
     t.open("A", 9_000.0)                           # 같은 종목 재진입(평상 거래량)
     assert t.check("A", 9_000.0, turnover=50e6) is None, "재진입 첫 봉에 걸렸다"
     assert t.check("A", 9_100.0, turnover=50e6) is None,         "묵은 거래대금 고점이 남아 재진입 직후 청산됐다"
-    return ("거래량 감소 · 상승 감쇠(손절선 전달) · 급락 · EXIT_RULES 순서 반영 · "
-            "임계값 0 비활성 · 재진입 상태 초기화 모두 작동")
+    return ("거래량 감소 · 상승 감쇠(손절선 전달) · 급락 · vol_alive(20봉중앙 분모 · "
+            "배수 0 보호) · EXIT_RULES 순서 반영 · 임계값 0 비활성 · "
+            "재진입 상태 초기화 모두 작동")
 
 
 @check("20. 호가·체결 전방 수집")
