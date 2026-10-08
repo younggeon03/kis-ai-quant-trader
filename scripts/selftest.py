@@ -1165,6 +1165,66 @@ def test_decay_exits():
             "임계값 0 비활성 · 재진입 상태 초기화 모두 작동")
 
 
+@check("20. 호가·체결 전방 수집")
+def test_orderbook_recorder():
+    """`utils/orderbook_log.py` — 샘플링 · 컬럼 계약 · 실패 격리.
+
+    이 수집은 **이번 대회 전략에 쓰이지 않는다**(호가는 과거 이력을 받을 수 없어
+    학습·검증이 불가능하다). 다음을 위해 쌓는 것이고, 그래서 **매매를 방해하지
+    않는 것**이 가장 중요한 성질이다 — 기록 실패가 예외로 바깥에 나가면 호가
+    콜백이 WebSocket 수신 루프를 깨고 시세가 끊긴다.
+
+    보는 것: (1) 간격 안의 중복을 버리는가, (2) 컬럼 계약이 헤더와 맞는가,
+    (3) 10단 합계가 상위 5단만 저장하는 손실을 보전하는가, (4) 쓸 수 없는 경로에서
+    **예외를 던지지 않는가**.
+    """
+    import datetime as dt
+    import tempfile
+    from pathlib import Path
+
+    from utils.orderbook_log import OB_COLUMNS, TAPE_COLUMNS, OrderbookRecorder
+
+    tmp = Path(tempfile.mkdtemp())
+    r = OrderbookRecorder(tmp, interval_sec=5.0, flush_rows=1000)
+    t = dt.datetime(2026, 10, 12, 9, 0, 0)
+    ob = {"symbol": "005930",
+          "ask": [100.0 + i for i in range(10)],
+          "bid": [99.0 - i for i in range(10)],
+          "ask_qty": [10.0 * (i + 1) for i in range(10)],
+          "bid_qty": [20.0 * (i + 1) for i in range(10)]}
+
+    assert r.observe_orderbook(ob, t) is True, "첫 호가가 기록되지 않았다"
+    assert r.observe_orderbook(ob, t + dt.timedelta(seconds=3)) is False,         "샘플링 간격 안인데 기록했다"
+    assert r.observe_orderbook(ob, t + dt.timedelta(seconds=6)) is True,         "간격을 넘겼는데 기록하지 않았다"
+    assert r.observe_tape("005930", 100.0, 5_000.0, bid=99.0, ask=100.0,
+                          ts=t) is True, "테이프가 기록되지 않았다"
+    assert r.observe_tape("005930", 0.0, 1.0, ts=t) is False, "가격 0을 기록했다"
+    assert r.flush() == 3, "flush 행수가 다르다"
+
+    ob_lines = (tmp / "orderbook" / "005930.csv").read_text(
+        encoding="utf-8").strip().splitlines()
+    tape_lines = (tmp / "tape" / "005930.csv").read_text(
+        encoding="utf-8").strip().splitlines()
+    assert ob_lines[0] == ",".join(OB_COLUMNS), "호가 헤더가 계약과 다르다"
+    assert tape_lines[0] == ",".join(TAPE_COLUMNS), "테이프 헤더가 계약과 다르다"
+    assert len(ob_lines) == 3 and len(tape_lines) == 2,         f"행 수 불일치: 호가 {len(ob_lines) - 1} · 테이프 {len(tape_lines) - 1}"
+    first = ob_lines[1].split(",")
+    assert len(first) == len(OB_COLUMNS), "호가 열 수가 헤더와 다르다"
+    # 상위 5단만 저장하므로 10단 합계가 따로 있어야 한다(합 = 10+20+...+100 = 550 / 1100)
+    assert float(first[OB_COLUMNS.index("ask_qty_sum")]) == 550.0, "10단 매도 잔량 합 오류"
+    assert float(first[OB_COLUMNS.index("bid_qty_sum")]) == 1100.0, "10단 매수 잔량 합 오류"
+
+    # --- 쓸 수 없는 경로에서도 예외를 던지지 않는다 ---
+    bad = OrderbookRecorder(tmp / "orderbook" / "005930.csv" / "nope",
+                            interval_sec=0.0)
+    bad.observe_orderbook(ob, t)
+    wrote = bad.flush()          # 파일 아래 디렉토리를 만들 수 없다
+    assert wrote == 0, "쓸 수 없는 경로인데 썼다고 보고했다"
+    assert bad.snapshot()["errors"] > 0, "실패를 세지 않았다"
+    return ("샘플링 간격 · 컬럼 계약 · 10단 합계 보전 · 가격 0 거부 · "
+            "쓰기 실패 격리(예외 미전파) 모두 작동")
+
+
 # ============================================================ 실행
 
 async def run_all() -> int:
@@ -1176,6 +1236,7 @@ async def run_all() -> int:
         test_live_client_offline, test_validation, test_weights_and_bets,
         test_competition_rules, test_selection_and_phase, test_panel_min_bars,
         test_intraday, test_intraday_book, test_decay_exits,
+        test_orderbook_recorder,
     ]
     print("\n" + "=" * 86)
     print(" KIS AI Quant Trader — 셀프 테스트")

@@ -110,7 +110,17 @@ def surge_days(panel: Dict[str, pd.DataFrame], trigger: float,
             hit |= high >= prev * (1.0 + trigger)
         if select in ("turnover", "both"):
             turnover = pd.Series(close * d["volume"].to_numpy(float))
-            med20 = turnover.rolling(20, min_periods=10).median()
+            # **`.shift(1)`이 반드시 있어야 한다.** 분모는 **전일까지**의 20봉
+            # 중앙값이다. 장중에 판정하려면 09:00에 알 수 있는 값이어야 하고
+            # (`strategy/intraday.py::burst_ratio`, `main.py::_prime_intraday`),
+            # 측정 스크립트(`scripts/intraday_entry_study.py`)도 같은 창을 쓴다.
+            #
+            # 빼먹으면 당일 거래대금이 중앙값을 끌어올려 **조건이 더 엄격해지고**
+            # 수집 집단이 측정 집단보다 작아진다. 실제로 그렇게 받았다가 커버리지가
+            # 100%가 아니라 83.1%로 나왔다(5,399 수집 대상 vs 6,094 측정 대상).
+            # 일봉 피처(`catalyst_features.turnover_burst_20`)는 당일을 포함하는데,
+            # 그쪽은 종가 확정 후에 쓰므로 괜찮다 — **창이 셋이 아니라 둘임을 기억한다.**
+            med20 = turnover.rolling(20, min_periods=10).median().shift(1)
             with np.errstate(invalid="ignore", divide="ignore"):
                 ratio = (turnover / med20.replace(0.0, np.nan)).to_numpy(float)
             hit |= np.nan_to_num(ratio, nan=0.0) >= burst_mult

@@ -287,6 +287,24 @@ class Settings(BaseSettings):
     # **`burst` 모드는 가격 조건을 걸지 않는다.** "거래대금은 10배인데 가격은 안
     # 오른 날"이 분별 대상의 일부이고, 가격 조건을 같이 걸면 그 집단이 사라진다
     # (분봉 수집을 가격 기준으로만 해서 커버리지가 87.2%였던 것과 같은 문제다).
+    # ------------------------------------------------- 호가·체결 전방 수집
+    #
+    # **이번 대회에는 쓸 수 없다.** 호가·체결강도는 과거 이력을 받을 방법이 없고
+    # (REST에 날짜 파라미터가 없고 WS는 구독 시점부터만), 10/9 휴장이라 대회 전
+    # 수집 가능일이 10/8 하루뿐이다. 하루치로는 학습도 검증도 안 된다.
+    # **다음을 위해 지금부터 쌓는다.**
+    #
+    # 구독 한도 41건을 체결과 나눠 쓰므로 호가까지 켜면 실질 감시 종목이 절반이
+    # 된다. 다만 catalyst는 2종목만 보므로 슬롯이 남아 사실상 공짜다.
+    # 기록 실패는 매매를 멈추지 않는다(`utils/orderbook_log.py`).
+    COLLECT_ORDERBOOK: bool = Field(
+        default=False,
+        description="호가 10단·체결 테이프를 data/cache/{orderbook,tape}/ 에 쌓는다. "
+                    "다음 대회용 전방 수집이며 이번 대회 전략에는 쓰이지 않는다")
+    ORDERBOOK_SAMPLE_SEC: float = Field(
+        default=5.0,
+        description="호가·테이프 샘플링 간격(초). 틱마다 저장하면 하루 수백만 행이고 "
+                    "대부분 직전과 같다")
     INTRADAY_ENTRY_MODE: str = Field(
         default="breakout",
         description="장중 진입 판정: breakout=가격 돌파+분당 거래량 / "

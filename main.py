@@ -62,6 +62,7 @@ from strategy.intraday import IntradayWatcher, TriggerSignal
 from strategy.phase import current_phase, phase_config, reset_recommendation
 from utils.krx_calendar import KRXCalendar, MarketSession
 from utils.logger import JsonLedger, logger, setup_logging
+from utils.orderbook_log import OrderbookRecorder
 from utils.market_rules import round_to_tick
 
 BAR_REFRESH_LOOPS = 40      # 전체 일봉 재적재 주기(루프 수)
@@ -98,6 +99,11 @@ class TradingEngine:
         # `_apply_latest_prices_to_panel()`이 갱신하지 않으므로(종가·고가·저가만
         # 덮는다) 여기에 따로 들고 간다.
         self.latest_volumes: Dict[str, float] = {}
+        # 호가·체결 전방 수집. **이번 대회 전략에는 쓰이지 않는다** —
+        # 호가는 과거 이력을 받을 수 없어 다음을 위해 지금부터 쌓는 것이다.
+        self.obrec = (OrderbookRecorder(Path(self.s.DATA_DIR) / "cache",
+                                        interval_sec=self.s.ORDERBOOK_SAMPLE_SEC)
+                      if self.s.COLLECT_ORDERBOOK else None)
         self.atr_map: Dict[str, float] = {}
         self.vol_map: Dict[str, float] = {}
         # 대회 국면 — 날짜로 결정되며 기간 밖에서는 OFF(평소 동작)다.
@@ -436,8 +442,11 @@ class TradingEngine:
                 token_manager=token_manager,
                 on_trade=self._on_ws_quote,
                 on_notice=self._on_ws_notice,
+                on_orderbook=self._on_ws_orderbook if self.obrec else None,
             )
-            await self.ws.subscribe_symbols(self.watchlist, orderbook=False)
+            # 호가 구독은 체결과 41건 한도를 나눠 쓴다. 수집을 켤 때만 요청한다.
+            await self.ws.subscribe_symbols(self.watchlist,
+                                            orderbook=bool(self.obrec))
             await self.ws.subscribe_notice()
             self.ws.start()
         except Exception as exc:
@@ -449,6 +458,18 @@ class TradingEngine:
         if quote.price > 0:
             self.latest_prices[quote.symbol] = quote.price
             self.latest_volumes[quote.symbol] = float(quote.volume or 0.0)
+            if self.obrec is not None:
+                # 체결강도 분류 규칙(가격 >= 매도1호가 / 가격 > 중간가 ...)은
+                # 하나가 아니다. 지금 박으면 다른 규칙으로 재계산할 수 없으므로
+                # **원재료만** 남기고 분류는 분석 시점에 고른다.
+                try:
+                    self.obrec.observe_tape(quote.symbol, quote.price,
+                                            float(quote.volume or 0.0),
+                                            bid=float(quote.bid or 0.0),
+                                            ask=float(quote.ask or 0.0),
+                                            ts=self._now())
+                except Exception as exc:
+                    logger.debug(f"[호가수집] 테이프 실패: {exc}")
             # `Quote.volume`은 KIS `acml_vol`(누적거래량)이다. 감시기가 분이 바뀔 때
             # 기준값을 잡고 차분으로 이번 분의 거래량을 만든다.
             self._feed_intraday(quote.symbol, quote.price, quote.volume, self._now())
@@ -473,6 +494,22 @@ class TradingEngine:
             await self.bus.publish(TOPIC_FILL, fill)
         except Exception as exc:
             logger.warning(f"[WS] 체결통보 처리 실패: {exc}")
+
+    async def _on_ws_orderbook(self, ob: Dict[str, Any]) -> None:
+        """호가 10단 수신 → 전방 수집.
+
+        **전략은 이 값을 쓰지 않는다.** 호가는 과거 이력을 받을 수 없어 학습·검증이
+        불가능하고(REST에 날짜 파라미터가 없고 WS는 구독 시점부터만), 검증 없이
+        쓰는 것은 측정이 아니라 도박이다. 다음 대회를 위해 쌓기만 한다.
+
+        예외를 삼킨다 — 여기서 던지면 WebSocket 수신 루프가 깨져 시세가 끊긴다.
+        """
+        if self.obrec is None:
+            return
+        try:
+            self.obrec.observe_orderbook(ob, self._now())
+        except Exception as exc:
+            logger.debug(f"[호가수집] 처리 실패: {exc}")
 
     async def _on_fill_event(self, fill: Fill) -> None:
         pos = self.portfolio.positions.get(fill.symbol)
@@ -1008,6 +1045,8 @@ class TradingEngine:
         # --- 상태 저장 ---
         if self._loops % 5 == 0:
             self._save_state()
+            if self.obrec is not None:
+                self.obrec.flush()
 
         if self._loops % 20 == 0:
             logger.info(
@@ -1246,6 +1285,14 @@ class TradingEngine:
             return
         self._running = False
         logger.warning("[Shutdown] 종료 시퀀스를 시작합니다...")
+
+        # 0) 호가·체결 버퍼를 먼저 비운다. 뒤쪽 단계가 실패하면 수집분이 사라진다.
+        if self.obrec is not None:
+            n = self.obrec.flush()
+            snap = self.obrec.snapshot()
+            logger.info(f"[호가수집] 종료 flush {n:,}행 · "
+                        f"호가 {snap['symbols_ob']}종목 · 테이프 {snap['symbols_tape']}종목 · "
+                        f"오류 {snap['errors']}")
 
         # 1) 미체결 주문 취소
         try:
