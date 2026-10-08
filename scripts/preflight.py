@@ -197,27 +197,34 @@ def check(settings, live: bool) -> List[Tuple[str, str, str, str]]:
             f"{s.MIN_HOLDING_BARS}봉",
             "잠금이 있으면 시간손절과 겹쳐 회전이 의도보다 느려진다")
 
-        # --- 감쇠 청산 (strategy/exit_rules.py) ---
+        # --- 감쇠 청산은 **꺼야 한다** (측정 결과) ---
         #
-        # 거래량 감소 · 상승 감쇠 · 급격한 하락을 셋 다 쓰는 설계다. 임계값은
-        # **아직 측정되지 않은 초기값**이므로 FATAL이 아니라 WARN으로 둔다 —
-        # 켜져 있는지만 확인하고, 값은 측정으로 정한다.
+        # 거래량 감소·상승 감쇠·급격한 하락을 셋 다 넣고 쟀더니 전부 꼬리를 깎았다
+        # (4,082건, 보유 중 실제 규칙 적용). 임계값 문제가 아니라 방향 문제다 —
+        # 느슨하게 하면 "거의 안 걸리는 상태"로 수렴하고 조이면 단조적으로 나빠진다.
+        #
+        # | 설정 | 발동률 | P(+100%) |
+        # |---|---|---|
+        # | **청산 없음(6봉 시간손절만)** | — | **2.09%** |
+        # | 손절 25% | 2.8% | 2.07% |
+        # | 손절 12% | 21.5% | 1.89% |
+        # | 거래량 감소 30% | 80.9% | 1.01% |
+        #
+        # 2종목 x 45%로 2배를 만들려면 평균 +111%가 필요해 소수의 2배 사건에
+        # 전부 기댄다. 어떤 청산이든 그것을 자를 확률이 있다.
         rules = [r.strip() for r in str(s.EXIT_RULES or "").split(",") if r.strip()]
-        add(WARN, "감쇠 청산 규칙", len(rules) == 3,
-            ", ".join(rules) or "(없음)",
-            "거래량 감소·상승 감쇠·급격한 하락 셋 다 쓰는 설계다 "
-            "(EXIT_RULES=crash,trailing,vol_decay)")
-        add(WARN, "거래량 감소 하한", s.EXIT_VOL_DECAY_RATIO > 0,
-            f"고점의 {s.EXIT_VOL_DECAY_RATIO:.0%} 미만" if s.EXIT_VOL_DECAY_RATIO > 0
-            else "0 (꺼짐)",
-            "0이면 vol_decay 가 목록에 있어도 발동하지 않는다")
-        add(WARN, "상승 감쇠 무장", s.TRAILING_ACTIVATE_PCT > 0,
-            f"+{s.TRAILING_ACTIVATE_PCT:.1%} 이후 · 고점 −{s.TRAILING_ATR_MULT}xATR"
-            if s.TRAILING_ACTIVATE_PCT > 0 else "0 (꺼짐)",
-            "0이면 trailing 이 목록에 있어도 발동하지 않는다")
-        add(WARN, "급락 임계값", 0.0 < s.CRASH_DROP_PCT < 1.0,
-            f"최근 {s.CRASH_LOOKBACK}봉 고점 대비 −{s.CRASH_DROP_PCT:.0%}",
-            "1.0 이상이면 crash 가 목록에 있어도 발동하지 않는다")
+        add(FATAL, "감쇠 청산 해제", not rules,
+            ", ".join(rules) or "없음",
+            "셋 다 켜면 P(+100%)가 2.09% → 1.01%로 절반이 된다. "
+            "거래량 감소는 발동률 80.9%다(분모가 보유 중 고점이고 폭증일이 그 고점이다)")
+        add(FATAL, "손절 폭", s.STOP_LOSS_PCT >= 0.20,
+            f"{s.STOP_LOSS_PCT:.0%}",
+            "12%는 발동률 21.5%로 회복할 종목을 잘라 꼬리를 1.89%로 깎는다. "
+            "이 사건 집단은 변동성이 커서 12%가 정상 변동폭 안이다 — 25% 권장")
+        add(WARN, "손절 유지(붕괴 보험)", 0 < s.STOP_LOSS_PCT < 1.0,
+            f"{s.STOP_LOSS_PCT:.0%}",
+            "완전히 끄면 2종목 x 45%에서 한 종목 반토막이 계좌 −22.5%이고 "
+            "거래정지는 6봉까지 들고 있게 된다. 25%는 꼬리를 0.02%p만 깎는다")
 
     if mode == "burst":
         # --- 장중 진입이 측정된 설정인지 ---

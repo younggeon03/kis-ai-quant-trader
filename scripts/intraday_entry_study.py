@@ -71,6 +71,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from backtest.data import load_panel_from_dir  # noqa: E402
 from config.settings import get_settings  # noqa: E402
 from scripts.tail_optimizer import MAX_GROSS, MAX_SINGLE, simulate  # noqa: E402
+from strategy.exit_rules import DecayExitTracker  # noqa: E402
+from utils.indicators import atr as atr_fn  # noqa: E402
 from utils.logger import enable_utf8_console, logger  # noqa: E402
 
 COMP_BARS = 30            # 대회 거래일
@@ -123,6 +125,64 @@ def detect_entry(minute: pd.DataFrame, thresh: float
     return mins, float(o[j + 1]), float(o[0])
 
 
+class _ExitCfg:
+    """`DecayExitTracker`가 읽는 설정만 흉내낸다.
+
+    `Settings` 전체를 복제하지 않는 이유: 추적기는 `getattr`로 필요한 필드만
+    읽으므로, 흉내 객체로 두면 **스윕할 값이 무엇인지 코드에 드러난다.**
+    """
+
+    def __init__(self, rules: str, crash: float, lookback: int,
+                 trail_activate: float, trail_mult: float, vol_decay: float,
+                 vol_min_bars: int) -> None:
+        self.EXIT_RULES = rules
+        self.CRASH_DROP_PCT = crash
+        self.CRASH_LOOKBACK = lookback
+        self.TRAILING_ACTIVATE_PCT = trail_activate
+        self.TRAILING_ATR_MULT = trail_mult
+        self.EXIT_VOL_DECAY_RATIO = vol_decay
+        self.EXIT_VOL_DECAY_MIN_BARS = vol_min_bars
+
+
+def hold_with_exits(entry_px: float, i: int, hold: int, cfg: _ExitCfg,
+                    stop_pct: float, o: np.ndarray, c: np.ndarray,
+                    turnover: np.ndarray, atrs: np.ndarray,
+                    cost: float) -> tuple[float, str]:
+    """보유 기간에 **실제 청산 규칙**을 적용한다. (수익률, 사유).
+
+    `strategy/exit_rules.py`의 `DecayExitTracker`를 그대로 쓴다 — 재구현하면
+    검증이 아니라 다른 코드를 측정하는 것이 된다.
+
+    판정은 **봉 t 종가**로 하고 체결은 **봉 t+1 시가**다(백테스트 규약과 같다).
+    아무 규칙도 걸리지 않으면 `close[i+hold]`에서 시간손절로 나간다.
+
+    손절은 추적기가 아니라 여기서 본다 — `risk_manager`가 손절을 먼저 보고
+    감쇠를 나중에 보기 때문이다(우선순위를 같게 유지한다).
+    """
+    tr = DecayExitTracker(cfg)
+    tr.open("X", entry_px)
+    for t in range(i, i + hold):
+        px = float(c[t])
+        if px <= 0 or not np.isfinite(px):
+            continue
+        gain = px / entry_px - 1.0
+        reason = ""
+        if stop_pct > 0 and gain <= -stop_pct:
+            reason = "stop"
+        else:
+            hit = tr.check("X", px, turnover=float(turnover[t]),
+                           atr=float(atrs[t]) if np.isfinite(atrs[t]) else 0.0,
+                           entry=entry_px)
+            if hit is not None:
+                reason = hit.rule
+        if reason:
+            nxt = float(o[t + 1]) if (t + 1) < len(o) else px
+            if not (np.isfinite(nxt) and nxt > 0):
+                nxt = px
+            return nxt / entry_px - 1.0 - cost, reason
+    return float(c[i + hold]) / entry_px - 1.0 - cost, "time"
+
+
 def main() -> int:
     enable_utf8_console()
     ap = argparse.ArgumentParser(description="장중 진입 + 다일 보유 측정")
@@ -138,6 +198,23 @@ def main() -> int:
                          "구간을 넓히면 분봉 있는 날만 골라 보게 된다")
     ap.add_argument("--trials", type=int, default=40000)
     ap.add_argument("--per-day", type=int, default=2, help="동시 보유 종목 수")
+    # --- 보유 중 청산 규칙 (기본 OFF — 끄면 종료일까지 들고 간다) ---
+    #
+    # 기본을 OFF로 둔 것은 **이전 결과를 재현 가능하게** 두기 위해서다.
+    # 켜면 `strategy/exit_rules.py`의 실제 규칙이 보유 기간에 적용된다.
+    ap.add_argument("--exits", action="store_true",
+                    help="보유 중 청산 규칙을 적용한다(기본은 종료일까지 보유)")
+    ap.add_argument("--exit-rules", default="crash,trailing,vol_decay",
+                    help="감쇠 규칙 순서. 빈 문자열이면 감쇠 없음(손절·시간만)")
+    ap.add_argument("--crash", type=float, default=0.15, help="급락 임계값(0=끔)")
+    ap.add_argument("--crash-lookback", type=int, default=10)
+    ap.add_argument("--trail-activate", type=float, default=0.05,
+                    help="트레일링 무장 수익률(0=끔)")
+    ap.add_argument("--trail-mult", type=float, default=2.2, help="트레일링 ATR 배수")
+    ap.add_argument("--vol-decay", type=float, default=0.30,
+                    help="거래대금이 보유 중 고점의 이 비율 아래면 청산(0=끔)")
+    ap.add_argument("--vol-min-bars", type=int, default=2)
+    ap.add_argument("--stop", type=float, default=0.12, help="손절(0=끔)")
     ap.add_argument("--out", default="reports/intraday_entry_study.json")
     args = ap.parse_args()
 
@@ -148,6 +225,10 @@ def main() -> int:
         logger.error(f"[EntryStudy] {args.source} 에 일봉이 없습니다")
         return 1
     mdir = Path(args.minute_dir)
+    cfg = _ExitCfg(args.exit_rules, args.crash, args.crash_lookback,
+                   args.trail_activate, args.trail_mult, args.vol_decay,
+                   args.vol_min_bars)
+    reasons: Dict[str, int] = {}
 
     rows: List[Dict[str, Any]] = []
     n_burst = n_cover = n_detect = 0
@@ -180,6 +261,9 @@ def main() -> int:
         ts = d["ts"].astype(str).to_numpy()
         o = d["open"].to_numpy(float)
         c = d["close"].to_numpy(float)
+        tov = c * d["volume"].to_numpy(float)
+        atrs = (atr_fn(d["high"].to_numpy(float), d["low"].to_numpy(float), c)
+                if args.exits else np.zeros(len(d)))
         for i in idx:
             day = ts[i]
             g = by_day.get(day)
@@ -195,10 +279,16 @@ def main() -> int:
             if not (np.isfinite(exit_px) and exit_px > 0 and entry_px > 0):
                 continue
             nxt_open = o[i + 1] if (i + 1) < len(o) else np.nan
+            if args.exits:
+                r_intra, why = hold_with_exits(entry_px, i, args.hold, cfg,
+                                               args.stop, o, c, tov, atrs, cost)
+                reasons[why] = reasons.get(why, 0) + 1
+            else:
+                r_intra = exit_px / entry_px - 1.0 - cost
             rows.append({
                 "symbol": sym, "day": day, "detect_min": mins,
                 "entry_vs_open": entry_px / max(day_open, 1e-9) - 1.0,
-                "intraday": exit_px / entry_px - 1.0 - cost,
+                "intraday": r_intra,
                 "next_open": (exit_px / nxt_open - 1.0 - cost
                               if np.isfinite(nxt_open) and nxt_open > 0 else np.nan),
                 "day_open": exit_px / max(day_open, 1e-9) - 1.0 - cost,
@@ -221,7 +311,12 @@ def main() -> int:
         "config": {"burst_mult": args.burst_mult, "hold": args.hold,
                    "rounds": rounds, "per_day": args.per_day, "weight": w,
                    "trials": args.trials, "round_trip_cost": cost,
-                   "warmup": args.warmup, "since": args.since},
+                   "warmup": args.warmup, "since": args.since,
+                   "exits": args.exits, "exit_rules": args.exit_rules,
+                   "stop": args.stop, "crash": args.crash,
+                   "trail_activate": args.trail_activate,
+                   "trail_mult": args.trail_mult, "vol_decay": args.vol_decay},
+        "exit_reasons": reasons,
         "coverage": {"burst_days": n_burst, "with_minute": n_cover,
                      "detected": n_detect, "usable": int(len(fr))},
         "detect_min": {q: float(np.percentile(fr["detect_min"], q))
@@ -284,6 +379,14 @@ def main() -> int:
               f"{a['median'] * 100:+9.2f}%{a['win'] * 100:7.1f}%"
               f"{a['port_median'] * 100:+9.1f}%{a['port_p50up'] * 100:9.2f}%"
               f"{a['port_p100up'] * 100:10.2f}%")
+    if reasons:
+        tot = sum(reasons.values())
+        parts = " · ".join(f"{k} {v / tot:.1%}"
+                           for k, v in sorted(reasons.items(), key=lambda x: -x[1]))
+        print(f" 청산 사유  {parts}")
+        print(f" 규칙  [{args.exit_rules or '없음'}] · 손절 {args.stop:.0%} · "
+              f"급락 {args.crash:.0%} · 트레일 +{args.trail_activate:.0%}/"
+              f"{args.trail_mult}xATR · 거래량 {args.vol_decay:.0%}")
     print("=" * 104)
     print(" 기준선 — 일봉 catalyst 2종목x6봉x5회전 1.67% · 스윙 8종목 0.96% · 분봉 단타 0.00%")
     print(" `day_open`은 09:00에 그날의 거래대금을 아는 셈이라 **전략이 아니라 상한**이다.")
