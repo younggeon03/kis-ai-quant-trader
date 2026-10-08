@@ -59,6 +59,7 @@ class SymbolState:
 
     prev_close: float = 0.0
     prev_volume: float = 0.0
+    turnover_med20: float = 0.0    # 전일까지의 20봉 거래대금 중앙값 (burst 모드 분모)
     minute_key: str = ""           # 현재 분 (YYYYMMDDHHMM)
     minute_vol_base: float = 0.0   # 그 분이 시작될 때의 누적거래량
     cum_volume: float = 0.0        # 마지막으로 본 누적거래량
@@ -72,6 +73,22 @@ class SymbolState:
     def minute_volume(self) -> float:
         """이번 분에 쌓인 거래량. 누적값의 차분이다."""
         return max(0.0, self.cum_volume - self.minute_vol_base)
+
+    @property
+    def burst_ratio(self) -> float:
+        """지금까지 쌓인 **당일 거래대금** / 20봉 중앙값.
+
+        일봉 조건(`catalyst_features.turnover_burst_20`)과 같은 분모를 쓴다. 다른
+        점은 분자가 **장중 누적**이라는 것뿐이다 — 그래서 하루가 끝나기 전에
+        조건 성립을 알 수 있고, 그것이 이 모드의 목적이다.
+
+        거래대금 = 현재가 x 누적거래량으로 근사한다. 정확한 값은 체결 단가의
+        가중합이지만 틱 테이프가 없다. 장중 가격 변동폭 안에서의 오차이고,
+        **분모와 같은 정의(종가 x 거래량)를 쓰므로 체계적 편향은 작다.**
+        """
+        if self.turnover_med20 <= 0 or self.cum_volume <= 0 or self.last_price <= 0:
+            return 0.0
+        return (self.last_price * self.cum_volume) / self.turnover_med20
 
 
 @dataclass(frozen=True)
@@ -123,6 +140,8 @@ class IntradayWatcher:
     """
 
     def __init__(self, trigger_pct: float = 0.03, vol_mult: float = 1.5,
+                 entry_mode: str = "breakout", burst_mult: float = 10.0,
+                 flatten: bool = True,
                  target_pct: float = 0.0, stop_pct: float = 0.0,
                  trail_pct: float = 0.0, trail_activate_pct: float = 0.0,
                  flatten_hhmm: str = "1515",
@@ -131,6 +150,22 @@ class IntradayWatcher:
                  max_swaps: int = 2):
         self.trigger_pct = float(trigger_pct)
         self.vol_mult = float(vol_mult)
+        # 진입 판정 방식.
+        #   breakout : 현재가 >= 전일종가 x (1+trigger) AND 분당 거래량 >= 하한
+        #   burst    : 당일 누적 거래대금 >= 20봉 중앙값 x burst_mult
+        #
+        # `burst`를 넣은 이유: 일봉 catalyst 조건이 `turnover = 종가 x 거래량`이라
+        # **장 마감 후에야 확정된다.** 그래서 T+1 시가에 들어가고 폭증일을 통째로
+        # 버린다 — 실측 4,902건에서 폭증일 시가→종가가 평균 **+5.29%**(승률 71.8%)
+        # 인데 현재 먹는 구간은 중앙 **−1.50%**다. 같은 조건을 장중 누적으로 보면
+        # 하루 안에 감지할 수 있다.
+        self.entry_mode = str(entry_mode)
+        self.burst_mult = float(burst_mult)
+        # 15:15 마감 정리를 끌 수 있다. 끄면 포지션이 **일봉 청산 경로**
+        # (`risk_manager`: 손절 + 감쇠 3종 + 시간손절)로 넘어가 다일 보유가 된다.
+        # 당일 청산은 변동을 하루로 묶고 꼬리는 변동에서 나온다 — 분봉 단타가
+        # `P(+100%)` 0.00%였던 원인이 진입이 아니라 이쪽일 수 있다.
+        self.flatten = bool(flatten)
         self.target_pct = float(target_pct)
         self.stop_pct = float(stop_pct)
         self.trail_pct = float(trail_pct)
@@ -147,11 +182,19 @@ class IntradayWatcher:
         self._day: str = ""
 
     # ------------------------------------------------------------ 준비
-    def prime(self, symbol: str, prev_close: float, prev_volume: float) -> None:
-        """일봉에서 전일 종가·거래량을 넣는다. 둘 다 트리거 판정의 기준이다."""
+    def prime(self, symbol: str, prev_close: float, prev_volume: float,
+              turnover_med20: float = 0.0) -> None:
+        """일봉에서 전일 기준값을 넣는다.
+
+        `prev_close`/`prev_volume`은 `breakout` 모드의 기준, `turnover_med20`은
+        `burst` 모드의 분모다. **`burst` 모드인데 이 값이 0이면 그 종목은 영원히
+        발동하지 않는다** — 조용한 미작동이므로 호출부가 반드시 채워야 한다.
+        """
         st = self.states.setdefault(symbol, SymbolState())
         st.prev_close = float(prev_close or 0.0)
         st.prev_volume = float(prev_volume or 0.0)
+        if turnover_med20:
+            st.turnover_med20 = float(turnover_med20)
 
     def reset_day(self, day: str) -> None:
         """날짜 롤오버. **발동 이력과 분봉 누적을 반드시 비운다** — 비우지 않으면
@@ -209,11 +252,21 @@ class IntradayWatcher:
 
         if st.triggered:
             return None
-        if price < st.prev_close * (1.0 + self.trigger_pct):
-            return None
+        # `floor`는 두 분기 밖에서 쓰인다(신호의 `vol_floor`). breakout 분기에서만
+        # 정의하면 burst 모드에서 `UnboundLocalError`가 난다 — 셀프테스트 17번이
+        # 잡았다. burst 모드에서는 거래량 하한을 쓰지 않으므로 관측값으로만 싣는다.
         floor = self.vol_floor(symbol)
-        if floor > 0 and st.minute_volume < floor:
-            return None
+        if self.entry_mode == "burst":
+            # 당일 누적 거래대금만 본다. 가격 조건을 걸지 않는 것은 의도다 —
+            # "거래대금은 10배인데 가격은 안 오른 날"이 분별 대상의 일부이고,
+            # 가격 조건을 같이 걸면 그 집단이 사라져 수집 편향과 같은 문제가 된다.
+            if st.turnover_med20 <= 0 or st.burst_ratio < self.burst_mult:
+                return None
+        else:
+            if price < st.prev_close * (1.0 + self.trigger_pct):
+                return None
+            if floor > 0 and st.minute_volume < floor:
+                return None
 
         st.triggered = True
         speed = max(0, st.minute_index - (st.half_minute if st.half_minute >= 0
@@ -406,7 +459,13 @@ class IntradayWatcher:
         return None
 
     def should_flatten(self, ts: dt.datetime) -> bool:
-        """마감 정리 시각을 지났는가. 규칙과 무관하게 오버나이트를 만들지 않는다."""
+        """마감 정리 시각을 지났는가.
+
+        `flatten=False`면 **항상 False**다. 그 경우 포지션은 일봉 청산 경로로
+        넘어가 다일 보유가 된다(오버나이트가 생긴다 — 의도된 것이다).
+        """
+        if not self.flatten:
+            return False
         return ts.strftime("%H%M") >= self.flatten_hhmm
 
     # ------------------------------------------------------------ 관측

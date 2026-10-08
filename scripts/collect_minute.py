@@ -74,12 +74,27 @@ COLUMNS = ["ts", "open", "high", "low", "close", "volume"]
 
 
 def surge_days(panel: Dict[str, pd.DataFrame], trigger: float,
-               since: str = "") -> Dict[str, List[str]]:
-    """일봉에서 장중 트리거가 걸린 (종목 → 날짜 목록)을 뽑는다.
+               since: str = "", select: str = "price",
+               burst_mult: float = 10.0) -> Dict[str, List[str]]:
+    """분봉을 받을 (종목 → 날짜 목록)을 일봉에서 뽑는다.
 
-    판정은 **고가 ≥ 전일종가 × (1+trigger)**다. 종가가 아니라 고가를 쓰는 이유는,
-    장중에 돌파했다가 밀린 날이 바로 우리가 분별하려는 대상이기 때문이다. 종가
-    기준으로 뽑으면 성공한 급등만 모아 학습이 편향된다.
+    ## 선택 기준이 둘이고 집단이 다르다
+
+    - `price`: **고가 ≥ 전일종가 × (1+trigger)**. 종가가 아니라 고가를 쓰는 이유는
+      장중에 돌파했다가 밀린 날이 분별 대상이기 때문이다. 종가 기준으로 뽑으면
+      성공한 급등만 모아 학습이 편향된다.
+    - `turnover`: **거래대금 ≥ 20봉 중앙값 × burst_mult**. 꼬리 구조 전수 탐색에서
+      승자 조건이 이쪽이었다(거래대금 10배 · 2종목 · 6봉 · 5회전 → P(+100%) 1.67%).
+    - `both`: 두 집단의 합집합.
+
+    **둘을 섞어 쓰면 커버리지 편향이 생긴다.** 분봉을 `price`(3%)로만 모았더니
+    거래대금 10배 사건 4,902건 중 4,273건(87.2%)만 분봉이 있었다. 빠진 629건은
+    "거래대금은 10배인데 가격이 3% 못 움직인 날" — 즉 **거래가 터졌는데 안 오른
+    날**이므로 성질이 다르다. 그 상태로 재면 좋은 쪽만 본다.
+
+    `turnover` 판정은 `strategy/catalyst_features.py`와 **같은 정의**를 쓴다
+    (`turnover = 종가 × 거래량`, 20봉 **중앙값** 대비). 정의가 갈리면 학습·측정이
+    보는 집단과 수집한 집단이 달라진다.
     """
     out: Dict[str, List[str]] = {}
     for sym, df in panel.items():
@@ -89,8 +104,16 @@ def surge_days(panel: Dict[str, pd.DataFrame], trigger: float,
         close = d["close"].to_numpy(float)
         high = d["high"].to_numpy(float)
         ts = d["ts"].astype(str).to_numpy()
-        prev = np.concatenate([[np.nan], close[:-1]])
-        hit = high >= prev * (1.0 + trigger)
+        hit = np.zeros(len(d), dtype=bool)
+        if select in ("price", "both"):
+            prev = np.concatenate([[np.nan], close[:-1]])
+            hit |= high >= prev * (1.0 + trigger)
+        if select in ("turnover", "both"):
+            turnover = pd.Series(close * d["volume"].to_numpy(float))
+            med20 = turnover.rolling(20, min_periods=10).median()
+            with np.errstate(invalid="ignore", divide="ignore"):
+                ratio = (turnover / med20.replace(0.0, np.nan)).to_numpy(float)
+            hit |= np.nan_to_num(ratio, nan=0.0) >= burst_mult
         days = [t for t, h in zip(ts, hit) if h and (not since or t >= since)]
         if days:
             out[sym] = days
@@ -190,9 +213,13 @@ async def run(args) -> int:
     if not panel:
         logger.error(f"[Minute] {args.source} 에 일봉이 없습니다. 먼저 collect_data.py 를 돌리십시오")
         return 1
-    targets = surge_days(panel, args.trigger, args.since)
+    targets = surge_days(panel, args.trigger, args.since,
+                         select=args.select, burst_mult=args.burst_mult)
     total_days = sum(len(v) for v in targets.values())
-    logger.info(f"[Minute] 일봉 {len(panel)}종목 → 트리거 +{args.trigger:.0%} "
+    cond = (f"고가 +{args.trigger:.0%}" if args.select == "price"
+            else f"거래대금 x{args.burst_mult:g}" if args.select == "turnover"
+            else f"고가 +{args.trigger:.0%} 또는 거래대금 x{args.burst_mult:g}")
+    logger.info(f"[Minute] 일봉 {len(panel)}종목 → 기준 '{cond}' "
                 f"{len(targets)}종목 · {total_days:,}일 (예상 호출 {total_days * 2:,})")
     if args.probe:
         for sym in list(targets)[:2]:
@@ -276,6 +303,12 @@ def main() -> int:
                          "판정할 수 없다(분봉이 있어야 안다) — 가격 조건으로 넓게 받고 "
                          "트리거 시점 판정은 strategy/minute_features.py 가 한다")
     ap.add_argument("--since", default="20220103", help="이 날짜 이후만(토스 한계 2022-01-03)")
+    ap.add_argument("--select", choices=["price", "turnover", "both"], default="price",
+                    help="수집 대상 선택 기준. price=고가 돌파 / "
+                         "turnover=거래대금 20봉중앙값 x burst-mult / both=합집합. "
+                         "기준이 다르면 집단이 달라 커버리지 편향이 생긴다")
+    ap.add_argument("--burst-mult", type=float, default=10.0,
+                    help="--select turnover/both 의 거래대금 폭증 배수")
     ap.add_argument("--probe", action="store_true", help="대상 규모만 보고 종료")
     args = ap.parse_args()
     return asyncio.run(run(args))

@@ -92,10 +92,21 @@ def check(settings, live: bool) -> List[Tuple[str, str, str, str]]:
         f"{mode} (USE_INTRADAY={s.USE_INTRADAY} · ENTRY_MODE={s.ENTRY_MODE})",
         "swing 은 30일당 +0.75~0.86%로 측정됐고 P(+100%)가 0.96%다 — "
         "catalyst 1.67% 보다 낮다")
+    intra_cond = (f"거래대금 x{s.INTRADAY_BURST_MULT:g}(장중 누적)"
+                  if s.INTRADAY_ENTRY_MODE == "burst"
+                  else f"트리거 +{s.INTRADAY_TRIGGER_PCT:.0%} · 거래량 x{s.INTRADAY_VOL_MULT}")
     add(WARN, "장중 전략", s.USE_INTRADAY,
-        f"트리거 +{s.INTRADAY_TRIGGER_PCT:.0%} · 거래량 x{s.INTRADAY_VOL_MULT} · "
-        f"스캔 {s.INTRADAY_SCAN_HHMM} · 마감 {s.INTRADAY_FLATTEN_HHMM}",
-        "꺼져 있으면 일봉 스윙으로 돈다")
+        f"{s.INTRADAY_ENTRY_MODE} · {intra_cond} · 스캔 {s.INTRADAY_SCAN_HHMM} · "
+        f"마감 {s.INTRADAY_FLATTEN_HHMM if s.INTRADAY_FLATTEN else 'OFF(다일 보유)'}",
+        "꺼져 있으면 일봉 스윙 또는 catalyst 로 돈다")
+    if s.USE_INTRADAY and not s.INTRADAY_FLATTEN:
+        # **오버나이트 0건은 지금까지 설계 불변 조건이었다.** 끄면 청산이 전부
+        # 일봉 경로(risk_manager)로 가므로, 거기에 시간손절과 감쇠 규칙이 실제로
+        # 켜져 있는지 확인해야 한다. 아니면 포지션이 무기한 남는다.
+        add(FATAL, "다일 보유 시 청산 경로", s.MAX_HOLDING_BARS > 0,
+            f"시간손절 {s.MAX_HOLDING_BARS}봉 · 감쇠 [{s.EXIT_RULES or '없음'}]",
+            "마감 정리를 끄면 청산이 전부 일봉 경로로 간다 — 시간손절이 0이면 "
+            "포지션이 무기한 남는다")
     # **사이징 검사는 전략별로 갈린다.** 분봉은 고정 2종목 x 42%, 스윙은 8슬롯
     # 변동성 타게팅으로 측정했다. 전략과 무관하게 한쪽을 요구하면 다른 쪽이
     # 통과할 수 없고, 실제로 스윙 분기와 모순됐다.

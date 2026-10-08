@@ -114,6 +114,9 @@ class TradingEngine:
         self.intraday = IntradayWatcher(
             trigger_pct=self.s.INTRADAY_TRIGGER_PCT,
             vol_mult=self.s.INTRADAY_VOL_MULT,
+            entry_mode=self.s.INTRADAY_ENTRY_MODE,
+            burst_mult=self.s.INTRADAY_BURST_MULT,
+            flatten=self.s.INTRADAY_FLATTEN,
             target_pct=self.s.INTRADAY_TARGET_PCT,
             stop_pct=self.s.INTRADAY_STOP_PCT,
             trail_pct=self.s.INTRADAY_TRAIL_PCT,
@@ -179,15 +182,38 @@ class TradingEngine:
                 if hist.empty:
                     continue
                 prev = hist.iloc[-1]
-                self._prev_daily[symbol] = (float(prev["close"]), float(prev["volume"]))
+                # 20봉 거래대금 중앙값 — `burst` 모드의 분모다.
+                # 정의를 `strategy/catalyst_features.py`와 맞춘다
+                # (`turnover = 종가 x 거래량`, 20봉 **중앙값**). 갈리면 장중
+                # 조건과 일봉 조건이 다른 것을 보게 된다.
+                tail = hist.tail(20)
+                med20 = float(
+                    (tail["close"].astype(float) * tail["volume"].astype(float)).median()
+                ) if len(tail) >= 10 else 0.0
+                self._prev_daily[symbol] = (float(prev["close"]), float(prev["volume"]),
+                                            med20)
         primed = 0
-        for symbol, (pc, pv) in self._prev_daily.items():
-            self.intraday.prime(symbol, pc, pv)
+        no_med = 0
+        for symbol, vals in self._prev_daily.items():
+            pc, pv = vals[0], vals[1]
+            med20 = vals[2] if len(vals) > 2 else 0.0
+            self.intraday.prime(symbol, pc, pv, turnover_med20=med20)
             primed += 1
+            if med20 <= 0:
+                no_med += 1
         if primed:
-            logger.info(f"[장중] 전일 기준 {primed}종목 적재 "
-                        f"(돌파 +{self.s.INTRADAY_TRIGGER_PCT:.1%}, "
-                        f"거래량 x{self.s.INTRADAY_VOL_MULT})")
+            if self.s.INTRADAY_ENTRY_MODE == "burst":
+                cond = (f"거래대금 x{self.s.INTRADAY_BURST_MULT:g} (장중 누적)")
+            else:
+                cond = (f"돌파 +{self.s.INTRADAY_TRIGGER_PCT:.1%}, "
+                        f"거래량 x{self.s.INTRADAY_VOL_MULT}")
+            logger.info(f"[장중] 전일 기준 {primed}종목 적재 ({cond}"
+                        f"{'' if self.s.INTRADAY_FLATTEN else ' · 마감정리 OFF → 다일 보유'})")
+            # **burst 모드에서 분모가 0이면 그 종목은 영원히 발동하지 않는다.**
+            # 조용한 미작동이므로 세어서 경고한다.
+            if self.s.INTRADAY_ENTRY_MODE == "burst" and no_med:
+                logger.warning(f"[장중] 거래대금 중앙값 없음 {no_med}종목 — "
+                               "이 종목들은 burst 모드에서 발동하지 않는다(이력 부족)")
 
     async def _scan_candidates(self, now: dt.datetime) -> None:
         """아침에 전 후보의 상승률·거래량을 한 번 훑어 **오늘 움직이는** 종목을 구독한다.
@@ -463,7 +489,11 @@ class TradingEngine:
                 pos.stop_price = max(pos.stop_price, new_stop) if pos.stop_price > 0 else new_stop
                 # 장중 청산 감시도 **체결 시점**에 평단가로 시작한다. 접수 시점에는
                 # 평단가가 없어 목표·손절 기준이 어긋난다(위 손절선과 같은 이유).
-                if self.s.USE_INTRADAY:
+                # **마감 정리를 끄면 장중 감시를 열지 않는다.** 그러면 청산이
+                # 전부 일봉 경로(`risk_manager`: 손절 + 감쇠 3종 + 시간손절)로
+                # 가서 다일 보유가 된다. 감시를 열어 두면 장중 손절·트레일이
+                # 일봉 규칙과 이중으로 걸려 어느 쪽이 청산했는지 알 수 없다.
+                if self.s.USE_INTRADAY and self.s.INTRADAY_FLATTEN:
                     # 진입 점수를 함께 넣는다 — 교체 판정의 기준이 된다.
                     self.intraday.open_watch(
                         fill.symbol, pos.avg_price,

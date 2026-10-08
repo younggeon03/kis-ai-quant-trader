@@ -273,6 +273,38 @@ class Settings(BaseSettings):
         default=False, description="장중 돌파 전략 사용(분봉). OFF면 일봉 신호로 진입")
     INTRADAY_TRIGGER_PCT: float = Field(
         default=0.03, description="장중 돌파 기준 — 현재가/전일종가 − 1")
+    # 장중 진입 판정 방식.
+    #
+    #   breakout : 현재가 >= 전일종가 x (1+INTRADAY_TRIGGER_PCT) AND 분당 거래량 하한
+    #   burst    : **당일 누적 거래대금** >= 20봉 중앙값 x INTRADAY_BURST_MULT
+    #
+    # `burst`는 일봉 catalyst와 **같은 조건을 장중 누적으로** 본다. 일봉 조건은
+    # `turnover = 종가 x 거래량`이라 장 마감 후에야 확정되고, 그래서 T+1 시가에
+    # 들어가며 폭증일을 통째로 버린다 — 거래대금 10배 사건 4,902건 실측에서
+    # 폭증일 시가→종가가 평균 **+5.29%**(승률 71.8%)인데 현재 먹는 구간
+    # (T+1시가→T+6종가)은 중앙 **−1.50%**다. 버리는 구간이 평균 +6.2%다.
+    #
+    # **`burst` 모드는 가격 조건을 걸지 않는다.** "거래대금은 10배인데 가격은 안
+    # 오른 날"이 분별 대상의 일부이고, 가격 조건을 같이 걸면 그 집단이 사라진다
+    # (분봉 수집을 가격 기준으로만 해서 커버리지가 87.2%였던 것과 같은 문제다).
+    INTRADAY_ENTRY_MODE: str = Field(
+        default="breakout",
+        description="장중 진입 판정: breakout=가격 돌파+분당 거래량 / "
+                    "burst=당일 누적 거래대금 폭증")
+    INTRADAY_BURST_MULT: float = Field(
+        default=10.0,
+        description="burst 모드의 거래대금 폭증 배수(20봉 중앙값 대비). "
+                    "일봉 CATALYST_BURST_MULT 와 같은 값을 쓰는 것이 기본이다")
+    # 15:15 마감 정리를 끌 수 있다. 끄면 포지션이 **일봉 청산 경로**
+    # (`risk_manager`: 손절 + 감쇠 3종 + 시간손절)로 넘어가 다일 보유가 된다.
+    #
+    # **오버나이트 0건은 지금까지 설계 불변 조건이었다.** 끄는 근거: 당일 청산은
+    # 변동을 하루로 묶고 꼬리는 변동에서 나온다(1회 표준편차 분봉 5.3% vs 일봉
+    # 6봉 보유는 훨씬 크다). 분봉 단타가 모든 레버에서 `P(+100%)` 0.00%였던 원인이
+    # **진입이 아니라 청산 쪽**일 수 있고, 둘을 분리해 측정한 적이 없다.
+    INTRADAY_FLATTEN: bool = Field(
+        default=True,
+        description="15:15 전량 청산. false 면 일봉 청산 경로로 넘겨 다일 보유한다")
     INTRADAY_VOL_MULT: float = Field(
         default=12.0, description="돌파 분의 거래량 ÷ 전일 분당 평균 하한")
     # 왜 12배인가 (분봉 리플레이 250거래일 · 거래 약 500건)

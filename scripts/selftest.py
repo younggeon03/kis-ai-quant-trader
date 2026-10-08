@@ -917,8 +917,38 @@ def test_intraday():
     w.reset_day("20261013")
     nxt = w.on_quote("A", 10_400.0, 99_999.0, dt.datetime(2026, 10, 13, 9, 0))
     assert nxt is not None, "날짜가 바뀌었는데 발동 이력이 남아 있다"
+
+    # --- burst 모드: 당일 누적 거래대금만 본다 ---
+    #
+    # 일봉 catalyst 조건(`turnover = 종가 x 거래량` >= 20봉 중앙값 x 10)을 **장중
+    # 누적으로** 보는 모드다. 일봉은 장 마감 후에야 확정되므로 T+1 시가에 들어가고
+    # 폭증일(시가→종가 평균 +5.29%, 승률 71.8%)을 통째로 버린다.
+    #
+    # **가격 조건을 걸지 않는 것이 핵심이다.** "거래대금은 10배인데 가격은 안 오른
+    # 날"이 분별 대상의 일부이고, 가격 조건을 같이 걸면 그 집단이 사라진다.
+    b = IntradayWatcher(entry_mode="burst", burst_mult=10.0, trigger_pct=0.03)
+    b.prime("A", prev_close=10_000.0, prev_volume=391_000.0, turnover_med20=1_000e6)
+    t0 = dt.datetime(2026, 10, 12, 9, 0)
+    # 가격이 **내려가도** 거래대금만 차면 발동해야 한다(가격 조건 없음).
+    assert b.on_quote("A", 9_500.0, 500_000.0,
+                      t0) is None, "거래대금 미달인데 발동 (9,500x50만 = 47.5억 < 100억)"
+    sig = b.on_quote("A", 9_500.0, 1_100_000.0, t0 + dt.timedelta(minutes=1))
+    assert sig is not None, "거래대금 10.45배인데 미발동 — 가격이 내려가도 발동해야 한다"
+
+    # 분모가 0이면 영원히 발동하지 않는다(조용한 미작동 — 호출부가 채워야 한다)
+    b2 = IntradayWatcher(entry_mode="burst", burst_mult=10.0)
+    b2.prime("B", prev_close=10_000.0, prev_volume=391_000.0)   # turnover_med20 미지정
+    assert b2.on_quote("B", 10_000.0, 1e9, t0) is None, "분모 0인데 발동"
+
+    # --- 마감 정리 OFF: 다일 보유로 넘긴다 ---
+    nf = IntradayWatcher(flatten=False, flatten_hhmm="1515")
+    assert nf.should_flatten(dt.datetime(2026, 10, 12, 15, 30)) is False,         "flatten=False 인데 마감 정리가 True"
+    nf.open_watch("A", 10_000.0)
+    assert nf.exit_reason("A", 10_000.0, dt.datetime(2026, 10, 12, 15, 30)) is None,         "flatten=False 인데 마감 정리로 청산했다"
+    assert w.should_flatten(dt.datetime(2026, 10, 12, 15, 30)) is True,         "flatten=True 인데 마감 정리가 False"
     return ("가격·거래량 동시 조건 · 분당 차분 · 하루 1회 · "
-            "청산 우선순위(손절>트레일>익절>마감) · 롤오버 모두 작동")
+            "청산 우선순위(손절>트레일>익절>마감) · 롤오버 · "
+            "burst 모드(가격 무관·분모 0 미작동) · 마감정리 OFF 모두 작동")
 
 
 @check("18. 장중 후보 명부·교체")
