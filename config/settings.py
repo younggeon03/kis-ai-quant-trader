@@ -153,6 +153,36 @@ class Settings(BaseSettings):
     MODEL_DIR: str = Field(default=str(PROJECT_ROOT / "models"))
     MODEL_NAME: str = Field(default="alpha_gbdt")
     SIGNAL_BUY_THRESHOLD: float = Field(default=0.22, description="앙상블 점수(-1~1) 매수 진입 임계값")
+
+    # 진입 방식 — "model"(앙상블 점수 임계값) / "catalyst"(거래대금 폭증 조건)
+    #
+    # **`catalyst`는 모델을 쓰지 않는다.** 측정된 선정 스킬이 0에 가깝기 때문이다:
+    # 분봉 모델 AUC 0.5585(표본을 2.6배로 늘리자 0.6063→0.5661→0.5585로 하락),
+    # 분봉 선정은 **무작위보다 나빴다**(선택 −0.366% vs 전체 −0.213%), 일봉 전략
+    # 승구간 11/28 vs 동일가중 매수보유 21/28.
+    #
+    # 대신 꼬리 확률이 가장 큰 **조건**을 쓴다. `scripts/tail_grid.py` 전수 탐색
+    # (지문 22d557320d0e640d · 284종목 · 조건 6종 x 종목수 4 x 회전 5 · 시행 8만):
+    #
+    # | 조건 | 구조 | 30일 P(+100%) @스킬0 | P(-50%) |
+    # |---|---|---|---|
+    # | **거래대금 10배** | **2종목 x 5라운드(6봉)** | **1.67%** | **0.03%** |
+    # | 거래대금 10배 | 2종목 x 3라운드(10봉) | 1.57% | 0.00% |
+    # | 일간 +10% | 2종목 x 1라운드(30봉) | 1.15% | 0.06% |
+    # | 일간 +15% | 2종목 x 5라운드(6봉) | 1.06% | 0.89% |
+    # | (기준선) 스윙 8종목 분산 | — | 0.96% | — |
+    # | (기준선) 분봉 단타 | — | **0.00%** | — |
+    #
+    # 거래대금 조건은 꼬리가 더 두꺼운데 파산 확률이 거의 0이다 — 급등률 조건보다
+    # 양쪽이 다 낫다. 그리고 조건 없이(`무조건`) 30봉 단일 종목 P(+100%)는 0.95%인데
+    # 조건을 걸면 3.04~4.06%로 **3배**가 된다.
+    ENTRY_MODE: str = Field(
+        default="model",
+        description="진입 방식: model=앙상블 점수 임계값 / catalyst=거래대금 폭증 조건")
+    CATALYST_BURST_MULT: float = Field(
+        default=10.0,
+        description="catalyst 진입의 거래대금 폭증 하한(20봉 중앙값 대비 배수). "
+                    "turnover_burst_20 >= log1p(이 값) 을 요구한다")
     SIGNAL_SELL_THRESHOLD: float = Field(default=-0.15, description="보유 종목 청산 임계값")
     W_MODEL: float = Field(default=0.50, description="AI 모델 가중치")
     W_TECHNICAL: float = Field(default=0.30, description="기술적 팩터 가중치")

@@ -52,6 +52,10 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+# 폭증 피처의 클립 상한. `strategy/ai_model.py`의 catalyst 진입이 점수를 이 값으로
+# 정규화하므로 **두 곳이 갈리면 순위가 조용히 틀어진다.** 상수로 공유한다.
+BURST_CLIP_MAX = 6.0
+
 # 종목 단위 소재 흔적 피처
 CATALYST_FEATURES: List[str] = [
     "turnover_burst_20",    # 거래대금 / 20봉 중앙값 (log)
@@ -107,8 +111,8 @@ def build_catalyst_features(df: pd.DataFrame) -> pd.DataFrame:
     med60 = _rolling_median(turnover, 60)
     burst20 = np.log1p(turnover / med20.replace(0.0, np.nan))
     burst60 = np.log1p(turnover / med60.replace(0.0, np.nan))
-    out["turnover_burst_20"] = np.clip(burst20, 0.0, 6.0)
-    out["turnover_burst_60"] = np.clip(burst60, 0.0, 6.0)
+    out["turnover_burst_20"] = np.clip(burst20, 0.0, BURST_CLIP_MAX)
+    out["turnover_burst_60"] = np.clip(burst60, 0.0, BURST_CLIP_MAX)
 
     # 소재는 오늘 터졌을 수도, 사흘 전에 터졌을 수도 있다. 진입 시점에 이미
     # 폭증이 지나간 경우를 놓치지 않으려면 최근 구간의 최대값이 필요하다.

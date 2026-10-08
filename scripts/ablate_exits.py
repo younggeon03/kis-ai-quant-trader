@@ -295,6 +295,56 @@ EXPOSURE_CONFIGS: List[Dict[str, Any]] = [
                "MAX_HOLDING_BARS": 999, "SIGNAL_SELL_THRESHOLD": -9.9}},
 ]
 
+# ------------------------------------------------------------- catalyst 설정군
+#
+# `scripts/tail_grid.py` 전수 탐색의 승자 구조를 **실엔진으로** 확인한다
+# (지문 22d557320d0e640d · 284종목 · 조건 6종 x 종목수 4 x 회전 5 · 시행 8만):
+#
+# | 조건 | 구조 | 30일 P(+100%) @스킬0 | P(-50%) |
+# |---|---|---|---|
+# | **거래대금 10배** | **2종목 x 5라운드(6봉)** | **1.67%** | 0.03% |
+# | 거래대금 10배 | 2종목 x 3라운드(10봉) | 1.57% | 0.00% |
+# | (기준선) 스윙 8종목 분산 | — | 0.96% | — |
+# | (기준선) 분봉 단타 | — | 0.00% | — |
+#
+# **이 측정으로 P(+100%)를 검증할 수는 없다.** 구간이 28개뿐이라 1.67%의 기대
+# 발생 수가 0.47개다. 여기서 보는 것은 (a) 기계적으로 동작하는가 — 진입이 나고
+# 익스포저가 90%에 닿고 30봉에 5회전하는가, (b) 구간 수익 분포의 평균·p90·최대가
+# 기준선보다 두꺼운가다. 꼬리 확률 추정은 부트스트랩에 남긴다.
+#
+# **델타를 전부 명시한다.** 기준 설정은 `.env`에서 오고 현재 `.env`는 분봉 전용
+# (2종목 x 42% · 게이트 해제)이라, 일부만 덮으면 나머지가 조용히 따라온다.
+#
+# `STOP_LOSS_PCT=0.0`은 손절을 끄지 않는다 — `initial_stop()`이 진입가를 그대로
+# 돌려주고 `pos.pnl_pct <= -0.0`이 어떤 손실에도 걸려 **0% 손절**이 된다.
+# 끄려면 큰 값을 쓴다. 익절·트레일링은 `> 0` 분기가 있어 0에서 정상 비활성화된다.
+_NO_STOP = 0.99
+
+_CAT = {
+    "ENTRY_MODE": "catalyst", "CATALYST_BURST_MULT": 10.0,
+    "SIZING_MODE": "fixed", "MAX_POSITIONS": 2,
+    "FIXED_POSITION_WEIGHT": 0.45, "MAX_POSITION_WEIGHT": 0.50,
+    "MAX_GROSS_EXPOSURE": 0.95,          # 2 x 45% = 90%, 부분체결 여유 5%p
+    "USE_TOP_K": False, "MIN_HOLDING_BARS": 0,
+    "TAKE_PROFIT_PCT": 0.0,              # 꼬리를 자르지 않는다
+    "TRAILING_ACTIVATE_PCT": 0.0,
+    "SIGNAL_SELL_THRESHOLD": -9.9,       # 청산은 시간·손절만 담당한다
+    "MDD_SOFT_LIMIT": 1.0, "MDD_HARD_LIMIT": 1.0, "DAILY_LOSS_LIMIT": 1.0,
+    "CRASH_DROP_PCT": 0.30,
+}
+
+CATALYST_CONFIGS: List[Dict[str, Any]] = [
+    {"name": "기준선(.env 그대로)", "delta": {}},
+    # 승자 구조. 부트스트랩에는 손절이 없었으므로 손절 유무를 따로 가른다.
+    {"name": "catalyst 2x45% 6봉 손절12",
+     "delta": {**_CAT, "MAX_HOLDING_BARS": 6, "STOP_LOSS_PCT": 0.12}},
+    {"name": "catalyst 2x45% 6봉 손절없음",
+     "delta": {**_CAT, "MAX_HOLDING_BARS": 6, "STOP_LOSS_PCT": _NO_STOP}},
+    # 2위 구조. 보유 길이만 바꾼 단일 변수 비교다.
+    {"name": "catalyst 2x45% 10봉 손절12",
+     "delta": {**_CAT, "MAX_HOLDING_BARS": 10, "STOP_LOSS_PCT": 0.12}},
+]
+
 CONFIG_SETS: Dict[str, List[Dict[str, Any]]] = {
     "flow": FLOW_CONFIGS,
     "universe": UNIVERSE_CONFIGS,
@@ -303,6 +353,7 @@ CONFIG_SETS: Dict[str, List[Dict[str, Any]]] = {
     "sizing": SIZING_CONFIGS,
     "topk": TOPK_CONFIGS,
     "exposure": EXPOSURE_CONFIGS,
+    "catalyst": CATALYST_CONFIGS,
 }
 
 

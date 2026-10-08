@@ -761,6 +761,9 @@ def regime_series(panel: Dict[str, pd.DataFrame]) -> List[RegimeState]:
     return [_classify_regime(float(trend[i]), float(vol[i]), float(breadth[i])) for i in range(n)]
 
 
+from strategy.catalyst_features import BURST_CLIP_MAX  # noqa: E402
+
+
 class EnsembleAlphaStrategy(AbstractStrategy):
     """AI 모델 + 기술적 팩터 + 횡단면 랭크 앙상블 전략."""
 
@@ -866,6 +869,42 @@ class EnsembleAlphaStrategy(AbstractStrategy):
         raw = w_m * float(np.clip(model_score, -1.0, 1.0)) + w_t * tech + w_c * cs
         score = float(np.clip(raw * regime.scale, -1.0, 1.0))
 
+        # --- catalyst 진입 모드 ---
+        #
+        # 모델 점수를 **쓰지 않고** 거래대금 폭증 조건으로 진입을 가른다. 근거는
+        # `config/settings.py::ENTRY_MODE` 주석의 꼬리 전수 탐색이다
+        # (거래대금 10배 x 2종목 x 5라운드(6봉) → 30일 P(+100%) 1.67%,
+        #  스윙 분산 0.96% · 분봉 단타 0.00%).
+        #
+        # 세 가지를 의도적으로 다르게 한다.
+        #
+        # 1. **조건 미달은 0.0이다(−1.0이 아니다).** −1.0으로 두면 보유 종목의
+        #    폭증이 식은 다음 봉에 `SIGNAL_SELL_THRESHOLD`(−0.15)가 걸려 즉시
+        #    청산되고 6봉 보유가 성립하지 않는다. 0.0은 매수 임계값(0.22) 아래이고
+        #    매도 임계값 위라 "진입도 청산도 아님"이 된다. 청산은 시간(`MAX_HOLDING_BARS`)
+        #    과 손절만 담당한다.
+        # 2. **레짐 배수를 곱하지 않는다.** 꼬리 측정에 레짐 게이팅이 없었고,
+        #    실측 `regime.scale` 중앙값이 0.80이라 곱하면 나쁜 장세에서 조건을
+        #    통과한 종목이 임계값 밑으로 떨어져 조용히 진입이 사라진다.
+        # 3. **`bet`을 −1.0으로 덮는다.** 모델이 로드돼 있으면 `bet_size()`가
+        #    0.0을 돌려줄 수 있고, 0.0은 "진입 금지"라는 뜻이라 조건을 통과해도
+        #    수량이 0이 된다. −1.0은 리스크 매니저의 폴백 스케일을 쓰라는 신호다
+        #    (고정 사이징에서는 애초에 쓰이지 않는다).
+        catalyst_floor = 0.0
+        if self.settings.ENTRY_MODE == "catalyst":
+            burst = float(row.get("turnover_burst_20", 0.0) or 0.0)
+            if not np.isfinite(burst):
+                burst = 0.0
+            catalyst_floor = float(np.log1p(max(0.0, self.settings.CATALYST_BURST_MULT)))
+            if burst < catalyst_floor:
+                score = 0.0
+            else:
+                # 폭증 크기로 순위를 만든다. 하한에서 0.30(매수 임계값 0.22 위)으로
+                # 시작해 `turnover_burst_20`의 클립 상한 6.0에서 1.0에 닿는다.
+                span = max(1e-9, BURST_CLIP_MAX - catalyst_floor)
+                score = float(np.clip(0.30 + 0.70 * (burst - catalyst_floor) / span,
+                                      0.30, 1.0))
+
         atr_abs = float(row.get("atr_abs", 0.0) or 0.0)
         if not np.isfinite(atr_abs) or atr_abs <= 0:
             atr_abs = price * 0.02
@@ -887,6 +926,8 @@ class EnsembleAlphaStrategy(AbstractStrategy):
                     bet *= float(np.clip(meta_p, 0.0, 1.0))
         else:
             bet = -1.0   # 콜드 스타트: 리스크 매니저가 점수 기반 선형 스케일로 폴백한다
+        if self.settings.ENTRY_MODE == "catalyst":
+            bet = -1.0   # 위 3번 — 모델의 bet 0.0이 진입을 막지 않게 한다
 
         return Signal(
             symbol=symbol, score=score, price=price, ts=ts or dt.datetime.now(),
