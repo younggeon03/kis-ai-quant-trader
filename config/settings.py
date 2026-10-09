@@ -308,11 +308,24 @@ class Settings(BaseSettings):
     INTRADAY_ENTRY_MODE: str = Field(
         default="breakout",
         description="장중 진입 판정: breakout=가격 돌파+분당 거래량 / "
-                    "burst=당일 누적 거래대금 폭증")
+                    "burst=당일 누적 거래대금 폭증 / "
+                    "opening=장 시작 N분 거래대금이 평소 N분 몫의 k배(strategy/opening.py)")
     INTRADAY_BURST_MULT: float = Field(
         default=10.0,
         description="burst 모드의 거래대금 폭증 배수(20봉 중앙값 대비). "
                     "일봉 CATALYST_BURST_MULT 와 같은 값을 쓰는 것이 기본이다")
+    # --- opening 모드 (2026-10-09 구현, **측정 전 — 아래 값은 자리표시다**) ---
+    #
+    # 누적 10배는 감지가 늦다(중앙 10:59, 이미 +7%). 그래서 장 시작 N분의 거래대금을
+    # 평소 하루 거래대금(20봉 중앙)의 N/390 몫과 비교한다. 판정은 09:0N에 한 번,
+    # 진입은 09:(N+지연)부터 — 284종목 분봉 조회(모의 유량 약 2.6분)가 끝나야 하고,
+    # 측정(`scripts/opening_study.py`)이 "구간 끝 + 지연분 시가"로 들어간다.
+    OPENING_WINDOW_MIN: int = Field(
+        default=5, description="opening 모드 판정 구간(09:00부터 N분)")
+    OPENING_MULT: float = Field(
+        default=10.0, description="opening 모드 배수 k(평소 N분 몫 대비). 측정 전 자리표시")
+    OPENING_LAG_MIN: int = Field(
+        default=3, description="판정 구간 끝 → 진입까지 지연(분). 분봉 조회 시간을 덮는다")
     # 15:15 마감 정리를 끌 수 있다. 끄면 포지션이 **일봉 청산 경로**
     # (`risk_manager`: 손절 + 감쇠 3종 + 시간손절)로 넘어가 다일 보유가 된다.
     #

@@ -1543,6 +1543,152 @@ async def _check_live_vol_alive(s) -> str:
             "WS 밖 종목 REST 순회")
 
 
+@check("22. 장 시작 구간 진입 (opening 모드)")
+async def test_opening_entry():
+    """09:0N 분봉 판정 → 09:(N+지연)에 한 번 진입. **측정과 같은 순수 함수**를 쓴다.
+
+    측정(`scripts/opening_study.py`)과 실거래(`main.py::_opening_scan`)가 창을 각자
+    계산하면 한 칸만 어긋나도 다른 규칙을 실거래로 들고 간다. 그래서 (1) 창 경계,
+    (2) 두 경로가 같은 함수 객체를 쓰는지, (3) KIS 분봉 파서, (4) 진입 배선을 본다.
+    """
+    import datetime as dt
+    import types
+
+    import scripts.opening_study as study
+    from main import TradingEngine
+    from strategy import opening as op
+    from strategy.intraday import IntradayWatcher
+
+    # --- 1) 창 경계: 09:00~09:0(N-1)만, 장전·09:0N 이후는 빼고 ---
+    hhmm = ["0859", "0900", "0901", "0904", "0905", "0910"]
+    mi = op.minute_index(hhmm)
+    assert list(mi) == [-1, 0, 1, 4, 5, 10], f"경과 분 계산 오류: {list(mi)}"
+    close = np.full(6, 1_000.0)
+    vol = np.array([999.0, 1.0, 2.0, 3.0, 999.0, 999.0])
+    assert op.window_turnover(mi, close, vol, 5) == 6_000.0, "창 경계가 틀렸다(09:00~09:04만 합산)"
+    assert op.day_avg_base(390e6, 5) == 5e6
+    assert op.opening_ratio(50e6, 390e6, 5) == 10.0
+    assert op.opening_ratio(50e6, 0.0, 5) == 0.0, "기준선 0인데 배수를 냈다(발동 위험)"
+    assert op.rank_triggers({"A": 3.0, "B": 12.0, "C": 10.0}, 10.0) == [("B", 12.0), ("C", 10.0)]
+
+    # --- 2) 측정과 실거래가 같은 함수를 쓴다 ---
+    for name in ("window_turnover", "minute_index", "day_avg_base", "opening_ratio"):
+        assert getattr(study, name) is getattr(op, name), \
+            f"측정 스크립트가 {name}을 따로 구현했다 — 측정과 실거래가 갈린다"
+
+    # --- 3) KIS 당일 분봉 파서: 분 단위 ts · 분당 체결량 · 과거→최신 ---
+    from api.base import AbstractBroker
+    rows = [{"stck_bsop_date": "20261012", "stck_cntg_hour": f"09{m:02d}00",
+             "stck_prpr": "1000", "stck_oprc": "1000", "stck_hgpr": "1000",
+             "stck_lwpr": "1000", "cntg_vol": str(10 * (m + 1)), "acml_vol": "999999"}
+            for m in range(4, -1, -1)]                     # KIS는 최신순
+    fake = types.SimpleNamespace()
+
+    async def _chart(symbol, hour="", past=True):
+        return {"rt_cd": "0", "msg_cd": "", "msg1": "", "output2": rows}
+    fake.inquire_minute_chart = _chart
+    bars = await AbstractBroker.get_minute_bars(fake, "AAA", "090500")
+    assert bars["ts"].tolist()[0] == "202610120900" and len(bars) == 5, \
+        f"분봉 ts가 분 단위가 아니거나 정렬이 틀렸다: {bars['ts'].tolist()}"
+    assert bars["volume"].tolist() == [10.0, 20.0, 30.0, 40.0, 50.0], \
+        "분당 체결량(cntg_vol) 대신 누적(acml_vol)을 읽었다"
+
+    # --- 3-1) 규칙 진입 점수가 리스크 관문의 모델 문턱에 걸리지 않는다 ---
+    # 예전 burst 경로는 "가격 상승률 x 10"을 점수로 넣어 +2.2% 미만 폭증이 전부
+    # `SIGNAL_BUY_THRESHOLD`(0.22)에 거부됐다. 측정에 없는 가격 필터였다.
+    import main as main_mod
+    assert main_mod.RULE_TRIGGER_SCORE >= Settings.model_fields["SIGNAL_BUY_THRESHOLD"].default,         "규칙 진입 점수가 모델 문턱보다 낮다 — 측정에 없는 필터가 생긴다"
+
+    # --- 4) 엔진 배선 ---
+    s = get_settings()
+    keys = ("USE_INTRADAY", "INTRADAY_ENTRY_MODE", "OPENING_WINDOW_MIN", "OPENING_MULT",
+            "OPENING_LAG_MIN", "MAX_POSITIONS", "SIZING_MODE", "FIXED_POSITION_WEIGHT",
+            "MAX_POSITION_WEIGHT", "MAX_GROSS_EXPOSURE", "USE_MOCK_MODE")
+    saved = {k: getattr(s, k) for k in keys}
+    try:
+        s.USE_INTRADAY, s.INTRADAY_ENTRY_MODE = True, "opening"
+        s.OPENING_WINDOW_MIN, s.OPENING_MULT, s.OPENING_LAG_MIN = 5, 10.0, 3
+        s.MAX_POSITIONS, s.SIZING_MODE, s.FIXED_POSITION_WEIGHT = 2, "fixed", 0.45
+        s.MAX_POSITION_WEIGHT, s.MAX_GROSS_EXPOSURE, s.USE_MOCK_MODE = 0.50, 0.95, False
+
+        # 시세 한 건으로는 발동하지 않는다(breakout 분기로 떨어지면 안 된다)
+        w = IntradayWatcher(entry_mode="opening")
+        w.prime("AAA", 1000.0, 1e6, turnover_med20=1e6)
+        assert w.on_quote("AAA", 2000.0, 1e9, dt.datetime(2026, 10, 12, 9, 1)) is None, \
+            "opening 모드인데 시세 한 건으로 발동했다(가격 돌파로 진입한다)"
+
+        codes = list(get_settings().UNIVERSE[:5])
+        # 평소 20봉 중앙 3.9억 → 5분 몫 500만. 배수: c0 x20 · c1 x12 · c2 x15 · c3 x5 · c4(보유)
+        mult = {codes[0]: 20.0, codes[1]: 12.0, codes[2]: 15.0, codes[3]: 5.0, codes[4]: 50.0}
+
+        class _Broker:
+            def __init__(self):
+                self.minute_calls = []
+
+            async def get_minute_bars(self, symbol, hour):
+                self.minute_calls.append((symbol, hour))
+                per_min = 5e6 * mult[symbol] / 5
+                return pd.DataFrame({"ts": [f"20261012090{m}" for m in range(5)],
+                                     "open": [10_000.0] * 5, "high": [10_000.0] * 5,
+                                     "low": [10_000.0] * 5, "close": [10_000.0] * 5,
+                                     "volume": [per_min / 10_000.0] * 5})
+
+            async def get_quote(self, symbol):
+                return types.SimpleNamespace(price=10_000.0, volume=0.0)
+
+        eng = TradingEngine(s, enable_dashboard=False)
+        eng.broker = _Broker()
+        eng.universe = codes
+        eng._prev_daily = {c: (10_000.0, 1e5, 390e6) for c in codes}
+        eng.portfolio.positions[codes[4]] = Position(symbol=codes[4], qty=10,
+                                                     avg_price=10_000.0, last_price=10_000.0)
+        submitted = []
+
+        async def _submit(symbol, side, qty, price, reason):
+            submitted.append(symbol)
+            eng.open_orders[f"o{len(submitted)}"] = {"symbol": symbol, "side": side.value,
+                                                     "qty": qty, "price": price}
+            return True
+        eng._submit = _submit
+
+        await eng._opening_scan(dt.datetime(2026, 10, 12, 9, 5, 1))
+        assert all(h == "090500" for _, h in eng.broker.minute_calls), "분봉 조회 시각이 09:05가 아니다"
+        assert codes[4] not in [c for c, _ in eng.broker.minute_calls], "보유 종목을 판정했다"
+        picks = [c for c, _ in eng._opening_picks]
+        assert picks == [codes[0], codes[2], codes[1]], f"배수 큰 순·문턱 적용 오류: {picks}"
+
+        eng._opening_day = "20261012"
+        await eng._opening_entries(dt.datetime(2026, 10, 12, 9, 7), {})
+        assert not submitted, "측정은 09:08(구간 끝+3분) 진입인데 그 전에 샀다"
+        await eng._opening_entries(dt.datetime(2026, 10, 12, 9, 8), {})
+        assert submitted == [codes[0]], \
+            f"빈 슬롯 1개(보유 1)를 배수 1위로 채우지 않았다: {submitted}"
+        await eng._opening_entries(dt.datetime(2026, 10, 12, 9, 30), {})
+        assert submitted == [codes[0]], "하루 한 번인데 다시 진입했다"
+        # 다음 날: 오늘 판정이 아직 없으면 어제 결과로 사지 않는다
+        eng._opening_picks = [(codes[1], 12.0)]
+        await eng._opening_entries(dt.datetime(2026, 10, 13, 9, 30), {})
+        assert submitted == [codes[0]], "전날 판정 결과로 오늘 진입했다"
+
+        # opening 모드의 REST 시세는 WS 밖 보유 종목만 본다(유니버스 순회 안 함)
+        calls = []
+
+        async def _q(symbol):
+            calls.append(symbol)
+            return types.SimpleNamespace(price=10_000.0, volume=0.0)
+        eng.broker.get_quote = _q
+        eng.ws = types.SimpleNamespace(is_healthy=lambda: True)
+        eng.watchlist = []
+        await eng._refresh_quotes()
+        assert calls == [codes[4]], f"opening 모드에서 보유 외 종목을 조회했다: {calls}"
+    finally:
+        for k, v in saved.items():
+            setattr(s, k, v)
+    return ("창 경계(09:00~09:0N-1) · 측정과 같은 함수 · KIS 분봉 파서(분 단위·분당 체결량) · "
+            "판정→지연 후 1회 진입(배수 순·빈 슬롯·보유 제외·전날 결과 차단) · "
+            "시세 1건 미발동 · 보유만 시세 조회 모두 작동")
+
+
 # ============================================================ 실행
 
 async def run_all() -> int:
@@ -1554,7 +1700,7 @@ async def run_all() -> int:
         test_live_client_offline, test_validation, test_weights_and_bets,
         test_competition_rules, test_selection_and_phase, test_panel_min_bars,
         test_intraday, test_intraday_book, test_decay_exits,
-        test_orderbook_recorder, test_burst_wiring,
+        test_orderbook_recorder, test_burst_wiring, test_opening_entry,
     ]
     print("\n" + "=" * 86)
     print(" KIS AI Quant Trader — 셀프 테스트")

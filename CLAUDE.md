@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-python scripts/selftest.py                    # 전체 검증 (21개 항목) — 변경 후 필수로 실행
+python scripts/selftest.py                    # 전체 검증 (22개 항목) — 변경 후 필수로 실행
 python scripts/train_model.py --days 1500     # AI 모델 학습 → models/alpha_gbdt.pkl
 python scripts/train_model.py --source data/cache --no-flow   # 수급 피처 제외(측정용)
 python scripts/run_backtest.py --days 1000    # 백테스트 → reports/
@@ -27,6 +27,9 @@ python scripts/intraday_entry_study.py        # 장중 진입 vs T+1 진입(다�
 #   --burst-mult / --hold / --since 로 파인튜닝. --since 는 커버리지 편향 방지용
 python scripts/collect_minute.py --select turnover  # 거래대금 폭증일 분봉 수집
 python scripts/preflight.py                   # 대회 직전 점검 (--live 로 실서버까지 요구)
+python scripts/slot_sim.py                    # 달력 시간순 2슬롯 평가(라운드 근사 대신 — 보유일수가 다른 규칙 비교용)
+python scripts/collect_opening.py             # 모든 거래일 09:00~09:30 분봉(토스 · 수집 전 현재 IP 확인)
+python scripts/opening_study.py               # 장 시작 구간 진입 격자 vs 현재 규칙(수집 완료 후)
 python -m compileall -q config core api strategy backtest utils monitor scripts main.py
 ```
 
@@ -158,6 +161,18 @@ KIS 유량: 실전 20건/초, **모의투자 2건/초**. 기본값은 모의투�
 ⑤ 보유·청산          `INTRADAY_FLATTEN=false` → 다일 보유. 청산은 일봉 경로
                      (`vol_alive` + 손절 25% + 30봉 상한, §9-1)
 ```
+
+**opening 모드(구현만, 측정 전 — 2026-10-09):** `INTRADAY_ENTRY_MODE=opening`이면 ②가
+"장 시작 N분 거래대금 ≥ k x 평소(20봉 중앙) N/390 몫"으로 바뀐다. 09:0N에 KIS 당일분봉
+(`get_minute_bars`)으로 한 번 판정하고 09:(N+`OPENING_LAG_MIN`)에 한 번 진입한다
+(`main.py::_opening_scan`·`_opening_entries`). 판정은 `strategy/opening.py` 순수 함수이고
+**측정(`scripts/opening_study.py`)이 같은 함수를 import한다** — 셀프테스트 22번이 함수 객체
+동일성까지 본다. 측정 전이므로 preflight가 치명으로 막는다. KIS 분봉의 시각 표기(시작/끝)는
+실서버 첫날 `[장중·개장] 분봉 시각 확인` 로그로 확인해야 한다.
+
+**규칙 진입의 점수는 `RULE_TRIGGER_SCORE`(1.0)다.** 리스크 관문의 `SIGNAL_BUY_THRESHOLD`
+(0.22)는 일봉 모델용이다. burst 경로가 "가격 상승률 x 10"을 점수로 넣어 **+2.2% 미만에서 터진
+폭증이 전부 거부되고 있었다**(측정에 없는 가격 필터, 2026-10-09 수정).
 
 (2026-10-08 전에는 ⑤가 "15:15 마감 정리, 오버나이트 없음"이었다. 당일 청산은 모든
 레버에서 `P(+100%)` 0.00%로 측정돼 내렸다. 아래 세 항목 중 마감 정리 관련 내용은

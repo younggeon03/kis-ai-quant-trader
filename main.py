@@ -57,6 +57,7 @@ from core.events import (
 from monitor.app import DashboardServer
 from strategy.ai_model import EnsembleAlphaStrategy
 from strategy.exit_rules import daily_alive_burst
+from strategy.opening import minute_index, opening_ratio, rank_triggers, window_turnover
 from strategy.risk_manager import ExitOrder, RiskManager, RiskState
 from strategy.selection import select_entries, select_rotation_exits
 from strategy.intraday import IntradayWatcher, TriggerSignal
@@ -71,6 +72,10 @@ QUOTE_CHUNK = 4             # 루프당 현재가 갱신 종목 수(유량 보�
 RECONCILE_LOOPS = 30        # 브로커 잔고 대조 주기
 FLATTEN_ORDER_TTL = 30.0    # 마감 정리 구간의 미체결 매도 취소 기준(초)
 FILL_POLL_LOOPS = 5         # 체결 폴링 주기(실서버)
+# 규칙 기반 진입(burst·opening)의 신호 점수. 진입 결정은 규칙이 이미 내렸으므로 리스크
+# 관문의 일봉 모델용 문턱(SIGNAL_BUY_THRESHOLD)에 걸리지 않게 둔다. 고정 사이징에서는
+# 점수가 비중에 쓰이지 않는다.
+RULE_TRIGGER_SCORE = 1.0
 
 
 class TradingEngine:
@@ -152,6 +157,11 @@ class TradingEngine:
         # 전일 기준값(`_prev_daily`·`_alive_burst`)을 만든 날. 날짜가 바뀌면
         # `_roll_daily_reference()`가 일봉을 다시 받고 둘 다 새로 만든다.
         self._ref_day: str = ""
+        # --- opening 모드 (장 시작 N분 거래대금) — 하루 한 번 판정, 한 번 진입 ---
+        self._opening_day: str = ""                      # 판정을 시작한 날
+        self._opening_task: Optional[asyncio.Task] = None
+        self._opening_picks: Optional[List[tuple]] = None  # [(종목, 배수)] 배수 큰 순
+        self._opening_done_day: str = ""                 # 진입을 처리한 날
         # 대시보드 자산곡선/유량 그래프용 링버퍼 (메모리 상한 고정)
         self.equity_history: deque = deque(maxlen=720)
         self.rps_history: deque = deque(maxlen=90)
@@ -359,6 +369,115 @@ class TradingEngine:
             last = df[df["ts"].astype(str) < today]
             if not last.empty:
                 logger.info(f"[기준] 마지막 확정 봉 {last['ts'].iloc[-1]} (기준 종목 {self.universe[0]})")
+
+    def _opening_mode(self) -> bool:
+        return bool(self.s.USE_INTRADAY) and self.s.INTRADAY_ENTRY_MODE == "opening"
+
+    async def _opening_scan(self, now: dt.datetime) -> None:
+        """09:0N에 유니버스 전 종목의 당일 분봉을 받아 장 시작 N분 거래대금을 판정한다.
+
+        **분봉을 받는 이유:** 누적 거래량(`acml_vol`) x 현재가로 근사하면 조회 시각까지의
+        거래가 섞인다 — 284종목을 도는 데 약 2.6분이 걸려 종목마다 창이 달라진다. 분봉의
+        09:00~09:0(N-1)만 합하면 측정(`scripts/opening_study.py`)과 같은 창이 된다.
+        판정은 `strategy/opening.py` 순수 함수가 한다(측정과 같은 코드).
+
+        결과(`_opening_picks`)는 배수가 큰 순이다. 진입은 `_tick`이 09:(N+지연)부터 한 번
+        처리한다. 실패해도 하루 한 번만 시도한다(`_opening_day`).
+        """
+        n = int(self.s.OPENING_WINDOW_MIN)
+        day = now.strftime("%Y%m%d")
+        hour = f"{9 + n // 60:02d}{n % 60:02d}00"
+        held = set(self.portfolio.open_positions())
+        ratios: Dict[str, float] = {}
+        checked = 0
+        for symbol in self.universe:
+            if symbol in held:
+                continue
+            vals = self._prev_daily.get(symbol)
+            med20 = vals[2] if vals and len(vals) > 2 else 0.0
+            if med20 <= 0:
+                continue
+            try:
+                bars = await self.broker.get_minute_bars(symbol, hour)
+            except Exception as exc:
+                logger.debug(f"[장중·개장] {symbol} 분봉 실패: {exc}")
+                continue
+            bars = bars[bars["ts"].astype(str).str[:8] == day] if not bars.empty else bars
+            if bars.empty:
+                continue
+            checked += 1
+            tv = window_turnover(minute_index(bars["ts"]), bars["close"].to_numpy(float),
+                                 bars["volume"].to_numpy(float), n)
+            r = opening_ratio(tv, med20, n)
+            if r > 0:
+                ratios[symbol] = r
+            # 시각 표기(시작/끝) 확인용 — 첫 종목의 봉 시각을 남긴다(실서버 첫날 확인)
+            if checked == 1:
+                logger.info(f"[장중·개장] 분봉 시각 확인 {symbol}: "
+                            f"{', '.join(bars['ts'].astype(str).str[8:12].tolist()[:8])}")
+        picks = rank_triggers(ratios, float(self.s.OPENING_MULT))
+        self._opening_picks = picks
+        top = ", ".join(f"{s_} x{r:.1f}" for s_, r in picks[:5]) or "없음"
+        logger.info(f"[장중·개장] 09:00~{hour[:2]}:{hour[2:4]} 판정 {checked}종목 → 발동 "
+                    f"{len(picks)}건 (x{self.s.OPENING_MULT:g} 이상 · 상위: {top})")
+        self.ledger.write("opening_scan", {
+            "window_min": n, "mult": float(self.s.OPENING_MULT), "checked": checked,
+            "picks": [{"symbol": s_, "ratio": round(r, 3)} for s_, r in picks[:20]]})
+
+    async def _opening_entries(self, now: dt.datetime, prices: Dict[str, float]) -> None:
+        """판정 결과로 **하루 한 번** 빈 슬롯을 채운다.
+
+        측정과 같은 규칙이다 — 배수가 큰 순으로 채우고, 슬롯이 없어 못 산 발동은
+        버린다(다음 날로 넘기지 않는다). 측정은 "구간 끝 + 지연분 시가"에 들어가므로
+        그 전에는 사지 않는다. 판정이 그보다 늦게 끝나면 끝난 뒤 사고 지연을 기록한다.
+        """
+        n, lag = int(self.s.OPENING_WINDOW_MIN), int(self.s.OPENING_LAG_MIN)
+        day = now.strftime("%Y%m%d")
+        if (self._opening_done_day == day or self._opening_day != day
+                or self._opening_picks is None):
+            return
+        start = n + lag
+        if now.strftime("%H%M") < f"{9 + start // 60:02d}{start % 60:02d}":
+            return
+        self._opening_done_day = day
+        late = (now.hour - 9) * 60 + now.minute - start
+        if late > 0 and self._opening_picks:
+            logger.warning(f"[장중·개장] 진입이 측정보다 {late}분 늦다(분봉 판정 지연)")
+        inflight = self.open_orders_symbols()
+        held = set(self.portfolio.open_positions())
+        free = max(0, int(self.s.MAX_POSITIONS) - len(held | set(inflight)))
+        for symbol, ratio in self._opening_picks:
+            if free <= 0:
+                break
+            if symbol in held or symbol in inflight:
+                continue
+            # 관심목록 밖 종목은 현재가가 묵어 있을 수 있다 — 주문 직전에 새로 받는다.
+            try:
+                q = await self.broker.get_quote(symbol)
+                px = float(q.price) if q and q.price > 0 else prices.get(symbol, 0.0)
+            except Exception:
+                px = prices.get(symbol, 0.0)
+            if px <= 0:
+                continue
+            self.latest_prices[symbol] = px
+            sig = Signal(symbol=symbol, score=RULE_TRIGGER_SCORE, price=px, ts=now,
+                         atr=self.atr_map.get(symbol, 0.0),
+                         volatility=self.vol_map.get(symbol, 0.0),
+                         bet=-1.0, reason="opening_turnover")
+            decision = self.risk.evaluate_entry(sig, self.portfolio, now,
+                                                pending=self._pending_notional())
+            self.ledger.write("risk_decision", {
+                "symbol": symbol, "score": round(sig.score, 4), "ratio": round(ratio, 3),
+                "approved": decision.approved, "qty": decision.qty,
+                "reason": decision.reason, "path": "opening", **decision.detail})
+            if not decision.approved:
+                logger.info(f"[장중·개장] {symbol} 진입 거부 — {decision.reason}")
+                continue
+            ok = await self._submit(symbol, Side.BUY, decision.qty, px,
+                                    f"OPENING|09:00~{n}분 거래대금 x{ratio:.1f}")
+            if ok:
+                free -= 1
+        self._opening_picks = None
 
     async def _scan_candidates(self, now: dt.datetime) -> None:
         """아침에 전 후보의 상승률·거래량을 한 번 훑어 **오늘 움직이는** 종목을 구독한다.
@@ -736,7 +855,13 @@ class TradingEngine:
         """
         ws_ok = self.ws is not None and self.ws.is_healthy()
         held: List[str] = []
-        if self.s.USE_INTRADAY:
+        if self._opening_mode():
+            # opening 모드는 진입 판정이 09:0N 분봉 한 번이라 유니버스를 하루 종일 돌
+            # 이유가 없다. 오히려 그 유량이 판정 조회를 늦춘다. **WS 밖 보유 종목만** 본다.
+            covered = set(self.watchlist) if ws_ok else set()
+            held = [h for h in self.portfolio.open_positions() if h not in covered]
+            watch = []
+        elif self.s.USE_INTRADAY:
             covered = set(self.watchlist) if ws_ok else set()
             held = [h for h in self.portfolio.open_positions() if h not in covered]
             watch = [s_ for s_ in self.universe if s_ not in covered and s_ not in held]
@@ -1032,9 +1157,22 @@ class TradingEngine:
         # 진입 슬리피지가 크다고 나왔으므로 09:05~09:07을 날리는 것은 치명적이다.
         #
         # 재진입은 `_scanned_day`가 막는다(함수 진입 직후에 설정한다).
-        if self.s.USE_INTRADAY and self._scanned_day != now.strftime("%Y%m%d"):
+        #
+        # **opening 모드에서는 돌지 않는다.** 그 스캔은 누적 폭증을 실시간으로 보려고
+        # WS 40종목을 고르는 것인데 opening은 09:0N 분봉 판정 한 번이 전부다. 그리고
+        # 같은 유량(284건)을 판정 조회와 나눠 쓰면 판정이 진입 시각(09:0N+지연)을 넘긴다.
+        if (self.s.USE_INTRADAY and not self._opening_mode()
+                and self._scanned_day != now.strftime("%Y%m%d")):
             if self._scan_task is None or self._scan_task.done():
                 self._scan_task = asyncio.create_task(self._scan_candidates(now))
+        # opening 판정 — 09:0N이 지나면 하루 한 번 띄운다. 결과를 먼저 비워서 전날
+        # 판정이 오늘 진입으로 새지 않게 한다.
+        n_open = int(self.s.OPENING_WINDOW_MIN)
+        if (self._opening_mode() and self._opening_day != now.strftime("%Y%m%d")
+                and now.strftime("%H%M") >= f"{9 + n_open // 60:02d}{n_open % 60:02d}"):
+            self._opening_day = now.strftime("%Y%m%d")
+            self._opening_picks = None
+            self._opening_task = asyncio.create_task(self._opening_scan(now))
 
         # --- 평가 및 리스크 상태 ---
         prices = {s: p for s, p in self.latest_prices.items() if p > 0}
@@ -1137,8 +1275,12 @@ class TradingEngine:
                     self.ledger.write("exit", {"symbol": symbol, "qty": qty,
                                                "reason": "intraday", "detail": reason})
 
+        # --- 장중 진입: opening 모드 (09:0N 판정 → 09:(N+지연) 한 번) ---
+        if self._opening_mode() and self.risk.state == RiskState.NORMAL:
+            await self._opening_entries(now, prices)
+
         # --- 장중 진입 (분봉 전략) ---
-        if self.s.USE_INTRADAY:
+        if self.s.USE_INTRADAY and not self._opening_mode():
             # 발동한 사건을 **명부에 올린다.** 매 루프 비우면 같은 분에 동시 발동한
             # 것들 사이에서만 고르게 되고, 실측에서 슬롯 2개가 09:00~09:01에 차는
             # 날이 76.9%라 나머지 12건이 선택 기회 없이 버려졌다
@@ -1182,10 +1324,15 @@ class TradingEngine:
                     if sig.symbol in inflight:
                         continue
                     # 리스크 매니저가 모든 주문의 최종 관문이다. 장중 경로도 우회하지 않는다.
-                    # 점수는 돌파 강도로 둔다 — 모델 점수가 아니므로 `bet=-1`(모델 없음)로
-                    # 두어 사이징이 점수 기반 폴백을 쓰게 한다.
+                    #
+                    # 점수는 `RULE_TRIGGER_SCORE`(1.0)다. 예전에는 "가격 상승률 x 10"을
+                    # 넣었는데, 리스크 관문의 `SIGNAL_BUY_THRESHOLD`(0.22, 일봉 모델용)에
+                    # 걸려 **전일 대비 +2.2% 미만에서 터진 폭증이 전부 거부됐다.** burst
+                    # 판정은 일부러 가격 조건을 걸지 않고(위 감시기 주석) 측정에도 그 필터가
+                    # 없다 — 측정에 없는 규칙이 실거래에만 있었다(2026-10-09 수정).
+                    # 고정 사이징에서는 점수가 비중에 쓰이지 않으므로 수량은 그대로다.
                     entry_sig = Signal(
-                        symbol=sig.symbol, score=min(1.0, max(0.0, sig.level_pct * 10.0)),
+                        symbol=sig.symbol, score=RULE_TRIGGER_SCORE,
                         price=sig.price, ts=sig.ts,
                         atr=self.atr_map.get(sig.symbol, 0.0),
                         volatility=self.vol_map.get(sig.symbol, 0.0),
@@ -1491,6 +1638,8 @@ class TradingEngine:
         # 그만큼 늦어지고, 종료 중 주문을 내면 안 된다.
         if self._scan_task is not None and not self._scan_task.done():
             self._scan_task.cancel()
+        if self._opening_task is not None and not self._opening_task.done():
+            self._opening_task.cancel()        # 같은 이유 — 284종목 분봉 조회
         if not self._running:
             return
         self._running = False

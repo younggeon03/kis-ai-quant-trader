@@ -108,6 +108,9 @@ def check(settings, live: bool) -> List[Tuple[str, str, str, str]]:
         "대응 비교에서 장중 진입이 T+1보다 P(+100%) +0.74%p, McNemar p=0.039")
     intra_cond = (f"거래대금 x{s.INTRADAY_BURST_MULT:g}(장중 누적)"
                   if s.INTRADAY_ENTRY_MODE == "burst"
+                  else (f"장 시작 {s.OPENING_WINDOW_MIN}분 거래대금 x{s.OPENING_MULT:g}"
+                        f"(평소 N분 몫) · 진입 +{s.OPENING_LAG_MIN}분")
+                  if s.INTRADAY_ENTRY_MODE == "opening"
                   else f"트리거 +{s.INTRADAY_TRIGGER_PCT:.0%} · 거래량 x{s.INTRADAY_VOL_MULT}")
     add(WARN, "장중 전략", s.USE_INTRADAY,
         f"{s.INTRADAY_ENTRY_MODE} · {intra_cond} · 스캔 {s.INTRADAY_SCAN_HHMM} · "
@@ -256,7 +259,8 @@ def check(settings, live: bool) -> List[Tuple[str, str, str, str]]:
         # (3봉 1.58% · 6봉 2.09% · 10봉 2.19% · 15봉 1.70%).
         add(FATAL, "장중 진입 모드", s.INTRADAY_ENTRY_MODE == "burst",
             f"{s.INTRADAY_ENTRY_MODE}",
-            "breakout(가격 +3% 돌파)은 P(+100%) 0.00%로 측정됐다")
+            "breakout(가격 +3% 돌파)은 P(+100%) 0.00%로 측정됐다. opening(장 시작 구간)은 "
+            "구현만 됐고 **측정 전**이다(scripts/opening_study.py) — 측정 후 이 점검을 고친다")
         add(WARN, "장중 폭증 배수", abs(s.INTRADAY_BURST_MULT - 10.0) < 1e-9,
             f"x{s.INTRADAY_BURST_MULT:g}",
             "10/20/30배는 구분되지 않는다 — 10배가 커버리지 94.8%로 가장 신뢰할 만하다")

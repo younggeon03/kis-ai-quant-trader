@@ -191,6 +191,39 @@ class AbstractBroker(abc.ABC):
         df = df.iloc[::-1].reset_index(drop=True)  # KIS는 최신순이므로 뒤집는다
         return df
 
+    async def get_minute_bars(self, symbol: str, hour: str) -> pd.DataFrame:
+        """당일 분봉(과거→최신) — `ts`는 **`YYYYMMDDHHMM` 12자리**다.
+
+        `_chart_rows_to_frame`은 날짜(`stck_bsop_date`)만 `ts`로 써서 분봉이 전부 같은
+        날짜로 찍힌다(일봉용이다). 그래서 분봉은 날짜 + `stck_cntg_hour`로 따로 만든다.
+        거래량은 **그 분의 체결량**(`cntg_vol`)이다 — 누적(`acml_vol`)이 아니다.
+
+        `hour`(HHMMSS)까지의 봉을 최대 30개 돌려준다(KIS 사양). Mock·실클라이언트가
+        같은 `inquire_minute_chart`를 구현하므로 파서는 여기 하나다.
+        """
+        payload = await self.inquire_minute_chart(symbol, hour=hour)
+        if not is_ok(payload):
+            return pd.DataFrame(columns=["ts", "open", "high", "low", "close", "volume"])
+        records = []
+        for row in payload.get("output2") or []:
+            day = str(row.get("stck_bsop_date") or "")
+            hhmm = str(row.get("stck_cntg_hour") or "")[:4]
+            close = to_float(row.get("stck_prpr"))
+            if len(day) != 8 or len(hhmm) != 4 or close <= 0:
+                continue
+            records.append({
+                "ts": day + hhmm,
+                "open": to_float(row.get("stck_oprc"), close),
+                "high": to_float(row.get("stck_hgpr"), close),
+                "low": to_float(row.get("stck_lwpr"), close),
+                "close": close,
+                "volume": to_float(row.get("cntg_vol")),
+            })
+        if not records:
+            return pd.DataFrame(columns=["ts", "open", "high", "low", "close", "volume"])
+        df = pd.DataFrame(records).sort_values("ts").drop_duplicates("ts")
+        return df.reset_index(drop=True)
+
     async def get_bars(self, symbol: str, count: int = 300, period: str = "D") -> pd.DataFrame:
         """OHLCV DataFrame(과거→최신)을 반환한다."""
         if period == "M":

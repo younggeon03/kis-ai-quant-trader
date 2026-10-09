@@ -60,15 +60,9 @@ from scripts.intraday_entry_study import (COMP_BARS, _fingerprint,  # noqa: E402
                                           burst_days, detect_entry)
 from scripts.slot_sim import path_exit, run_window  # noqa: E402
 from scripts.tail_optimizer import MAX_GROSS, MAX_SINGLE  # noqa: E402
+from strategy.opening import (day_avg_base, minute_index,  # noqa: E402
+                              opening_ratio, window_turnover)
 from utils.logger import enable_utf8_console, logger  # noqa: E402
-
-SESSION_MIN = 390.0
-
-
-def _minute_index(ts: pd.Series) -> np.ndarray:
-    h = ts.str[8:10].astype(int).to_numpy()
-    m = ts.str[10:12].astype(int).to_numpy()
-    return (h - 9) * 60 + m
 
 
 def evaluate(events: List[Dict[str, Any]], closes: Dict[str, Dict[int, float]],
@@ -146,13 +140,16 @@ def main() -> int:
             m = pd.read_csv(op, dtype={"ts": str})
             m = m[m["ts"].str[:8] >= args.since]
             if not m.empty:
-                m = m.assign(mi=_minute_index(m["ts"]), tv=m["close"] * m["volume"],
+                m = m.assign(mi=minute_index(m["ts"]), tv=m["close"] * m["volume"],
                              day=m["ts"].str[:8])
                 fp_src[sym] = m["tv"].to_numpy(float)
                 days = sorted(m["day"].unique())
                 by_day = {dy: g.sort_values("mi") for dy, g in m.groupby("day")}
                 # 구간별 거래대금 표 — 같은 구간 기준선(직전 20일 중앙)을 만든다
-                wtv = {N: pd.Series([float(by_day[dy].loc[by_day[dy]["mi"] < N, "tv"].sum())
+                # 구간 합은 실거래와 같은 함수(`strategy.opening.window_turnover`)다
+                wtv = {N: pd.Series([window_turnover(by_day[dy]["mi"].to_numpy(),
+                                                     by_day[dy]["close"].to_numpy(float),
+                                                     by_day[dy]["volume"].to_numpy(float), N)
                                      for dy in days], index=days) for N in windows}
                 same_base = {N: wtv[N].rolling(20, min_periods=10).median().shift(1)
                              for N in windows}
@@ -168,13 +165,16 @@ def main() -> int:
                         if ent.empty or not (float(ent.iloc[0]) > 0) or w <= 0:
                             continue
                         entry_px = float(ent.iloc[0])
-                        bases = {"day_avg": med_day[i] * N / SESSION_MIN,
+                        # day_avg 는 실거래(`main.py::_opening_scan`)와 같은 함수다.
+                        # same_window 는 측정 전용 — 실거래 배관(지난 20일 분봉)이 없다.
+                        bases = {"day_avg": day_avg_base(med_day[i], N),
                                  "same_window": same_base[N][dy]}
                         exit_cache = None
                         for bname, base in bases.items():
                             if not (np.isfinite(base) and base > 0):
                                 continue
-                            ratio = w / base
+                            ratio = (opening_ratio(w, med_day[i], N) if bname == "day_avg"
+                                     else w / base)
                             for k in mults[bname]:
                                 if ratio < k:
                                     continue

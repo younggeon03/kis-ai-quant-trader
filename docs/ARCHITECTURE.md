@@ -944,6 +944,16 @@ assert np.allclose(full[:200][~nan], prefix[~nan])
 **저장 모드가 다르면 복구하지 않는다.** Mock과 실서버가 같은 파일을 쓰므로, 그대로
 복구하면 Mock 자산 고점이 실계좌 첫날 낙폭으로 잡히고 Mock 가상 날짜가 진입일로 넘어온다.
 
+### opening 모드 (장 시작 구간 진입, 측정 전)
+
+`INTRADAY_ENTRY_MODE=opening`이면 장중 진입이 시세 단위 판정(`IntradayWatcher.on_quote`)이 아니라
+**09:0N 분봉 판정 한 번**이 된다. `_opening_scan()`이 유니버스 전 종목의 당일분봉
+(`AbstractBroker.get_minute_bars` — 분 단위 `ts`, 분당 체결량 `cntg_vol`)을 받아
+`strategy/opening.py`로 판정하고, `_opening_entries()`가 09:(N+지연)에 배수 큰 순으로 빈 슬롯을
+한 번 채운다. 누적 거래량 x 현재가로 근사하지 않는 이유는 284종목 조회에 약 2.6분이 걸려
+종목마다 창이 달라지기 때문이다. 이 모드에서는 아침 스캔과 유니버스 REST 순회를 하지 않는다
+(판정 조회와 유량을 나눠 쓰면 진입이 늦어진다). WS 밖 보유 종목만 REST로 본다.
+
 ### 날짜 롤오버
 
 `run()`은 `startup()`을 한 번만 부른다. 그래서 여러 날 켜 두면 전일 종가·20봉 중앙값
