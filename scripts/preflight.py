@@ -264,6 +264,13 @@ def check(settings, live: bool) -> List[Tuple[str, str, str, str]]:
                                       - s.CATALYST_BURST_MULT) < 1e-9,
             f"장중 x{s.INTRADAY_BURST_MULT:g} / 일봉 x{s.CATALYST_BURST_MULT:g}",
             "두 경로가 다른 집단을 보면 측정과 실거래가 갈린다")
+        # **감시 범위가 측정 모집단과 같은지.** `_build_universe`가 20일 거래대금
+        # 상위 `UNIVERSE_SIZE`개만 남기고, 전일 기준값이 없는 종목은 발동하지 않는다.
+        # `.env`가 20으로 덮고 있어 실거래가 대형주 20종목만 보고 있었다(2026-10-09).
+        add(FATAL, "폭증 감시 범위", s.UNIVERSE_SIZE >= len(s.UNIVERSE),
+            f"UNIVERSE_SIZE {s.UNIVERSE_SIZE} / 유니버스 {len(s.UNIVERSE)}종목",
+            "작으면 거래대금 상위 대형주만 감시한다 — 측정 모집단(257종목)과 갈리고 "
+            "10배 폭증은 중앙값이 작은 종목에서 난다")
     if mode == "swing":
         # --- 일봉 스윙(모델 진입)으로 돌아왔을 때 ---
         #

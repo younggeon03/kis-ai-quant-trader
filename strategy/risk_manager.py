@@ -518,8 +518,18 @@ class RiskManager:
                     pos.trailing_active = True
                     self._reasons.append(f"TRAIL_ON: {symbol} @{pos.pnl_pct:.2%}")
 
-            # 1단계(초기화 옵션이 하방을 덮는 구간)에서는 손절류를 전부 건너뛴다.
+            # 1단계(초기화 옵션이 하방을 덮는 구간)에서는 **손절만** 건너뛴다.
+            #
+            # 감쇠 청산(`EXIT_RULES`)은 리스크 손절이 아니라 **전략의 기본 청산**이라
+            # 1단계에도 돈다. 예전에는 이 분기가 감쇠까지 건너뛰어 1주차가
+            # "2종목을 사서 30봉 상한까지 보유"가 됐다 — 측정한 전략(`vol_alive`
+            # 상태 기반 보유)과 다른 것이고, 백테스트에는 대회 날짜가 없어 어떤
+            # 측정에도 나타나지 않았다.
             if not self.use_stop_loss:
+                if decay is not None:
+                    exits.append(ExitOrder(symbol, pos.qty, _DECAY_REASON[decay.rule],
+                                           price, decay.reason))
+                    continue
                 if pos.bars_held >= self.s.MAX_HOLDING_BARS:
                     exits.append(ExitOrder(symbol, pos.qty, ExitReason.TIME_STOP, price,
                                            f"보유 {pos.bars_held}봉 초과"))

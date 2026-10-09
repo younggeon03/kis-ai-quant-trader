@@ -582,7 +582,8 @@ class Settings(BaseSettings):
     PHASE1_DISABLE_RISK: bool = Field(
         default=True,
         description="1단계에서 손절·MDD 게이트를 끈다. 초기화 옵션이 하방을 덮기 "
-                    "때문이며, 이 논리는 1단계가 끝나면 성립하지 않는다")
+                    "때문이며, 이 논리는 1단계가 끝나면 성립하지 않는다. 감쇠 청산"
+                    "(EXIT_RULES)은 전략의 기본 청산이라 끄지 않는다")
 
     # 대회 최소 요건 — 못 채우면 수익률과 무관하게 실격이다(모두 체결 기준).
     MIN_TRADE_COUNT: int = Field(default=0, description="최소 거래 횟수")

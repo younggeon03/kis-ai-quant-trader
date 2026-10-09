@@ -56,6 +56,7 @@ from core.events import (
 )
 from monitor.app import DashboardServer
 from strategy.ai_model import EnsembleAlphaStrategy
+from strategy.exit_rules import daily_alive_burst
 from strategy.risk_manager import ExitOrder, RiskManager, RiskState
 from strategy.selection import select_entries, select_rotation_exits
 from strategy.intraday import IntradayWatcher, TriggerSignal
@@ -139,6 +140,18 @@ class TradingEngine:
         self._scan_task: Optional[asyncio.Task] = None
         # 전일 종가·거래량. 패널은 실시간 가격으로 덮어써지므로 한 번만 떠서 보관한다.
         self._prev_daily: Dict[str, tuple] = {}
+        # --- 다일 보유 청산(`vol_alive`) — 하루 한 번, 확정 일봉으로 판정한다 ---
+        # 종목 → 어제 확정 거래대금 / 그 전일까지 20봉 중앙값(`daily_alive_burst`).
+        # 장중 누적으로 판정하면 매일 아침 시가에 팔린다(함수 주석 참고).
+        self._alive_burst: Dict[str, float] = {}
+        # 종목 → 첫 매수 체결일(YYYYMMDD). 진입 당일은 판정하지 않으므로(폭증일이라
+        # 당연히 생존) 반드시 알아야 하고, 재시작해도 남도록 상태 파일에 저장한다.
+        self._entry_dates: Dict[str, str] = {}
+        # 패널 밖 보유 종목의 일봉(유니버스 순위가 바뀌어 빠진 경우). 판정에만 쓴다.
+        self._held_daily: Dict[str, pd.DataFrame] = {}
+        # 전일 기준값(`_prev_daily`·`_alive_burst`)을 만든 날. 날짜가 바뀌면
+        # `_roll_daily_reference()`가 일봉을 다시 받고 둘 다 새로 만든다.
+        self._ref_day: str = ""
         # 대시보드 자산곡선/유량 그래프용 링버퍼 (메모리 상한 고정)
         self.equity_history: deque = deque(maxlen=720)
         self.rps_history: deque = deque(maxlen=90)
@@ -176,7 +189,10 @@ class TradingEngine:
         # 따라다니고, 트리거가 영원히 발동하지 않거나 즉시 발동한다.
         #
         # 그래서 `startup()`에서 **갓 적재한(아직 덮어쓰지 않은) 패널**로 한 번
-        # 떠 두고 이후에는 그 값을 쓴다. 날짜가 바뀌면 `startup()`이 다시 돈다.
+        # 떠 두고 이후에는 그 값을 쓴다. 날짜가 바뀌면 `_roll_daily_reference()`가
+        # 일봉을 새로 받은 직후 `_prev_daily`를 비우고 이 함수를 다시 부른다.
+        # (예전 주석은 "`startup()`이 다시 돈다"였지만 `run()`은 `startup()`을 한
+        # 번만 부른다 — 여러 날 켜 두면 기준값이 첫날 것으로 고정돼 있었다.)
         today = self._now().strftime("%Y%m%d")
         if not self._prev_daily:
             for symbol, df in self.panel.items():
@@ -222,6 +238,127 @@ class TradingEngine:
             if self.s.INTRADAY_ENTRY_MODE == "burst" and no_med:
                 logger.warning(f"[장중] 거래대금 중앙값 없음 {no_med}종목 — "
                                "이 종목들은 burst 모드에서 발동하지 않는다(이력 부족)")
+
+    def _refresh_alive(self, today: str) -> None:
+        """`vol_alive` 판정 입력을 **확정 일봉**에서 만든다. 하루 한 번.
+
+        `_prime_intraday`와 같은 이유로 **갓 적재한 패널**에서만 불러야 한다
+        (`startup()`·`_roll_daily_reference()`). 장중에 부르면 마지막 봉이 실시간
+        가격으로 덮어써진 상태라 분자가 틀어진다.
+        """
+        frames = {**self._held_daily, **self.panel}
+        alive: Dict[str, float] = {}
+        ref_ts: Dict[str, str] = {}
+        for symbol, df in frames.items():
+            if df is None or df.empty:
+                continue
+            hist = df[df["ts"].astype(str) < today]
+            b = daily_alive_burst(hist)
+            if b > 0:
+                alive[symbol] = b
+                ref_ts[symbol] = str(hist["ts"].iloc[-1])
+        # 일봉 재적재가 실패했으면(서버 점검·네트워크) 패널이 묵어 있다. 그대로 쓰면
+        # 어제 진입한 종목이 **폭증 전날** 거래대금으로 판정돼 잘못 팔린다. 판정을
+        # 보류하는 쪽이 안전하다 — 최악이 하루 더 보유하는 것이다.
+        stale = self._stale_reference(today)
+        if stale is not None:
+            logger.warning(f"[기준] 마지막 확정 봉이 {stale or '없음'} — 직전 거래일이 아니다"
+                           "(일봉 재적재 실패?). 오늘 vol_alive 판정을 보류한다"
+                           "(보유 유지 · 손절·상한만). 재시작하면 다시 받는다")
+            alive = {}
+        self._alive_burst = alive
+        # 보유 종목의 오늘 판정을 미리 찍는다 — 아침에 무엇이 왜 팔릴지 로그로 보인다.
+        mult = float(self.s.EXIT_VOL_ALIVE_MULT)
+        for symbol in self.portfolio.open_positions():
+            entered = self._entry_dates.get(symbol, today)
+            if entered >= today:
+                logger.info(f"[보유] {symbol} 진입 당일 — vol_alive 판정 없음")
+            elif symbol not in alive:
+                logger.warning(f"[보유] {symbol} 확정 일봉 거래대금을 계산할 수 없음 — "
+                               f"vol_alive 판정 불가(손절·{self.s.MAX_HOLDING_BARS}봉 상한만)")
+            else:
+                verdict = "유지" if alive[symbol] >= mult else "청산(시가)"
+                logger.info(f"[보유] {symbol} {ref_ts[symbol]} 거래대금 20봉중앙 "
+                            f"x{alive[symbol]:.2f} (기준 x{mult:g}) → {verdict}")
+
+    def _stale_reference(self, today: str) -> Optional[str]:
+        """실서버에서 패널의 마지막 확정 봉이 **직전 거래일보다 오래됐으면** 그 날짜를,
+        정상이면 `None`을 돌려준다. Mock은 가상 날짜라 보지 않는다.
+
+        종목 하나는 거래정지로 봉이 빠질 수 있으므로 패널 전체의 최신 봉을 본다.
+        """
+        if self.s.USE_MOCK_MODE:
+            return None
+        latest = ""
+        for df in self.panel.values():
+            if df is None or df.empty:
+                continue
+            ts = df["ts"].astype(str)
+            ts = ts[ts < today]
+            if not ts.empty:
+                latest = max(latest, str(ts.iloc[-1]))
+        try:
+            d = dt.datetime.strptime(today, "%Y%m%d").date() - dt.timedelta(days=1)
+        except ValueError:
+            return None
+        for _ in range(15):                      # 연휴를 넘어도 2주면 충분하다
+            if self.calendar.is_trading_day(d):
+                break
+            d -= dt.timedelta(days=1)
+        return latest if latest < d.strftime("%Y%m%d") else None
+
+    def _vol_alive_map(self, today: str) -> Dict[str, float]:
+        """`evaluate_exits(burst_map=...)`에 넘길 값 — 보유 종목만, 진입 당일 제외.
+
+        **진입 당일은 넘기지 않는다**(배수 0 = 판정 안 함). 폭증일이라 측정에서도
+        당연히 생존이고, 넘기면 어제(폭증 전날) 거래대금으로 판정돼 사자마자 판다.
+        """
+        return {sym: self._alive_burst[sym]
+                for sym in self.portfolio.open_positions()
+                if sym in self._alive_burst
+                and self._entry_dates.get(sym, today) < today}
+
+    async def _load_held_bars(self) -> None:
+        """패널에 없는 보유 종목의 일봉을 받는다(판정 전용).
+
+        유니버스는 기동할 때마다 20일 거래대금 순위로 다시 뽑히므로, 보유 중인
+        종목이 순위 밖으로 밀리면 패널에서 빠진다. 그러면 `vol_alive`를 판정할
+        일봉이 없어 30봉 상한까지 조용히 들고 간다.
+        """
+        held = [s_ for s_ in self.portfolio.open_positions() if s_ not in self.panel]
+        frames: Dict[str, pd.DataFrame] = {}
+        for symbol in held:
+            try:
+                df = await self.broker.get_bars(symbol, count=60, period="D")
+                if df is not None and not df.empty:
+                    frames[symbol] = df
+            except Exception as exc:
+                logger.warning(f"[보유] {symbol} 일봉 적재 실패: {exc}")
+        self._held_daily = frames
+
+    async def _roll_daily_reference(self, today: str) -> None:
+        """날짜가 바뀌면 일봉을 새로 받고 전일 기준값을 전부 다시 만든다.
+
+        `run()`은 `startup()`을 한 번만 부르므로 프로세스를 여러 날 켜 두면
+        전일 종가·20봉 중앙값(진입 기준)과 `vol_alive` 입력(청산 기준)이 첫날 것으로
+        고정된다. 실서버에서는 자정 직후(장외)에 돈다 — 유니버스 전체 일봉 적재가
+        모의투자 유량으로 수 분 걸리므로 장중에 돌면 안 된다.
+        """
+        if self.s.USE_MOCK_MODE and getattr(self.broker, "is_mock", False):
+            self._refresh_bars_from_sim()
+        else:
+            logger.info(f"[기준] 날짜 변경 {self._ref_day} → {today} — 일봉 재적재")
+            await self._refresh_bars()
+        await self._load_held_bars()
+        self._prev_daily = {}
+        self._prime_intraday()
+        self._refresh_alive(today)
+        self._ref_day = today
+        if not self.s.USE_MOCK_MODE and self.universe and self.universe[0] in self.panel:
+            df = self.panel[self.universe[0]]
+            last = df[df["ts"].astype(str) < today]
+            if not last.empty:
+                logger.info(f"[기준] 마지막 확정 봉 {last['ts'].iloc[-1]} (기준 종목 {self.universe[0]})")
 
     async def _scan_candidates(self, now: dt.datetime) -> None:
         """아침에 전 후보의 상승률·거래량을 한 번 훑어 **오늘 움직이는** 종목을 구독한다.
@@ -370,8 +507,22 @@ class TradingEngine:
 
         await self._sync_portfolio(initial=True)
         self._restore_state()
+        # 상태 파일이 없거나 모드가 달라도 반드시 돈다(기록 없는 보유 = 오늘 진입).
+        self._reconcile_entry_dates()
         # 장중 감시기에 전일 종가·거래량을 넣는다. 일봉 적재 뒤여야 한다.
         self._prime_intraday()
+        # 다일 보유 청산 입력도 **갓 적재한 패널**에서 같이 만든다(`_refresh_alive`).
+        today = self._now().strftime("%Y%m%d")
+        await self._load_held_bars()
+        self._refresh_alive(today)
+        self._ref_day = today
+        # 장중 전략은 일봉 신호를 **하루에 한 번도 다시 계산하지 않으므로**
+        # (`_current_signals` 참고) 첫 계산을 장 전 기동 시점에 끝낸다. 그대로 두면
+        # 09:00 첫 루프에서 돌아 실데이터 259종목 기준 **18.7초** 루프가 멈춘다 —
+        # 바로 `vol_alive` 시가 매도가 나가야 하는 때다. WebSocket 구독 전에 해야
+        # 관심목록 씨앗(`_refresh_watchlist`)이 첫 구독에 반영된다.
+        if self.s.USE_INTRADAY:
+            self._current_signals(self._now())
 
         if not self.s.USE_MOCK_MODE:
             await self._start_websocket()
@@ -514,6 +665,7 @@ class TradingEngine:
     async def _on_fill_event(self, fill: Fill) -> None:
         pos = self.portfolio.positions.get(fill.symbol)
         entry = pos.avg_price if pos else 0.0
+        was_flat = pos is None or pos.qty <= 0
         realized = self.portfolio.apply_fill(fill, sector=self.s.sector_of(fill.symbol))
         if fill.side is Side.SELL and entry > 0:
             self.risk.on_fill(fill, (fill.price - entry) / entry)
@@ -522,6 +674,14 @@ class TradingEngine:
         # 아직 없으므로 여기서 설정하지 않으면 손절선이 비어버린다(부분체결 포함).
         if fill.side is Side.BUY:
             pos = self.portfolio.positions.get(fill.symbol)
+            # 진입일은 **무포지션에서 처음 체결된 날**이다. 부분체결·추가 체결이 날짜를
+            # 밀면 안 되고, 청산 후 재진입이면 새 날짜로 덮어야 한다(잔고 대조로
+            # 포지션이 사라진 경로에서는 묵은 날짜가 남아 있을 수 있다).
+            # 바로 저장한다 — 5루프 주기 저장 사이에 재시작하면 오늘 산 종목의 날짜가
+            # 없어진다.
+            if pos is not None and pos.qty > 0 and (was_flat or fill.symbol not in self._entry_dates):
+                self._entry_dates[fill.symbol] = self._now().strftime("%Y%m%d")
+                self._save_state()
             if pos is not None and pos.qty > 0:
                 atr = self.atr_map.get(fill.symbol) or pos.avg_price * 0.02
                 new_stop = self.risk.initial_stop(pos.avg_price, atr)
@@ -541,6 +701,8 @@ class TradingEngine:
             pos_after = self.portfolio.positions.get(fill.symbol)
             if pos_after is None or pos_after.qty <= 0:
                 self.intraday.close_watch(fill.symbol)
+                if self._entry_dates.pop(fill.symbol, None) is not None:
+                    self._save_state()
         record = fill.to_dict()
         record["ts"] = fill.ts.isoformat()
         record["realized"] = round(realized, 0)
@@ -555,18 +717,40 @@ class TradingEngine:
 
     # ================================================================== 데이터
     async def _refresh_quotes(self) -> None:
-        """현재가 갱신. 유량 보호를 위해 루프당 일부 종목만 회전 조회한다."""
-        watch = self.watchlist or self.universe
-        if not watch:
-            return
-        # WebSocket이 건강하면 REST 조회를 생략(유량 절약)
-        if self.ws is not None and self.ws.is_healthy():
-            return
+        """현재가 갱신. 유량 보호를 위해 루프당 일부 종목만 회전 조회한다.
+
+        ## 장중 전략에서는 WebSocket이 건강해도 돈다
+
+        폭증 감시 대상은 유니버스 전체(284종목)인데 WebSocket 구독 한도는 40이다.
+        WS만 보면 나머지 244종목의 폭증을 놓치고, 측정 모집단(257종목)과 실거래가
+        갈라진다. 그래서 **WS가 받지 않는 종목을 REST로 돌아가며** 조회한다.
+
+        한 바퀴가 루프당 4종목 x 약 3.5초로 3~4분이다. 측정된 감지 시각 중앙이
+        개장 후 119분이고 판정 입력이 **당일 누적** 거래대금이라 드문드문 봐도
+        값이 정확하다(분당 차분을 쓰는 breakout 모드와 다르다). 유량은 시세 P2라
+        주문(P0)·계좌(P1)를 밀지 않는다.
+
+        **WS가 받지 않는 보유 종목은 매 루프 맨 앞에 넣는다.** WS가 끊긴 경우와,
+        REST 순회로 감지해 산 종목(관심목록 밖이라 구독돼 있지 않다)이 해당한다.
+        284종목 순회에 섞이면 보유 종목 시세가 3분 넘게 멈춰 손절 판단이 늦어진다.
+        """
+        ws_ok = self.ws is not None and self.ws.is_healthy()
+        held: List[str] = []
+        if self.s.USE_INTRADAY:
+            covered = set(self.watchlist) if ws_ok else set()
+            held = [h for h in self.portfolio.open_positions() if h not in covered]
+            watch = [s_ for s_ in self.universe if s_ not in covered and s_ not in held]
+        else:
+            # WebSocket이 건강하면 REST 조회를 생략(유량 절약)
+            if ws_ok:
+                return
+            watch = self.watchlist or self.universe
+        targets: List[str] = list(held)
         n = len(watch)
-        chunk = min(QUOTE_CHUNK, n)
-        for _ in range(chunk):
-            symbol = watch[self._quote_cursor % n]
+        for _ in range(min(max(1, QUOTE_CHUNK - len(held)), n)):
+            targets.append(watch[self._quote_cursor % n])
             self._quote_cursor += 1
+        for symbol in targets:
             try:
                 quote = await self.broker.get_quote(symbol)
                 if quote and quote.price > 0:
@@ -649,6 +833,9 @@ class TradingEngine:
                 remote.sector = self.s.sector_of(symbol)
                 remote.stop_price = self.risk.initial_stop(remote.avg_price, remote.avg_price * 0.02)
                 self.portfolio.positions[symbol] = remote
+                # 진입일이 없으면 `vol_alive`가 영원히 판정하지 않는다. 오늘로 둔다
+                # (`_reconcile_entry_dates`와 같은 규칙 — 최악이 하루 더 보유).
+                self._entry_dates.setdefault(symbol, self._now().strftime("%Y%m%d"))
                 logger.warning(f"[Sync] 미추적 포지션 발견 → 편입: {symbol} {remote.qty}주")
             elif local.qty != remote.qty:
                 logger.warning(f"[Sync] 수량 불일치 {symbol}: 내부 {local.qty} → 브로커 {remote.qty}")
@@ -658,6 +845,7 @@ class TradingEngine:
             if symbol not in positions:
                 logger.warning(f"[Sync] 브로커에 없는 포지션 제거: {symbol}")
                 self.portfolio.positions.pop(symbol, None)
+                self._entry_dates.pop(symbol, None)
         self.portfolio.cash = cash
 
     # ================================================================== 주문
@@ -797,6 +985,14 @@ class TradingEngine:
                 self._stop.set()
                 return
 
+        # --- 날짜 롤오버: 전일 기준값 재생성 ---
+        # **장 상태 체크보다 앞에 둔다.** 실서버에서는 자정 직후(장외)에 날짜가
+        # 바뀌므로, 뒤에 두면 아래 `return`에 막혀 09:00 첫 루프에서야 돌고 그동안
+        # (일봉 재적재 수 분) 시가 청산과 진입 감시가 멈춘다.
+        today = now.strftime("%Y%m%d")
+        if self._ref_day and today != self._ref_day:
+            await self._roll_daily_reference(today)
+
         # --- 장 상태 체크 ---
         if session is not MarketSession.REGULAR:
             if self._loops % 20 == 0:
@@ -889,15 +1085,19 @@ class TradingEngine:
         # 한쪽만 넘기면 두 경로가 갈려 측정이 실거래를 반영하지 못한다.
         turnover_map = {sym: float(px) * float(self.latest_volumes.get(sym, 0.0))
                         for sym, px in prices.items()}
-        # `vol_alive` 입력 — 거래대금 / **전일까지** 20봉 중앙값.
-        # 분모는 `_prime_intraday`가 이미 계산해 둔 값을 재사용한다(세 번째 정의를
-        # 만들면 진입 조건과 청산 조건이 다른 것을 보게 된다).
-        burst_map = {}
-        for sym, tv in turnover_map.items():
-            med = self._prev_daily.get(sym, (0.0, 0.0, 0.0))
-            med20 = med[2] if len(med) > 2 else 0.0
-            if med20 > 0 and tv > 0:
-                burst_map[sym] = tv / med20
+        # (`vol_decay`가 쓰는 이 장중 누적값은 아래 `vol_alive`와 같은 문제 — 아침에
+        #  누적이 0에 가깝다 — 를 갖는다. `vol_decay`는 측정에서 기각돼 꺼져 있다.
+        #  다시 켜려면 먼저 확정 일봉 입력으로 바꿔야 한다.)
+        #
+        # `vol_alive` 입력 — **어제 확정된** 거래대금 / 그 전일까지 20봉 중앙값.
+        #
+        # 예전에는 여기서 장중 누적 거래대금(위 `turnover_map`)을 20봉 중앙값으로
+        # 나눴다. 측정은 "봉 t 종가에 하루치로 판정 → t+1 시가 매도"인데, 장중 누적은
+        # 다음 날 09:00에 거의 0이라 **살아 있는 종목도 매일 아침 팔렸다**(재현:
+        # 하루 x25인 날이 09:00에 x0.25로 읽혔다). 그래서 하루 한 번 확정 일봉으로
+        # 만든 값(`_refresh_alive`)을 쓰고, 첫 루프(09:00)에 판정이 나면 시가에 판다.
+        #
+        burst_map = self._vol_alive_map(today)
         exits = self.risk.evaluate_exits(self.portfolio, prices, self.atr_map,
                                          self.score_map, now,
                                          turnover_map=turnover_map,
@@ -1358,6 +1558,7 @@ class TradingEngine:
                 "universe": self.universe,
                 "loops": self._loops,
                 "peak_equity": self.portfolio.peak_equity,
+                "entry_dates": self._entry_dates,
             }
             self._state_path().write_text(
                 json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
@@ -1371,12 +1572,57 @@ class TradingEngine:
             return
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
+            # **다른 모드의 상태는 복구하지 않는다.** 같은 파일을 Mock과 실서버가
+            # 같이 쓰므로, Mock 실행의 자산 고점·진입일(가상 날짜)이 실계좌로 넘어오면
+            # 첫날부터 낙폭이 잡히고 보유 봉 수가 엉뚱하게 커진다.
+            mode = "MOCK" if self.s.USE_MOCK_MODE else self.s.KIS_ENV
+            if data.get("mode") != mode:
+                logger.info(f"[State] 저장 모드 {data.get('mode')} ≠ 현재 {mode} — 복구하지 않음")
+                return
             peak = float(data.get("peak_equity") or 0)
             if peak > 0:
                 self.portfolio.peak_equity = max(self.portfolio.peak_equity, peak)
             logger.info(f"[State] 이전 상태 복구 (peak_equity={self.portfolio.peak_equity:,.0f})")
+            saved = data.get("entry_dates") or {}
+            self._entry_dates = {str(k): str(v) for k, v in saved.items()}
         except Exception as exc:
             logger.debug(f"[State] 복구 실패: {exc}")
+
+    def _reconcile_entry_dates(self) -> None:
+        """재시작 후 보유 종목의 진입일과 보유 봉 수를 맞춘다.
+
+        - 기록이 없는 보유 종목은 **오늘 진입으로 간주**한다. 어제로 간주하면 오늘
+          산 종목이 폭증 전날의 낮은 거래대금으로 판정돼 곧바로 팔린다. 오늘로
+          두면 최악이 하루 더 보유하는 것이다.
+        - `bars_held`는 잔고 대조로 0부터 시작하므로 진입일로부터 다시 센다.
+          그래야 `MAX_HOLDING_BARS`(안전 상한)가 재시작으로 무력화되지 않는다.
+          연속 실행에서 날짜가 바뀔 때 1씩 오르는 것과 같은 값이다(진입 당일 0).
+        """
+        today = self._now().date()
+        today_s = today.strftime("%Y%m%d")
+        held = self.portfolio.open_positions()
+        self._entry_dates = {k: v for k, v in self._entry_dates.items() if k in held}
+        for symbol, pos in held.items():
+            entered = self._entry_dates.get(symbol)
+            if not entered:
+                self._entry_dates[symbol] = today_s
+                logger.warning(f"[State] {symbol} 진입일 기록 없음 — 오늘 진입으로 간주"
+                               "(vol_alive 판정은 내일부터)")
+                continue
+            if self.s.USE_MOCK_MODE:
+                continue    # Mock 가상 날짜는 거래일 달력과 무관하다
+            try:
+                start = dt.datetime.strptime(entered, "%Y%m%d").date()
+            except ValueError:
+                continue
+            days = 0
+            cur = start + dt.timedelta(days=1)
+            while cur <= today:
+                if self.calendar.is_trading_day(cur):
+                    days += 1
+                cur += dt.timedelta(days=1)
+            pos.bars_held = max(pos.bars_held, days)
+            logger.info(f"[State] {symbol} 진입 {entered} · 보유 {pos.bars_held}봉")
 
     def _progress(self) -> Dict[str, Any]:
         """Mock 시뮬레이션 진행률. 실서버에서는 장 마감까지 남은 시간을 쓴다."""

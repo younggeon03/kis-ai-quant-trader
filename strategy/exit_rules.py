@@ -279,3 +279,42 @@ class DecayExitTracker:
                   "bars_seen": float(st.bars_seen), "armed": float(st.armed)}
             for sym, st in self.states.items()
         }
+
+
+def daily_alive_burst(hist) -> float:
+    """`vol_alive`의 **실거래** 입력 — 마지막 확정 일봉의 거래대금 / 그 전일까지 20봉 중앙값.
+
+    ## 왜 당일 누적이 아닌가
+
+    측정(`intraday_entry_study.py::hold_by_state`)과 백테스트(`backtest/engine.py`)는
+    **봉 t 종가에 하루치 거래대금으로 판정하고 봉 t+1 시가에 판다.** 실거래가 장중
+    누적 거래대금(KIS `acml_vol`)을 그대로 넘기면 다음 날 09:00에 누적이 거의 0이라
+    **살아 있는 종목도 매일 아침 시가에 팔린다** — 하루 전체로 x25인 날이 09:00에
+    x0.25, 09:05에 x1.25로 읽혀 청산됐다(재현 확인). 중앙 6일 보유가 1박이 되고,
+    그것은 측정에서 나빴던 당일 청산 쪽이다. Mock은 `acml_vol`에 일봉 거래량 전체를
+    넣어 이 차이가 스모크에 나타나지 않았다.
+
+    그래서 실거래는 **어제 확정된 하루치**로 하루 한 번 판정하고 아침에 판다.
+    측정의 "t 종가 판정 → t+1 시가 체결"과 같은 시점이다.
+
+    ## 창
+
+    `hist`는 **오늘을 뺀 확정 봉**이다(호출부가 `ts < 오늘`로 자른다). 분자는 그
+    마지막 봉, 분모는 그 앞 20봉의 중앙값(최소 10봉)이다. 백테스트의
+    `rolling(20, min_periods=10).median().shift(1)`을 마지막 봉에서 읽은 값과 같다
+    (셀프테스트 19번이 대조한다).
+
+    계산할 수 없으면 0을 돌려준다 — `vol_alive`는 0을 "모른다"로 읽고 판정하지 않는다.
+    """
+    if hist is None or len(hist) < 11:
+        return 0.0
+    tov = (hist["close"].astype(float) * hist["volume"].astype(float)).to_numpy()
+    window = tov[-21:-1]
+    window = window[np.isfinite(window)]
+    if len(window) < 10:
+        return 0.0
+    med = float(np.median(window))
+    last = float(tov[-1])
+    if not (med > 0 and np.isfinite(last)):
+        return 0.0
+    return last / med

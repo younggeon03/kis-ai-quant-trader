@@ -862,6 +862,40 @@ def test_selection_and_phase():
     r2.set_phase(c2)
     assert r2.update(deep, dt.datetime(2026, 10, 20, 15, 30)) == RiskState.HALT
 
+    # --- 1단계가 끄는 것은 손절뿐이다. 감쇠 청산(vol_alive)은 1단계에도 돈다 ---
+    #
+    # 예전에는 1단계 분기가 감쇠까지 건너뛰어 1주차가 "사서 30봉 상한까지 보유"가
+    # 됐다. 백테스트에는 대회 날짜가 없어 어떤 측정에도 나타나지 않았다.
+    saved ={k: getattr(s, k) for k in ("EXIT_RULES", "EXIT_VOL_ALIVE_MULT",
+                                        "EXIT_VOL_ALIVE_MIN_BARS", "STOP_LOSS_PCT",
+                                        "MAX_HOLDING_BARS", "PHASE1_DISABLE_RISK")}
+    try:
+        s.EXIT_RULES, s.EXIT_VOL_ALIVE_MULT, s.EXIT_VOL_ALIVE_MIN_BARS = "vol_alive", 2.0, 1
+        s.STOP_LOSS_PCT, s.MAX_HOLDING_BARS, s.PHASE1_DISABLE_RISK = 0.25, 30, True
+        c1 = phase_config(settings=s, now=dt.date(2026, 10, 13))
+
+        def exits_for(cfg, price: float, burst: float):
+            rm = RiskManager(s)
+            rm.set_phase(cfg)
+            pf_ = Portfolio(cash=55_000_000.0, initial_capital=100_000_000.0)
+            pf_.positions["AAA"] = Position(symbol="AAA", qty=4_500, avg_price=10_000,
+                                            last_price=10_000, bars_held=2)
+            return rm.evaluate_exits(pf_, {"AAA": price}, burst_map={"AAA": burst},
+                                     now=dt.datetime(2026, 10, 13, 9, 0))
+
+        for cfg, label in ((c1, "1단계"), (c2, "2단계")):
+            ex = exits_for(cfg, 10_000.0, 1.0)          # 거래 소멸(x1 < x2)
+            assert ex and ex[0].reason == ExitReason.VOL_DECAY, \
+                f"{label}에서 vol_alive 청산이 안 났다 — 1주차가 매수 후 보유가 된다: {ex}"
+            assert not exits_for(cfg, 10_000.0, 5.0), f"{label}: 살아 있는데(x5) 청산했다"
+        # 손절은 1단계에서만 꺼진다(−30%, 거래는 살아 있음)
+        assert not exits_for(c1, 7_000.0, 5.0), "1단계인데 손절이 걸렸다(초기화가 하방을 덮는다)"
+        ex = exits_for(c2, 7_000.0, 5.0)
+        assert ex and ex[0].reason == ExitReason.STOP_LOSS, f"2단계 손절 미작동: {ex}"
+    finally:
+        for k, v in saved.items():
+            setattr(s, k, v)
+
     # 초기화는 마지막 날에만 권고하고, 이익이면 권고하지 않는다
     loss = Portfolio(cash=90_000_000.0, initial_capital=100_000_000.0)
     gain = Portfolio(cash=108_000_000.0, initial_capital=100_000_000.0)
@@ -869,7 +903,8 @@ def test_selection_and_phase():
     assert reset_recommendation(loss, dt.date(2026, 10, 16), s).should_reset
     assert not reset_recommendation(gain, dt.date(2026, 10, 16), s).should_reset
     assert not reset_recommendation(loss, dt.date(2026, 10, 19), s).should_reset
-    return "레짐 단일 적용 · 잠금/교체 · 국면 6일자 · 초기화 권고 모두 작동"
+    return ("레짐 단일 적용 · 잠금/교체 · 국면 6일자 · 1단계 손절만 해제(vol_alive 유지) · "
+            "초기화 권고 모두 작동")
 
 
 # ============================================================ 16. 패널 정렬
@@ -1178,6 +1213,27 @@ def test_decay_exits():
     t3.open("C", 10_000.0)
     assert t3.check("C", 10_000.0, turnover=1e9, burst=0.1) is None, "배수 0인데 발동"
 
+    # --- 5-2) 실거래 입력이 백테스트와 같은 창이다 ---
+    #
+    # 실거래는 `daily_alive_burst(확정 봉)`, 백테스트는
+    # `rolling(20, min_periods=10).median().shift(1)`이다. 창이 한 칸만 어긋나도
+    # 측정한 규칙과 다른 것을 실거래로 들고 간다(수집기에서 `.shift(1)`을 빼먹어
+    # 커버리지가 83.1%였던 전례가 있다). 모든 길이에서 대조한다.
+    from strategy.exit_rules import daily_alive_burst
+    rng = np.random.default_rng(16)
+    n = 60
+    frame = pd.DataFrame({
+        "ts": [f"2026{(i // 28) + 1:02d}{(i % 28) + 1:02d}" for i in range(n)],
+        "close": rng.uniform(900, 1_100, n),
+        "volume": rng.lognormal(10, 1.0, n),
+    })
+    tov = (frame["close"] * frame["volume"]).to_numpy()
+    med = pd.Series(tov).rolling(20, min_periods=10).median().shift(1).to_numpy()
+    for k in range(1, n + 1):
+        want = tov[k - 1] / med[k - 1] if np.isfinite(med[k - 1]) else 0.0
+        got = daily_alive_burst(frame.iloc[:k])
+        assert abs(got - want) < 1e-9, f"창 불일치 (확정 봉 {k}개): 실거래 {got} vs 백테스트 {want}"
+
     # --- 6) 재진입 시 묵은 고점이 지워진다 ---
     s.EXIT_RULES = RULE_VOL_DECAY
     s.EXIT_VOL_DECAY_RATIO = 0.30
@@ -1190,8 +1246,8 @@ def test_decay_exits():
     assert t.check("A", 9_000.0, turnover=50e6) is None, "재진입 첫 봉에 걸렸다"
     assert t.check("A", 9_100.0, turnover=50e6) is None,         "묵은 거래대금 고점이 남아 재진입 직후 청산됐다"
     return ("거래량 감소 · 상승 감쇠(손절선 전달) · 급락 · vol_alive(20봉중앙 분모 · "
-            "배수 0 보호) · EXIT_RULES 순서 반영 · 임계값 0 비활성 · "
-            "재진입 상태 초기화 모두 작동")
+            "배수 0 보호 · 실거래 창 = 백테스트 창) · EXIT_RULES 순서 반영 · "
+            "임계값 0 비활성 · 재진입 상태 초기화 모두 작동")
 
 
 @check("20. 호가·체결 전방 수집")
@@ -1254,8 +1310,8 @@ def test_orderbook_recorder():
             "쓰기 실패 격리(예외 미전파) 모두 작동")
 
 
-@check("21. 장중 burst 배관 (main.py)")
-def test_burst_wiring():
+@check("21. 장중 burst · 보유 청산 배관 (main.py)")
+async def test_burst_wiring():
     """`_prime_intraday` → `turnover_med20` → `_feed_intraday` → 대기열.
 
     **Mock으로는 이 경로를 검증할 수 없다.** Mock 합성 데이터의 거래대금 10배
@@ -1313,8 +1369,178 @@ def test_burst_wiring():
     s.USE_INTRADAY = False
     eng._feed_intraday("AAA", 1000.0, 999_999.0, now + dt.timedelta(days=1))
     assert not eng._intraday_queue, "USE_INTRADAY=False 인데 흘렀다"
-    return ("20봉 거래대금 중앙값 전달 · 임계 미달/초과 판정 · "
-            "USE_INTRADAY 분기 모두 작동 (Mock 데이터는 폭증이 0.07%뿐이라 검증 불가)")
+
+    msg = await _check_live_vol_alive(s)
+    return ("20봉 거래대금 중앙값 전달 · 임계 미달/초과 판정 · USE_INTRADAY 분기 · "
+            + msg + " 모두 작동 (Mock 데이터는 폭증이 0.07%뿐이라 burst 발생은 검증 불가)")
+
+
+async def _check_live_vol_alive(s) -> str:
+    """실거래 `vol_alive` 배관 — **확정 일봉으로 하루 한 번**, 진입 당일 제외.
+
+    예전에는 장중 누적 거래대금(KIS `acml_vol`)을 20봉 중앙값으로 나눠 매 루프
+    판정했다. 다음 날 09:00에 누적이 거의 0이라 하루 전체로 x25인 날도 x0.25로
+    읽혀 **매일 아침 시가에 팔렸다.** Mock은 `acml_vol`에 일봉 거래량 전체를 넣어
+    스모크로는 드러나지 않았다. 측정은 "봉 t 종가 판정 → t+1 시가 매도"다.
+    """
+    import datetime as dt
+    import json
+    import tempfile
+    import types
+
+    from main import TradingEngine
+
+    keys = ("USE_INTRADAY", "INTRADAY_ENTRY_MODE", "USE_MOCK_MODE", "STATE_DIR",
+            "EXIT_RULES", "EXIT_VOL_ALIVE_MULT", "EXIT_VOL_ALIVE_MIN_BARS",
+            "MAX_HOLDING_BARS")
+    saved = {k: getattr(s, k) for k in keys}
+    try:
+        s.USE_INTRADAY, s.INTRADAY_ENTRY_MODE = True, "burst"
+        s.EXIT_RULES, s.EXIT_VOL_ALIVE_MULT, s.EXIT_VOL_ALIVE_MIN_BARS = "vol_alive", 2.0, 1
+        s.MAX_HOLDING_BARS = 30
+
+        def frame(days, vols, closes=None):
+            closes = closes or [1000.0] * len(days)
+            return pd.DataFrame({"ts": days, "open": closes, "high": closes,
+                                 "low": closes, "close": closes, "volume": vols})
+
+        days = [f"202609{i:02d}" for i in range(1, 26)]          # 9/01 ~ 9/25 확정
+        today = "20260926"
+        flat = [10_000.0] * 24                                     # 거래대금 1,000만
+        # AAA: 어제(9/25) x25 · 오늘 미완성 봉(09:00, 거래 거의 없음)이 붙어 있다
+        aaa = frame(days + [today], flat + [250_000.0, 100.0])
+        bbb = frame(days, flat + [5_000.0])                        # 어제 x0.5 → 소멸
+        ccc = frame(days, flat + [5_000.0])                        # 오늘 진입
+        eng = TradingEngine(s, enable_dashboard=False)
+        eng.panel = {"AAA": aaa, "BBB": bbb, "CCC": ccc}
+        for sym, held in (("AAA", 1), ("BBB", 1), ("CCC", 0)):
+            eng.portfolio.positions[sym] = Position(symbol=sym, qty=100, avg_price=1000.0,
+                                                    last_price=1000.0, bars_held=held)
+        eng._entry_dates = {"AAA": "20260924", "BBB": "20260924", "CCC": today}
+        eng._refresh_alive(today)
+        m = eng._vol_alive_map(today)
+        assert abs(m.get("AAA", 0.0) - 25.0) < 1e-9, \
+            f"어제 확정 거래대금을 안 썼다(오늘 미완성 봉이 섞였나): {m.get('AAA')}"
+        assert abs(m.get("BBB", 0.0) - 0.5) < 1e-9, f"BBB 배수 오류: {m.get('BBB')}"
+        assert "CCC" not in m, "진입 당일 종목을 판정했다 — 폭증 전날 거래대금으로 사자마자 판다"
+
+        # 장중 누적이 아무리 작아도(09:00) 판정 입력은 그대로다
+        eng.latest_volumes = {"AAA": 1.0, "BBB": 1.0, "CCC": 1.0}
+        assert eng._vol_alive_map(today) == m, "판정 입력에 장중 누적이 섞였다"
+        prices = {"AAA": 1000.0, "BBB": 1000.0, "CCC": 1000.0}
+        exits = eng.risk.evaluate_exits(eng.portfolio, prices, burst_map=m,
+                                        now=dt.datetime(2026, 9, 26, 9, 0))
+        assert {e.symbol for e in exits} == {"BBB"}, \
+            f"살아 있는 종목까지 팔았거나 죽은 종목을 놓쳤다: {[e.symbol for e in exits]}"
+
+        # --- 날짜 롤오버: 여러 날 켜 두면 기준값이 새로 만들어져야 한다 ---
+        # 9/26이 확정되면서 거래가 죽었다(x0.5). 전일 종가도 1,234원으로 바뀐다.
+        aaa2 = frame(days + [today], flat + [250_000.0, 5_000.0],
+                     closes=[1000.0] * 25 + [1234.0])
+        eng.s.USE_MOCK_MODE = True
+        eng.broker = types.SimpleNamespace(is_mock=True)
+        eng._refresh_bars_from_sim = lambda: eng.panel.update({"AAA": aaa2})
+        eng._now = lambda: dt.datetime(2026, 9, 29, 0, 1)        # 월요일 자정 직후
+        eng._ref_day = today
+        await eng._roll_daily_reference("20260929")
+        assert eng._ref_day == "20260929", "롤오버가 기준일을 갱신하지 않았다"
+        want = 1234.0 * 5_000.0 / 10_000_000.0                     # 9/26 거래대금 ÷ 20봉 중앙
+        assert abs(eng._vol_alive_map("20260929").get("AAA", 0.0) - want) < 1e-9, \
+            "롤오버 후에도 어제 판정값이 남았다 — 여러 날 켜 두면 기준이 고정된다"
+        assert eng.intraday.states["AAA"].prev_close == 1234.0, \
+            "롤오버가 전일 종가를 갱신하지 않았다(진입 기준이 첫날에 고정)"
+        assert "CCC" in eng._vol_alive_map("20260929"), "다음 날에도 진입 당일로 취급했다"
+
+        # --- 재시작: 진입일로 보유 봉 수 복원 · 기록 없는 보유는 오늘 진입 ---
+        s.USE_MOCK_MODE = False
+        eng3 = TradingEngine(s, enable_dashboard=False)
+        eng3._now = lambda: dt.datetime(2026, 10, 14, 9, 0)        # 수요일
+        for sym in ("AAA", "BBB"):
+            eng3.portfolio.positions[sym] = Position(symbol=sym, qty=10, avg_price=1000.0,
+                                                     last_price=1000.0)
+        eng3._entry_dates = {"AAA": "20261012", "ZZZ": "20261001"}  # 월요일 진입 · 청산된 종목
+        eng3._reconcile_entry_dates()
+        assert eng3.portfolio.positions["AAA"].bars_held == 2, \
+            f"보유 봉 수 복원 오류: {eng3.portfolio.positions['AAA'].bars_held} (기대 2: 화·수)"
+        assert eng3._entry_dates.get("BBB") == "20261014", "기록 없는 보유를 오늘 진입으로 두지 않았다"
+        assert "ZZZ" not in eng3._entry_dates, "보유하지 않는 종목의 진입일이 남았다"
+
+        # --- 일봉 재적재가 실패해 패널이 묵었으면 그날 판정을 보류한다 ---
+        # 묵은 패널로 판정하면 어제 진입한 종목이 폭증 **전날** 거래대금으로 읽혀
+        # 잘못 팔린다. 10/13(화)의 직전 거래일은 10/12(월)다.
+        old_days = [f"202609{i:02d}" for i in range(1, 26)] + ["20261008"]
+        eng3.panel = {"AAA": frame(old_days, flat + [250_000.0, 5_000.0])}
+        eng3._entry_dates = {"AAA": "20261008", "BBB": "20261008"}
+        eng3._refresh_alive("20261013")
+        assert not eng3._vol_alive_map("20261013"), \
+            "마지막 확정 봉(10/08)이 직전 거래일(10/12)이 아닌데 판정했다"
+        eng3._refresh_alive("20261012")          # 10/09 한글날 → 직전 거래일 10/08
+        assert eng3._vol_alive_map("20261012"), \
+            "연휴 다음 날 정상 패널을 묵었다고 판정했다(휴장일 달력 확인)"
+
+        # --- 다른 모드(Mock)의 상태 파일은 실서버에 복구하지 않는다 ---
+        with tempfile.TemporaryDirectory() as tmp:
+            s.STATE_DIR = tmp
+            Path(tmp, "engine_state.json").write_text(json.dumps(
+                {"mode": "MOCK", "peak_equity": 2e8, "entry_dates": {"AAA": "20250101"}}),
+                encoding="utf-8")
+            eng4 = TradingEngine(s, enable_dashboard=False)
+            eng4._restore_state()
+            assert eng4.portfolio.peak_equity < 2e8, "Mock 자산 고점이 실서버로 넘어왔다"
+            assert not eng4._entry_dates, "Mock 진입일(가상 날짜)이 실서버로 넘어왔다"
+
+        # --- 폭증 감시는 유니버스 전체다: WS가 받지 않는 종목을 REST로 돈다 ---
+        #
+        # WS 구독 한도가 40이라 WS만 보면 284 중 244종목의 폭증을 놓친다. 예전에는
+        # WS가 건강하면 REST 조회를 아예 건너뛰었다.
+        class _Broker:
+            def __init__(self):
+                self.calls = []
+
+            async def get_quote(self, symbol):
+                self.calls.append(symbol)
+                return types.SimpleNamespace(price=1000.0, volume=1.0)
+
+        s.USE_MOCK_MODE = False
+        eng5 = TradingEngine(s, enable_dashboard=False)
+        eng5._now = lambda: dt.datetime(2026, 10, 14, 10, 0)
+        eng5.broker = _Broker()
+        eng5.universe = [f"U{i:02d}" for i in range(12)]
+        eng5.watchlist = ["U00", "U01", "U02", "U03"]                # WS 구독 중
+        eng5.ws = types.SimpleNamespace(is_healthy=lambda: True)
+        for _ in range(4):
+            await eng5._refresh_quotes()
+        seen = set(eng5.broker.calls)
+        assert seen and not (seen & set(eng5.watchlist)), \
+            f"WS가 받는 종목을 REST로 중복 조회했다: {sorted(seen & set(eng5.watchlist))}"
+        assert seen == set(eng5.universe) - set(eng5.watchlist), \
+            f"WS 밖 종목을 다 돌지 못했다: {sorted(set(eng5.universe) - seen)}"
+        # WS가 받지 않는 보유 종목은 매 루프 맨 앞에서 본다(손절 판단이 밀리지 않게).
+        # REST 순회로 감지해 산 종목은 관심목록 밖이라 WS가 건강해도 여기에 해당한다.
+        eng5.portfolio.positions["U07"] = Position(symbol="U07", qty=10, avg_price=1000.0,
+                                                   last_price=1000.0)
+        for healthy in (True, False):
+            eng5.ws = types.SimpleNamespace(is_healthy=lambda h=healthy: h)
+            for _ in range(3):
+                eng5.broker.calls = []
+                await eng5._refresh_quotes()
+                assert eng5.broker.calls[0] == "U07", \
+                    f"WS 밖 보유 종목이 맨 앞이 아니다(WS {healthy}): {eng5.broker.calls}"
+                assert eng5.broker.calls.count("U07") == 1, "보유 종목을 한 루프에 두 번 조회했다"
+        # WS가 받는 보유 종목은 REST로 중복 조회하지 않는다
+        eng5.ws = types.SimpleNamespace(is_healthy=lambda: True)
+        eng5.portfolio.positions.pop("U07")
+        eng5.portfolio.positions["U01"] = Position(symbol="U01", qty=10, avg_price=1000.0,
+                                                   last_price=1000.0)
+        eng5.broker.calls = []
+        await eng5._refresh_quotes()
+        assert "U01" not in eng5.broker.calls, "WS가 받는 보유 종목을 REST로 중복 조회했다"
+    finally:
+        for k, v in saved.items():
+            setattr(s, k, v)
+    return ("vol_alive 확정 일봉 판정(오늘 미완성 봉·장중 누적 배제 · 진입 당일 제외) · "
+            "날짜 롤오버 · 재적재 실패 시 보류 · 재시작 복원 · 모드 격리 · "
+            "WS 밖 종목 REST 순회")
 
 
 # ============================================================ 실행
