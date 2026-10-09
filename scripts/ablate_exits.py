@@ -333,25 +333,36 @@ _CAT = {
     # 거래량 감소·상승 감쇠·급격한 하락이 모두 꼬리를 깎았고, 거래량 감소는
     # 발동률 80.9%로 P(+100%)를 2.09% → 1.01%로 반토막냈다.
     # 느슨하게 하면 "거의 안 걸리는 상태"로 수렴하고 조이면 단조적으로 나빠진다.
-    "EXIT_RULES": "", "TRAILING_ACTIVATE_PCT": 0.0, "CRASH_DROP_PCT": 0.30,
+    "TRAILING_ACTIVATE_PCT": 0.0, "CRASH_DROP_PCT": 0.30,
     "EXIT_VOL_DECAY_RATIO": 0.0,
+    # **보유를 기간이 아니라 상태가 정한다.** `vol_alive` 만 켠다 —
+    # 거래대금이 20봉 중앙값의 2배 아래면 청산. 사건 단위 측정(3,932건, 라운드
+    # 5회 고정)에서 고정 6봉 2.21% → 4.06%였고, 중앙 보유일수는 같은 6일이다
+    # (죽은 종목은 일찍, 살아 있는 종목은 오래). `MAX_HOLDING_BARS` 는 주 청산이
+    # 아니라 **안전 상한**이므로 30으로 둔다 — 6봉이면 상태 기반이 무력화된다.
+    "EXIT_RULES": "vol_alive", "EXIT_VOL_ALIVE_MULT": 2.0,
+    "EXIT_VOL_ALIVE_MIN_BARS": 1,
 }
 
 CATALYST_CONFIGS: List[Dict[str, Any]] = [
     {"name": "기준선(.env 그대로)", "delta": {}},
-    # **확정 구조.** 손절 25%는 꼬리를 0.02%p만 깎고(2.09→2.07) 단일 종목 붕괴를
-    # 막는 보험이다. 2종목 x 45%에서 한 종목 반토막이 계좌 −22.5%다.
-    {"name": "확정 2x45% 6봉 손절25",
-     "delta": {**_CAT, "MAX_HOLDING_BARS": 6, "STOP_LOSS_PCT": 0.25}},
-    # 손절 유무 — 부트스트랩에는 손절이 없었다. 보험 비용을 실엔진에서 확인한다.
-    {"name": "손절없음 (상한 확인)",
-     "delta": {**_CAT, "MAX_HOLDING_BARS": 6, "STOP_LOSS_PCT": _NO_STOP}},
-    # 기각된 값 — 사건 단위에서 2.09 → 1.89%였다. 실엔진에서도 나쁜지 본다.
-    {"name": "손절12 (기각값 재확인)",
-     "delta": {**_CAT, "MAX_HOLDING_BARS": 6, "STOP_LOSS_PCT": 0.12}},
-    # 보유 길이만 바꾼 단일 변수 비교(사건 단위에서 6봉 2.09% vs 10봉 2.19%, 노이즈).
-    {"name": "확정 + 보유 10봉",
-     "delta": {**_CAT, "MAX_HOLDING_BARS": 10, "STOP_LOSS_PCT": 0.25}},
+    # **확정 구조.** 상태 기반 보유(vol_alive x2) + 손절 25% + 상한 30봉.
+    {"name": "확정 vol_alive x2 손절25",
+     "delta": {**_CAT, "MAX_HOLDING_BARS": 30, "STOP_LOSS_PCT": 0.25}},
+    # 상태 기반 vs 고정 기간 — **이것이 핵심 비교다.** 사건 단위에서 2.21% → 4.06%
+    # 였고(라운드 5회 고정) 실엔진에서도 그 방향인지 본다.
+    {"name": "고정 6봉 (상태 기반 미사용)",
+     "delta": {**_CAT, "EXIT_RULES": "", "EXIT_VOL_ALIVE_MULT": 0.0,
+               "MAX_HOLDING_BARS": 6, "STOP_LOSS_PCT": 0.25}},
+    # 손절 유무 — 실엔진에서는 손절 25%가 누적 −44%p였고 꼬리 편익이 없었다.
+    # 사건 단위(−0.02%p)와 갈린 유일한 항목이므로 확정 구조에서 재확인한다.
+    {"name": "확정 + 손절없음",
+     "delta": {**_CAT, "MAX_HOLDING_BARS": 30, "STOP_LOSS_PCT": _NO_STOP}},
+    # 생존 기준만 바꾼 단일 변수 비교. 사건 단위에서는 x3가 더 높아 보였지만
+    # 단일 2배 비율은 **떨어졌고**(0.86% → 0.79%) 상승분은 라운드 환산 artifact였다.
+    {"name": "확정 + 생존기준 x3",
+     "delta": {**_CAT, "MAX_HOLDING_BARS": 30, "STOP_LOSS_PCT": 0.25,
+               "EXIT_VOL_ALIVE_MULT": 3.0}},
 ]
 
 CONFIG_SETS: Dict[str, List[Dict[str, Any]]] = {
