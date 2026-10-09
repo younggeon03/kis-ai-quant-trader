@@ -414,7 +414,7 @@ class Settings(BaseSettings):
     # 채울 수 있고, 교체가 꺼진 상태에서는 기존 동작과 같다.
 
     INTRADAY_SCAN_HHMM: str = Field(
-        default="0905", description="아침 후보 스캔 시각(HHMM). 이 시각 이후 첫 루프에 1회")
+        default="0903", description="아침 후보 스캔 시각(HHMM). 이 시각 이후 첫 루프에 1회")
     INTRADAY_SCAN_TOP: int = Field(
         default=40, description="스캔 결과 상위 몇 종목을 구독할지(WS 한도 이하)")
 
