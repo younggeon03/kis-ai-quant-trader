@@ -1742,6 +1742,45 @@ async def test_opening_entry():
             "보유 기록·중복 기록 없음·10일 미만 미발동) 모두 작동")
 
 
+@check("23. 장중 슬라이딩 윈도우 판정")
+def test_sliding():
+    """최근 W분 거래대금이 기준선의 k배가 되는 첫 분 — 측정과 같은 순수 함수.
+
+    창이 한 칸 어긋나면(분 m에서 m의 거래가 들어가는지) 측정이 미래를 보게 되거나 실거래가
+    다른 규칙을 들고 간다. 경계와 기준선을 pandas 계산과 대조한다.
+    """
+    import scripts.sliding_study as study
+    from strategy import sliding as sl
+
+    tv = np.arange(1.0, 11.0)                                     # 분당 1,2,...,10
+    rs = sl.rolling_sum(tv, 3)
+    assert np.isnan(rs[0]) and np.isnan(rs[1]), "창이 차기 전에 값을 냈다"
+    assert rs[2] == 6.0 and rs[9] == 27.0, f"창 경계 오류: {rs}"     # 1+2+3 · 8+9+10
+    mt = sl.minute_turnover(np.array([0, 0, 2, 999]), np.array([10.0, 10.0, 5.0, 1.0]),
+                            np.array([1.0, 2.0, 4.0, 1.0]), 5)
+    assert list(mt) == [30.0, 0.0, 20.0, 0.0, 0.0], f"분 집계 오류(범위 밖 제외): {list(mt)}"
+
+    # 같은 시각 기준선 = 시각마다 pandas rolling(20, min_periods=10) 중앙(오늘 제외)
+    rng = np.random.default_rng(23)
+    H = rng.lognormal(10, 1.0, (30, 4))
+    H[3, 1] = np.nan
+    want = pd.DataFrame(H).rolling(20, min_periods=10).median().shift(1).to_numpy()
+    for j in range(30):
+        got = sl.same_time_base(H[:j]) if j else np.full(4, np.nan)
+        for col in range(4):
+            a, b = got[col], want[j, col]
+            assert (np.isnan(a) and np.isnan(b)) or abs(a - b) < 1e-9 * max(1.0, b),                 f"같은 시각 기준선이 pandas 와 다르다(과거 {j}일, 열 {col}): {a} vs {b}"
+
+    base = np.array([10.0, 10.0, 10.0, 10.0])
+    assert sl.first_trigger(np.array([np.nan, 20.0, 60.0, 90.0]), base, 5.0) == (2, 6.0)
+    assert sl.first_trigger(np.array([1.0, 2.0, 3.0, 4.0]), 1.0, 5.0) is None
+    assert sl.first_trigger(np.array([1.0, 2.0, 3.0, 99.0]), 1.0, 5.0, last_min=2) is None,         "진입 마감(15:19) 이후 발동을 냈다"
+
+    for name in ("rolling_sum", "minute_turnover", "same_time_base", "first_trigger"):
+        assert getattr(study, name) is getattr(sl, name), f"측정 스크립트가 {name}을 따로 구현했다"
+    return "창 경계 · 분 집계 · 같은 시각 기준선(pandas 대조) · 첫 발동·마감 · 측정과 같은 함수 모두 작동"
+
+
 # ============================================================ 실행
 
 async def run_all() -> int:
@@ -1754,6 +1793,7 @@ async def run_all() -> int:
         test_competition_rules, test_selection_and_phase, test_panel_min_bars,
         test_intraday, test_intraday_book, test_decay_exits,
         test_orderbook_recorder, test_burst_wiring, test_opening_entry,
+        test_sliding,
     ]
     print("\n" + "=" * 86)
     print(" KIS AI Quant Trader — 셀프 테스트")
