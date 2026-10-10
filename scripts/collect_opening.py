@@ -44,7 +44,7 @@ from api.toss_data import TossDataClient, _rows_of  # noqa: E402
 from backtest.data import load_panel_from_dir  # noqa: E402
 from config.settings import get_settings  # noqa: E402
 from scripts.collect_minute import (BARS_PER_CALL, COLUMNS, MINUTE_DIR,  # noqa: E402
-                                    _iso, _parse_rows)
+                                    _iso, _parse_rows, fetch_day)
 from utils.krx_calendar import KRXCalendar  # noqa: E402
 from utils.logger import enable_utf8_console, logger, setup_logging  # noqa: E402
 
@@ -93,7 +93,8 @@ async def run(args) -> int:
         logger.error(f"[Opening] {args.source} 에 일봉이 없습니다")
         return 1
     base = Path(args.source)
-    out_dir = base / OPENING_DIR
+    out_dir = base / args.dir
+    whole_day = args.until >= "1530"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # 대상 = 일봉이 있는 모든 거래일(since 이후). 일봉 날짜가 곧 거래일 달력이다.
@@ -143,7 +144,10 @@ async def run(args) -> int:
                             reused += 1
                             continue
                     try:
-                        got = await fetch_opening(cli, sym, day, args.until)
+                        # 하루 전체(--until 1530)는 15:31에서 뒤로 2~3회 페이징한다
+                        # (collect_minute.fetch_day 그대로). 장 시작 구간은 1회.
+                        got = (await fetch_day(cli, sym, day) if whole_day
+                               else await fetch_opening(cli, sym, day, args.until))
                     except Exception as exc:
                         failed += 1
                         logger.warning(f"[Opening] {sym} {day} 실패: "
@@ -182,7 +186,11 @@ def main() -> int:
     ap.add_argument("--source", default="data/cache")
     ap.add_argument("--symbols", type=int, default=0, help="앞 N종목만(0=전체)")
     ap.add_argument("--since", default="20250102")
-    ap.add_argument("--until", default="0930", help="받을 구간 끝(HHMM, 포함)")
+    ap.add_argument("--until", default="0930",
+                    help="받을 구간 끝(HHMM, 포함). 1530이면 하루 전체(종목-일당 2~3호출)")
+    ap.add_argument("--dir", default=OPENING_DIR,
+                    help="저장 폴더(source 아래). 하루 전체는 fullday — minute/(급등일 모음)와 "
+                         "섞지 않는다: 다른 측정 스크립트가 그 폴더를 '급등일 집단'으로 쓴다")
     ap.add_argument("--probe", action="store_true")
     args = ap.parse_args()
     return asyncio.run(run(args))

@@ -111,7 +111,8 @@ def check(settings, live: bool) -> List[Tuple[str, str, str, str]]:
     intra_cond = (f"거래대금 x{s.INTRADAY_BURST_MULT:g}(장중 누적)"
                   if s.INTRADAY_ENTRY_MODE == "burst"
                   else (f"장 시작 {s.OPENING_WINDOW_MIN}분 거래대금 x{s.OPENING_MULT:g}"
-                        f"(평소 N분 몫) · 진입 +{s.OPENING_LAG_MIN}분")
+                        f"({'지난 20일 같은 구간' if s.OPENING_BASELINE == 'same_window' else '평소 N분 몫'})"
+                        f" · 진입 +{s.OPENING_LAG_MIN}분")
                   if s.INTRADAY_ENTRY_MODE == "opening"
                   else f"트리거 +{s.INTRADAY_TRIGGER_PCT:.0%} · 거래량 x{s.INTRADAY_VOL_MULT}")
     add(WARN, "장중 전략", s.USE_INTRADAY,
