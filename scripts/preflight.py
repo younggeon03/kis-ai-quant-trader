@@ -30,6 +30,8 @@ import sys
 from pathlib import Path
 from typing import List, Tuple
 
+import pandas as pd
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config.settings import get_settings  # noqa: E402
@@ -257,17 +259,57 @@ def check(settings, live: bool) -> List[Tuple[str, str, str, str]]:
         # 사건 4,082건. 배수 스윕에서 10/20/30배는 **통계적으로 구분되지 않았고**
         # (z≈1.2) 10배가 커버리지·표본이 가장 크다. 보유는 6~10봉이 평평하다
         # (3봉 1.58% · 6봉 2.09% · 10봉 2.19% · 15봉 1.70%).
-        add(FATAL, "장중 진입 모드", s.INTRADAY_ENTRY_MODE == "burst",
+        add(FATAL, "장중 진입 모드", s.INTRADAY_ENTRY_MODE in ("burst", "opening"),
             f"{s.INTRADAY_ENTRY_MODE}",
-            "breakout(가격 +3% 돌파)은 P(+100%) 0.00%로 측정됐다. opening(장 시작 구간)은 "
-            "구현만 됐고 **측정 전**이다(scripts/opening_study.py) — 측정 후 이 점검을 고친다")
-        add(WARN, "장중 폭증 배수", abs(s.INTRADAY_BURST_MULT - 10.0) < 1e-9,
-            f"x{s.INTRADAY_BURST_MULT:g}",
-            "10/20/30배는 구분되지 않는다 — 10배가 커버리지 94.8%로 가장 신뢰할 만하다")
-        add(WARN, "일봉 폭증 배수 일치", abs(s.INTRADAY_BURST_MULT
-                                      - s.CATALYST_BURST_MULT) < 1e-9,
-            f"장중 x{s.INTRADAY_BURST_MULT:g} / 일봉 x{s.CATALYST_BURST_MULT:g}",
-            "두 경로가 다른 집단을 보면 측정과 실거래가 갈린다")
+            "breakout(가격 +3% 돌파)은 P(+100%) 0.00%로 측정됐다")
+        if s.INTRADAY_ENTRY_MODE == "burst":
+            add(WARN, "장중 폭증 배수", abs(s.INTRADAY_BURST_MULT - 10.0) < 1e-9,
+                f"x{s.INTRADAY_BURST_MULT:g}",
+                "10/20/30배는 구분되지 않는다 — 10배가 커버리지 94.8%로 가장 신뢰할 만하다")
+            add(WARN, "일봉 폭증 배수 일치", abs(s.INTRADAY_BURST_MULT
+                                          - s.CATALYST_BURST_MULT) < 1e-9,
+                f"장중 x{s.INTRADAY_BURST_MULT:g} / 일봉 x{s.CATALYST_BURST_MULT:g}",
+                "두 경로가 다른 집단을 보면 측정과 실거래가 갈린다")
+        if s.INTRADAY_ENTRY_MODE == "opening":
+            # --- 장 시작 구간 진입 (2026-10-10 채택, 사용자 결정) ---
+            #
+            # 측정(scripts/opening_study.py, 2025-01~): 현재 누적 10배 P(+100%) 6.60%,
+            # day_avg 4.3~7.4%(낫지 않음), same_window 3~15분 8.4~9.9%(약한 증거).
+            add(FATAL, "opening 기준선", s.OPENING_BASELINE == "same_window",
+                f"{s.OPENING_BASELINE}",
+                "day_avg(하루 평균 N분 몫)는 현재 규칙보다 낫지 않았다 — 장 초반 거래 집중 때문에 "
+                "'원래 아침 거래가 많은 종목'이 1등이 된다")
+            add(WARN, "opening 구간", 3 <= s.OPENING_WINDOW_MIN <= 15,
+                f"{s.OPENING_WINDOW_MIN}분 · 배수 x{s.OPENING_MULT:g} · 진입 +{s.OPENING_LAG_MIN}분",
+                "same_window 가 일관되게 앞선 범위는 3~15분이다(20분은 6.85%로 현재와 비슷)")
+            add(FATAL, "opening 진입 시각", s.OPENING_WINDOW_MIN + s.OPENING_LAG_MIN <= 30
+                and s.OPENING_LAG_MIN >= 3,
+                f"09:{s.OPENING_WINDOW_MIN + s.OPENING_LAG_MIN:02d}",
+                "지연이 3분보다 짧으면 284종목 분봉 조회(모의 유량 약 2.6분)가 끝나기 전이다")
+            # **기준선 데이터가 실제로 있는지.** 없으면 그 종목은 조용히 발동하지 않는다.
+            hist_dir = Path(s.OPENING_HISTORY_DIR)
+            n_ok, newest = 0, ""
+            for sym in s.UNIVERSE:
+                f = hist_dir / f"{sym}.csv"
+                if not f.exists():
+                    continue
+                try:
+                    days = pd.read_csv(f, usecols=["ts"], dtype={"ts": str})["ts"].str[:8]
+                except Exception:
+                    continue
+                uniq = days.unique()
+                newest = max(newest, str(max(uniq))) if len(uniq) else newest
+                if len(uniq[-20:]) >= 10:
+                    n_ok += 1
+            cover = n_ok / max(1, len(s.UNIVERSE))
+            add(FATAL, "opening 기준선 데이터", cover >= 0.9,
+                f"{n_ok}/{len(s.UNIVERSE)}종목 10일 이상 · 최신 {newest or '없음'} ({hist_dir})",
+                "same_window 는 지난 20거래일 같은 구간 분봉이 필요하다(최소 10일). "
+                "python scripts/collect_opening.py 로 받는다")
+            fresh_ok = bool(newest) and (not s.COMP_START or newest >= "20261008")
+            add(WARN, "opening 기준선 신선도", fresh_ok, f"최신 {newest or '없음'}",
+                "대회 시작 직전 거래일(10/8)까지 있어야 기준선이 묵지 않는다. 대회 중에는 "
+                "09:0N 판정 때 받은 KIS 분봉이 자동으로 이어 붙는다")
         # **감시 범위가 측정 모집단과 같은지.** `_build_universe`가 20일 거래대금
         # 상위 `UNIVERSE_SIZE`개만 남기고, 전일 기준값이 없는 종목은 발동하지 않는다.
         # `.env`가 20으로 덮고 있어 실거래가 대형주 20종목만 보고 있었다(2026-10-09).

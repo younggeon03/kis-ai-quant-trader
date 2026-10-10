@@ -1603,13 +1603,15 @@ async def test_opening_entry():
     s = get_settings()
     keys = ("USE_INTRADAY", "INTRADAY_ENTRY_MODE", "OPENING_WINDOW_MIN", "OPENING_MULT",
             "OPENING_LAG_MIN", "MAX_POSITIONS", "SIZING_MODE", "FIXED_POSITION_WEIGHT",
-            "MAX_POSITION_WEIGHT", "MAX_GROSS_EXPOSURE", "USE_MOCK_MODE")
+            "MAX_POSITION_WEIGHT", "MAX_GROSS_EXPOSURE", "USE_MOCK_MODE",
+            "OPENING_BASELINE", "OPENING_HISTORY_DIR")
     saved = {k: getattr(s, k) for k in keys}
     try:
         s.USE_INTRADAY, s.INTRADAY_ENTRY_MODE = True, "opening"
         s.OPENING_WINDOW_MIN, s.OPENING_MULT, s.OPENING_LAG_MIN = 5, 10.0, 3
         s.MAX_POSITIONS, s.SIZING_MODE, s.FIXED_POSITION_WEIGHT = 2, "fixed", 0.45
         s.MAX_POSITION_WEIGHT, s.MAX_GROSS_EXPOSURE, s.USE_MOCK_MODE = 0.50, 0.95, False
+        s.OPENING_BASELINE = "day_avg"            # 아래 5)에서 same_window 를 따로 본다
 
         # 시세 한 건으로는 발동하지 않는다(breakout 분기로 떨어지면 안 된다)
         w = IntradayWatcher(entry_mode="opening")
@@ -1681,12 +1683,63 @@ async def test_opening_entry():
         eng.watchlist = []
         await eng._refresh_quotes()
         assert calls == [codes[4]], f"opening 모드에서 보유 외 종목을 조회했다: {calls}"
+
+        # --- 5) same_window 기준선 (채택안) ---
+        # (a) 측정의 pandas 와 같은 값
+        rng = np.random.default_rng(22)
+        seq = pd.Series(rng.lognormal(16, 1.0, 40))
+        want = seq.rolling(20, min_periods=10).median().shift(1)
+        for j in range(len(seq)):
+            got = op.same_window_base(seq.iloc[:j].tolist())
+            w_ = float(want.iloc[j]) if np.isfinite(want.iloc[j]) else 0.0
+            assert abs(got - w_) < 1e-6 * max(1.0, w_),                 f"같은 시간대 기준선이 측정과 다르다(과거 {j}일): {got} vs {w_}"
+        # (b) 엔진 — 과거 파일에서 적재, 판정 후 기록, 보유도 기록, 같은 날 중복 기록 없음
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            s.OPENING_BASELINE, s.OPENING_HISTORY_DIR = "same_window", tmp
+            s.OPENING_WINDOW_MIN = 5
+            past = [f"202609{d:02d}" for d in range(1, 21)]           # 과거 20일
+            for c in codes:
+                # 과거 매일 09:00~09:04 거래대금 500만(분당 100만 = 1만원 x 100주)
+                rows_ = [(f"{dd}090{m}", 10_000.0, 10_000.0, 10_000.0, 10_000.0, 100.0)
+                         for dd in past for m in range(5)]
+                pd.DataFrame(rows_, columns=["ts", "open", "high", "low", "close", "volume"]
+                             ).to_csv(Path(tmp) / f"{c}.csv", index=False)
+            eng2 = TradingEngine(s, enable_dashboard=False)
+            eng2.broker = _Broker()                                   # 오늘: 500만 x mult
+            eng2.universe = codes
+            eng2._prev_daily = {}                                     # same_window 는 일봉이 필요 없다
+            eng2.portfolio.positions[codes[4]] = Position(symbol=codes[4], qty=10,
+                                                          avg_price=10_000.0, last_price=10_000.0)
+            eng2._load_opening_history("20261012")
+            assert all(len(eng2._opening_hist[c]) == 20 for c in codes), "과거 20일 적재 실패"
+            assert abs(eng2._opening_hist[codes[0]][-1] - 5e6) < 1.0, "과거 구간 거래대금 계산 오류"
+            await eng2._opening_scan(dt.datetime(2026, 10, 12, 9, 5, 1))
+            got_picks = dict(eng2._opening_picks)
+            assert abs(got_picks.get(codes[0], 0) - 20.0) < 1e-6,                 f"기준선에 오늘이 섞였거나 배수가 틀렸다: {got_picks}"
+            assert codes[4] not in got_picks, "보유 종목을 후보로 올렸다"
+            for c in codes:                                           # 보유 포함 전부 기록
+                d_ = pd.read_csv(Path(tmp) / f"{c}.csv", dtype={"ts": str})
+                assert (d_["ts"].str[:8] == "20261012").sum() == 5, f"{c} 오늘 분봉 기록 오류"
+            assert len(eng2._opening_hist[codes[0]]) == 20 and                 abs(eng2._opening_hist[codes[0]][-1] - 1e8) < 1.0, "오늘 값이 기준선에 이어지지 않았다"
+            # 같은 날 다시 판정(재시작)해도 파일에 두 번 쓰지 않는다
+            eng3 = TradingEngine(s, enable_dashboard=False)
+            eng3.broker, eng3.universe, eng3._prev_daily = _Broker(), codes, {}
+            eng3._load_opening_history("20261012")
+            await eng3._opening_scan(dt.datetime(2026, 10, 12, 9, 6))
+            d_ = pd.read_csv(Path(tmp) / f"{codes[0]}.csv", dtype={"ts": str})
+            assert (d_["ts"].str[:8] == "20261012").sum() == 5, "같은 날을 두 번 기록했다"
+            # 기준선이 10일 미만이면 발동하지 않는다
+            eng3._opening_hist = {c: [5e6] * 9 for c in codes}
+            await eng3._opening_scan(dt.datetime(2026, 10, 13, 9, 5))
+            assert not eng3._opening_picks, "기준선 9일인데 발동했다(최소 10일)"
     finally:
         for k, v in saved.items():
             setattr(s, k, v)
     return ("창 경계(09:00~09:0N-1) · 측정과 같은 함수 · KIS 분봉 파서(분 단위·분당 체결량) · "
             "판정→지연 후 1회 진입(배수 순·빈 슬롯·보유 제외·전날 결과 차단) · "
-            "시세 1건 미발동 · 보유만 시세 조회 모두 작동")
+            "시세 1건 미발동 · 보유만 시세 조회 · same_window(측정과 같은 값·판정 후 기록·"
+            "보유 기록·중복 기록 없음·10일 미만 미발동) 모두 작동")
 
 
 # ============================================================ 실행

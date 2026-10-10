@@ -57,7 +57,8 @@ from core.events import (
 from monitor.app import DashboardServer
 from strategy.ai_model import EnsembleAlphaStrategy
 from strategy.exit_rules import daily_alive_burst
-from strategy.opening import minute_index, opening_ratio, rank_triggers, window_turnover
+from strategy.opening import (minute_index, opening_ratio, rank_triggers, same_window_ratio,
+                              window_turnover)
 from strategy.risk_manager import ExitOrder, RiskManager, RiskState
 from strategy.selection import select_entries, select_rotation_exits
 from strategy.intraday import IntradayWatcher, TriggerSignal
@@ -162,6 +163,10 @@ class TradingEngine:
         self._opening_task: Optional[asyncio.Task] = None
         self._opening_picks: Optional[List[tuple]] = None  # [(종목, 배수)] 배수 큰 순
         self._opening_done_day: str = ""                 # 진입을 처리한 날
+        # same_window 기준선 — 종목 → 지난 거래일들의 09:00~09:0N 거래대금(오래된 것부터, 최대 20)
+        self._opening_hist: Dict[str, List[float]] = {}
+        # 종목 → 분봉 파일의 마지막 날짜. 같은 날을 두 번 기록하지 않으려고 들고 있다.
+        self._opening_file_last: Dict[str, str] = {}
         # 대시보드 자산곡선/유량 그래프용 링버퍼 (메모리 상한 고정)
         self.equity_history: deque = deque(maxlen=720)
         self.rps_history: deque = deque(maxlen=90)
@@ -363,6 +368,7 @@ class TradingEngine:
         self._prev_daily = {}
         self._prime_intraday()
         self._refresh_alive(today)
+        self._load_opening_history(today)
         self._ref_day = today
         if not self.s.USE_MOCK_MODE and self.universe and self.universe[0] in self.panel:
             df = self.panel[self.universe[0]]
@@ -372,6 +378,71 @@ class TradingEngine:
 
     def _opening_mode(self) -> bool:
         return bool(self.s.USE_INTRADAY) and self.s.INTRADAY_ENTRY_MODE == "opening"
+
+    def _opening_dir(self) -> Path:
+        return Path(self.s.OPENING_HISTORY_DIR)
+
+    def _load_opening_history(self, today: str) -> None:
+        """same_window 기준선 — 종목별로 **오늘 이전** 거래일들의 09:00~09:0N 거래대금을 적재한다.
+
+        측정(`scripts/opening_study.py`)과 같은 함수(`window_turnover`)로 계산하고, 판정은
+        `same_window_base`가 마지막 20일(최소 10일)의 중앙값으로 한다. 파일은 토스 수집분
+        (`collect_opening.py`)에 대회 중 09:0N 판정 때 받은 KIS 분봉이 이어 붙는다.
+        """
+        if not (self._opening_mode() and self.s.OPENING_BASELINE == "same_window"):
+            return
+        n = int(self.s.OPENING_WINDOW_MIN)
+        hist: Dict[str, List[float]] = {}
+        last: Dict[str, str] = {}
+        for symbol in self.universe:
+            path = self._opening_dir() / f"{symbol}.csv"
+            if not path.exists():
+                continue
+            try:
+                m = pd.read_csv(path, dtype={"ts": str})
+            except Exception as exc:
+                logger.warning(f"[장중·개장] {symbol} 과거 분봉 읽기 실패: {exc}")
+                continue
+            if m.empty:
+                continue
+            last[symbol] = str(m["ts"].str[:8].max())
+            m = m[m["ts"].str[:8] < today]
+            vals: List[float] = []
+            for _, g in m.groupby(m["ts"].str[:8], sort=True):
+                vals.append(window_turnover(minute_index(g["ts"]), g["close"].to_numpy(float),
+                                            g["volume"].to_numpy(float), n))
+            hist[symbol] = vals[-20:]
+        self._opening_hist = hist
+        self._opening_file_last = last
+        ok = sum(1 for v in hist.values() if len(v) >= 10)
+        newest = max(last.values()) if last else "없음"
+        msg = (f"[장중·개장] 같은 시간대 기준선 적재 {ok}/{len(self.universe)}종목(10일 이상) · "
+               f"최신 {newest}")
+        if self.universe and ok < 0.8 * len(self.universe):
+            logger.warning(msg + " — 기준선이 없는 종목은 발동하지 않는다")
+        else:
+            logger.info(msg)
+
+    def _record_opening_bars(self, symbol: str, day: str, bars: pd.DataFrame,
+                             tv: float) -> None:
+        """오늘 09:00~09:0(N-1) 분봉을 과거 분봉 파일에 붙이고 기준선에 넣는다.
+
+        KIS 당일분봉은 그날만 받을 수 있어서, 판정 때 받은 것을 저장하지 않으면 대회 중
+        기준선이 토스 수집분(10/8)에서 멈춘다. 추가 조회 없이 이미 받은 분봉을 쓴다.
+        """
+        if self._opening_file_last.get(symbol, "") >= day:
+            return                                      # 오늘을 이미 기록했다(재시작 등)
+        cols = ["ts", "open", "high", "low", "close", "volume"]
+        path = self._opening_dir() / f"{symbol}.csv"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            bars[cols].to_csv(path, mode="a", header=not path.exists(), index=False)
+            self._opening_file_last[symbol] = day
+        except Exception as exc:
+            logger.warning(f"[장중·개장] {symbol} 분봉 기록 실패: {exc}")
+        h = self._opening_hist.setdefault(symbol, [])
+        h.append(float(tv))
+        del h[:-20]
 
     async def _opening_scan(self, now: dt.datetime) -> None:
         """09:0N에 유니버스 전 종목의 당일 분봉을 받아 장 시작 N분 거래대금을 판정한다.
@@ -388,15 +459,15 @@ class TradingEngine:
         day = now.strftime("%Y%m%d")
         hour = f"{9 + n // 60:02d}{n % 60:02d}00"
         held = set(self.portfolio.open_positions())
+        same = self.s.OPENING_BASELINE == "same_window"
         ratios: Dict[str, float] = {}
         checked = 0
+        # **보유 종목도 조회한다** — 사지는 않지만 오늘 분봉을 기록해야 내일 기준선이 이어진다.
         for symbol in self.universe:
-            if symbol in held:
-                continue
             vals = self._prev_daily.get(symbol)
             med20 = vals[2] if vals and len(vals) > 2 else 0.0
-            if med20 <= 0:
-                continue
+            if not same and (symbol in held or med20 <= 0):
+                continue              # day_avg 는 기록하지 않으므로 보유 종목을 볼 이유가 없다
             try:
                 bars = await self.broker.get_minute_bars(symbol, hour)
             except Exception as exc:
@@ -406,11 +477,17 @@ class TradingEngine:
             if bars.empty:
                 continue
             checked += 1
-            tv = window_turnover(minute_index(bars["ts"]), bars["close"].to_numpy(float),
+            mi = minute_index(bars["ts"])
+            tv = window_turnover(mi, bars["close"].to_numpy(float),
                                  bars["volume"].to_numpy(float), n)
-            r = opening_ratio(tv, med20, n)
-            if r > 0:
-                ratios[symbol] = r
+            # 판정은 **기록 전에** 한다 — 기준선에 오늘이 섞이면 안 된다(측정의 shift(1)).
+            if symbol not in held:
+                r = (same_window_ratio(tv, self._opening_hist.get(symbol, [])) if same
+                     else opening_ratio(tv, med20, n))
+                if r > 0:
+                    ratios[symbol] = r
+            if same:
+                self._record_opening_bars(symbol, day, bars[(mi >= 0) & (mi < n)], tv)
             # 시각 표기(시작/끝) 확인용 — 첫 종목의 봉 시각을 남긴다(실서버 첫날 확인)
             if checked == 1:
                 logger.info(f"[장중·개장] 분봉 시각 확인 {symbol}: "
@@ -418,10 +495,12 @@ class TradingEngine:
         picks = rank_triggers(ratios, float(self.s.OPENING_MULT))
         self._opening_picks = picks
         top = ", ".join(f"{s_} x{r:.1f}" for s_, r in picks[:5]) or "없음"
-        logger.info(f"[장중·개장] 09:00~{hour[:2]}:{hour[2:4]} 판정 {checked}종목 → 발동 "
-                    f"{len(picks)}건 (x{self.s.OPENING_MULT:g} 이상 · 상위: {top})")
+        logger.info(f"[장중·개장] 09:00~{hour[:2]}:{hour[2:4]} 판정 {checked}종목 "
+                    f"({self.s.OPENING_BASELINE}) → 발동 {len(picks)}건 "
+                    f"(x{self.s.OPENING_MULT:g} 이상 · 상위: {top})")
         self.ledger.write("opening_scan", {
             "window_min": n, "mult": float(self.s.OPENING_MULT), "checked": checked,
+            "baseline": self.s.OPENING_BASELINE,
             "picks": [{"symbol": s_, "ratio": round(r, 3)} for s_, r in picks[:20]]})
 
     async def _opening_entries(self, now: dt.datetime, prices: Dict[str, float]) -> None:
@@ -634,6 +713,7 @@ class TradingEngine:
         today = self._now().strftime("%Y%m%d")
         await self._load_held_bars()
         self._refresh_alive(today)
+        self._load_opening_history(today)
         self._ref_day = today
         # 장중 전략은 일봉 신호를 **하루에 한 번도 다시 계산하지 않으므로**
         # (`_current_signals` 참고) 첫 계산을 장 전 기동 시점에 끝낸다. 그대로 두면

@@ -29,7 +29,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Sequence, Tuple
 
 import numpy as np
 
@@ -77,3 +77,28 @@ def rank_triggers(ratios: Dict[str, float], mult: float) -> List[Tuple[str, floa
     hits = [(s, float(r)) for s, r in ratios.items() if np.isfinite(r) and r >= mult]
     hits.sort(key=lambda x: (-x[1], x[0]))
     return hits
+
+
+def same_window_base(history: Sequence[float], days: int = 20, min_days: int = 10) -> float:
+    """**같은 시간대** 기준선 — 지난 `days`거래일(데이터가 있는 날) 같은 구간 거래대금의 중앙값.
+
+    `history`는 **오늘을 뺀** 과거 값이고 오래된 것부터다. 측정의
+    `rolling(20, min_periods=10).median().shift(1)`과 같다(셀프테스트 22번이 대조한다).
+    장 시작 직후는 원래 거래가 몰리므로, 하루 평균(`day_avg_base`)과 비교하면 "원래 아침에
+    거래가 많은 종목"이 1등이 된다 — 측정에서 그쪽은 현재 규칙보다 낫지 않았고, 이쪽은 3~15분
+    넓은 범위에서 꼬리가 높았다(2026-10-10). 표본이 `min_days`보다 적으면 0(= 판정 안 함).
+    """
+    vals = np.asarray(list(history)[-int(days):], dtype=float)
+    vals = vals[np.isfinite(vals)]
+    if len(vals) < int(min_days):
+        return 0.0
+    med = float(np.median(vals))
+    return med if med > 0 else 0.0
+
+
+def same_window_ratio(window_tv: float, history: Sequence[float]) -> float:
+    """오늘 구간 거래대금 ÷ 같은 시간대 기준선. 계산할 수 없으면 0."""
+    base = same_window_base(history)
+    if base <= 0 or not (np.isfinite(window_tv) and window_tv > 0):
+        return 0.0
+    return float(window_tv) / base

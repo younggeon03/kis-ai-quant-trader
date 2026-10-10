@@ -326,6 +326,17 @@ class Settings(BaseSettings):
         default=10.0, description="opening 모드 배수 k(평소 N분 몫 대비). 측정 전 자리표시")
     OPENING_LAG_MIN: int = Field(
         default=3, description="판정 구간 끝 → 진입까지 지연(분). 분봉 조회 시간을 덮는다")
+    # 기준선 — 측정(2026-10-10, scripts/opening_study.py, 2025-01~): 현재 누적 10배 P(+100%)
+    # 6.60%에 대해 day_avg(하루 평균 N분 몫)는 4.3~7.4%로 낫지 않았고(장 초반 거래 집중 때문),
+    # same_window(지난 20일 같은 구간 중앙)는 3~15분에서 8.4~9.9%였다(약한 증거 — 나은 창 반반).
+    OPENING_BASELINE: str = Field(
+        default="same_window",
+        description="opening 모드 기준선: same_window=지난 20거래일 같은 09:00~09:0N 거래대금 중앙 / "
+                    "day_avg=평소 하루 거래대금(20봉 중앙) x N/390")
+    OPENING_HISTORY_DIR: str = Field(
+        default="data/cache/opening",
+        description="same_window 기준선의 과거 분봉(종목별 CSV). 토스 수집(collect_opening.py)과 "
+                    "대회 중 09:0N 판정 때 받은 KIS 분봉이 여기 쌓인다")
     # 15:15 마감 정리를 끌 수 있다. 끄면 포지션이 **일봉 청산 경로**
     # (`risk_manager`: 손절 + 감쇠 3종 + 시간손절)로 넘어가 다일 보유가 된다.
     #

@@ -61,7 +61,7 @@ from scripts.intraday_entry_study import (COMP_BARS, _fingerprint,  # noqa: E402
 from scripts.slot_sim import path_exit, run_window  # noqa: E402
 from scripts.tail_optimizer import MAX_GROSS, MAX_SINGLE  # noqa: E402
 from strategy.opening import (day_avg_base, minute_index,  # noqa: E402
-                              opening_ratio, window_turnover)
+                              opening_ratio, same_window_base, window_turnover)
 from utils.logger import enable_utf8_console, logger  # noqa: E402
 
 
@@ -151,7 +151,10 @@ def main() -> int:
                                                      by_day[dy]["close"].to_numpy(float),
                                                      by_day[dy]["volume"].to_numpy(float), N)
                                      for dy in days], index=days) for N in windows}
-                same_base = {N: wtv[N].rolling(20, min_periods=10).median().shift(1)
+                # 같은 시간대 기준선도 실거래와 같은 함수(`same_window_base`)다 —
+                # 그날을 뺀 과거 값만 넘긴다(rolling(20, min_periods=10).shift(1)과 같다).
+                same_base = {N: pd.Series([same_window_base(wtv[N].iloc[:j].tolist())
+                                           for j in range(len(days))], index=days)
                              for N in windows}
                 for dy in days:
                     i = pos.get(dy)
@@ -166,7 +169,7 @@ def main() -> int:
                             continue
                         entry_px = float(ent.iloc[0])
                         # day_avg 는 실거래(`main.py::_opening_scan`)와 같은 함수다.
-                        # same_window 는 측정 전용 — 실거래 배관(지난 20일 분봉)이 없다.
+                        # same_window 도 실거래(`main.py::_opening_scan`)와 같은 함수다.
                         bases = {"day_avg": day_avg_base(med_day[i], N),
                                  "same_window": same_base[N][dy]}
                         exit_cache = None

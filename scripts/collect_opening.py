@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import datetime as dt
 import sys
 from pathlib import Path
 from typing import List, Set, Tuple
@@ -44,6 +45,7 @@ from backtest.data import load_panel_from_dir  # noqa: E402
 from config.settings import get_settings  # noqa: E402
 from scripts.collect_minute import (BARS_PER_CALL, COLUMNS, MINUTE_DIR,  # noqa: E402
                                     _iso, _parse_rows)
+from utils.krx_calendar import KRXCalendar  # noqa: E402
 from utils.logger import enable_utf8_console, logger, setup_logging  # noqa: E402
 
 OPENING_DIR = "opening"
@@ -95,8 +97,27 @@ async def run(args) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # 대상 = 일봉이 있는 모든 거래일(since 이후). 일봉 날짜가 곧 거래일 달력이다.
-    targets = {sym: [t for t in df["ts"].astype(str) if t >= args.since]
-               for sym, df in panel.items() if df is not None and not df.empty}
+    # **일봉 파일이 끝난 뒤의 날짜는 KRX 거래일 달력으로 채운다.** 일봉 캐시를 다시
+    # 받지 않았으면(9/29에서 끝난다) 그 뒤 날짜를 몰라 "호출 0"으로 조용히 끝났다.
+    cal = KRXCalendar()
+    yesterday = dt.date.today() - dt.timedelta(days=1)
+
+    def _extra(last: str) -> List[str]:
+        d = dt.datetime.strptime(last, "%Y%m%d").date() + dt.timedelta(days=1)
+        out: List[str] = []
+        while d <= yesterday:
+            if cal.is_trading_day(d):
+                out.append(d.strftime("%Y%m%d"))
+            d += dt.timedelta(days=1)
+        return out
+
+    targets = {}
+    for sym, df in panel.items():
+        if df is None or df.empty:
+            continue
+        days = [t for t in df["ts"].astype(str) if t >= args.since]
+        targets[sym] = days + [t for t in _extra(str(df["ts"].astype(str).iloc[-1]))
+                               if t >= args.since]
     total = sum(len(v) for v in targets.values())
     logger.info(f"[Opening] {len(targets)}종목 · {total:,}종목-일 (since {args.since}, "
                 f"~{args.until}) — 기존 분봉에 있는 날은 호출하지 않는다")
