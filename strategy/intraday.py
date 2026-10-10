@@ -261,7 +261,7 @@ class IntradayWatcher:
         # opening 모드는 시세 한 건 단위로 판정하지 않는다 — 09:0N에 분봉으로 한 번
         # 판정한다(`main.py::_opening_scan`, `strategy/opening.py`). 여기서 막지 않으면
         # 아래 breakout 분기로 떨어져 가격 돌파로 진입한다.
-        if self.entry_mode == "opening":
+        if self.entry_mode in ("opening", "sliding"):
             return None
         # `floor`는 두 분기 밖에서 쓰인다(신호의 `vol_floor`). breakout 분기에서만
         # 정의하면 burst 모드에서 `UnboundLocalError`가 난다 — 셀프테스트 17번이

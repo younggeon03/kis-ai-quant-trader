@@ -158,8 +158,20 @@ async def run(args) -> int:
                 step = max(1, int(args.concurrency))
                 for k in range(0, len(need), step):
                     batch = need[k:k + step]
-                    results = await asyncio.gather(*[_one(d) for d in batch],
-                                                   return_exceptions=True)
+                    # **IP 가 잠깐 바뀌었다 돌아오는 일이 잦다**(몇 분 사이 .224 -> .210, 10분 뒤
+                    # 한 번 403 후 정상). 403 이면 바로 멈추지 않고 `--ip-wait`초 간격으로
+                    # `--ip-retries`번 다시 시도한다. 그래도 안 되면 그때 멈춘다.
+                    for attempt in range(int(args.ip_retries) + 1):
+                        results = await asyncio.gather(*[_one(d) for d in batch],
+                                                       return_exceptions=True)
+                        blocked = any(isinstance(g, Exception) and
+                                      ("IP address" in str(g) or "403" in str(g))
+                                      for g in results)
+                        if not blocked or attempt == int(args.ip_retries):
+                            break
+                        logger.warning(f"[Opening] 403(IP) — {args.ip_wait:g}초 뒤 다시 시도 "
+                                       f"({attempt + 1}/{args.ip_retries})")
+                        await asyncio.sleep(float(args.ip_wait))
                     for day, got in zip(batch, results):
                         if isinstance(got, Exception):
                             failed += 1
@@ -174,7 +186,7 @@ async def run(args) -> int:
                         frames.append(got)
                         fetched += 1
                     if aborted:
-                        logger.error("[Opening] 접근 거부 — IP 화이트리스트를 확인하십시오. "
+                        logger.error("[Opening] 접근 거부가 계속된다 — IP 화이트리스트를 확인하십시오. "
                                      "전체 수집을 중단합니다(받은 것은 저장한다)")
                         break
                 if frames:
@@ -205,6 +217,9 @@ def main() -> int:
     ap.add_argument("--dir", default=OPENING_DIR,
                     help="저장 폴더(source 아래). 하루 전체는 fullday — minute/(급등일 모음)와 "
                          "섞지 않는다: 다른 측정 스크립트가 그 폴더를 '급등일 집단'으로 쓴다")
+    ap.add_argument("--ip-retries", type=int, default=10,
+                    help="403(IP) 연속 시 다시 시도 횟수(IP 가 잠깐 바뀌었다 돌아오는 경우)")
+    ap.add_argument("--ip-wait", type=float, default=60.0, help="403 재시도 간격(초)")
     ap.add_argument("--concurrency", type=int, default=6,
                     help="동시 요청 날짜 수(유량 한도는 TOSS_CHART_TPS 토큰 버킷이 지킨다)")
     ap.add_argument("--probe", action="store_true")

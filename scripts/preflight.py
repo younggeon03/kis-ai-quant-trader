@@ -262,7 +262,8 @@ def check(settings, live: bool) -> List[Tuple[str, str, str, str]]:
         # (3봉 1.58% · 6봉 2.09% · 10봉 2.19% · 15봉 1.70%).
         add(FATAL, "장중 진입 모드", s.INTRADAY_ENTRY_MODE in ("burst", "opening"),
             f"{s.INTRADAY_ENTRY_MODE}",
-            "breakout(가격 +3% 돌파)은 P(+100%) 0.00%로 측정됐다")
+            "breakout(가격 +3% 돌파)은 P(+100%) 0.00%로 측정됐다. sliding(장중 직전 W분)은 "
+            "구현만 됐고 **측정 전**이다(scripts/sliding_study.py) — 측정 후 이 점검을 고친다")
         if s.INTRADAY_ENTRY_MODE == "burst":
             add(WARN, "장중 폭증 배수", abs(s.INTRADAY_BURST_MULT - 10.0) < 1e-9,
                 f"x{s.INTRADAY_BURST_MULT:g}",

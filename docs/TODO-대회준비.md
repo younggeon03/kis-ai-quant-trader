@@ -420,6 +420,17 @@ Mock 상태 파일(자산 고점·가상 진입일)이 실서버로 복구되던
   하루 전체 분봉이 필요해 `collect_opening.py --until 1530 --dir fullday`로 2025-01~ 수집 중
   (약 9시간). `minute/`(급등일 모음)와 섞지 않는다
 
+### 장중 슬라이딩 윈도우 — 구현 완료, 측정 대기 (2026-10-10)
+
+- 사용자 제안: 장 전체 시간에 **최근 3·5분 거래대금이 평소의 k배**가 되는 순간 매수
+- 구현(기본 끔): `INTRADAY_ENTRY_MODE=sliding` · `SLIDING_WINDOW_MIN/MULT/BASELINE/HISTORY_DIR`.
+  `strategy/sliding.py`(순수 · `SlidingWatcher`), `main.py::_sliding_poll_loop`(284종목 당일분봉 순회,
+  한 바퀴 약 2.6분), 날짜 변경 때 그날 분봉을 `fullday/`에 기록. 셀프테스트 23·24번
+- 측정: `scripts/sliding_study.py` — W {3,5} x 기준선 {day_avg, same_time} x k {3,5,10,20} x
+  감지 지연 {1, 4분}. **같은 데이터로** 현재 규칙(장 시작 10분)·누적 10배를 같이 계산한다
+- 데이터: `fullday/` 2025-01~ 모든 날 하루 전체 분봉 수집 중(토스, 동시 요청 · 403 시 10분 재시도)
+- 겪은 것: 셀프테스트 24번이 `main.py`의 `numpy` import 누락을 잡았다(실서버 기동 시 죽을 결함)
+
 ### 장 시작 구간 진입 — 측정 결과 (2026-10-10, `reports/opening_study.json`)
 
 지문 `5dc211ffcfa12cc6` · 275종목 · 102,389종목-일 · 2025-01-02~ · 진입 = 구간 끝 +3분 시가 ·

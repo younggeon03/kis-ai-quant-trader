@@ -87,3 +87,67 @@ def first_trigger(window_tv: np.ndarray, base: np.ndarray, mult: float,
         return None
     m = int(hit[0])
     return m, float(ratio[m])
+
+
+class SlidingWatcher:
+    """종목별 오늘 분봉을 쌓고, 그날 첫 발동을 한 번만 돌려준다. 네트워크·주문을 모른다.
+
+    `main.py`가 당일분봉(최근 30분)을 받을 때마다 `update()`에 넘긴다. **완성된 분만**
+    판정한다 — 진행 중인 분의 봉은 거래량이 아직 덜 찼다(측정은 분이 끝난 값을 쓴다).
+    기준선은 하루에 한 번 `set_base()`로 넣는다(same_time 이면 분별 배열, day_avg 면 스칼라).
+    """
+
+    def __init__(self, window: int, mult: float) -> None:
+        self.window = int(window)
+        self.mult = float(mult)
+        self.day = ""
+        self.tv: dict = {}            # 종목 → 분별 거래대금(길이 380)
+        self.bars: dict = {}          # 종목 → {ts: (o, h, l, c, v)} — 기록용
+        self.base: dict = {}          # 종목 → 기준선(스칼라 또는 분별 배열)
+        self.fired: set = set()
+
+    def reset_day(self, day: str) -> None:
+        if day != self.day:
+            self.day = day
+            self.tv.clear()
+            self.bars.clear()
+            self.fired.clear()
+
+    def set_base(self, symbol: str, base) -> None:
+        self.base[symbol] = base
+
+    def update(self, symbol: str, ts, opn, high, low, close, volume,
+               now_minute: int) -> Optional[Tuple[int, float]]:
+        """분봉 묶음을 반영하고, 오늘 처음 발동하면 (발동 분, 배수)를 돌려준다.
+
+        `ts`는 `YYYYMMDDHHMM` 배열이다. 오늘(`reset_day`로 정한 날)이 아닌 봉은 버린다.
+        `now_minute` 미만(완성된 분)만 판정에 쓴다.
+        """
+        self._store(symbol, ts, opn, high, low, close, volume)    # 발동 뒤에도 기록은 계속한다
+        if symbol in self.fired or symbol not in self.base:
+            return None
+        arr = self.tv[symbol]
+        done = min(int(now_minute), LAST_ENTRY_MIN + 1)
+        if done < self.window:
+            return None
+        rs = rolling_sum(arr[:done], self.window)
+        hit = first_trigger(rs, np.asarray(self.base[symbol])[:done]
+                            if np.ndim(self.base[symbol]) else self.base[symbol], self.mult,
+                            last_min=done - 1)
+        if hit is None:
+            return None
+        self.fired.add(symbol)
+        return hit
+
+    def _store(self, symbol, ts, opn, high, low, close, volume) -> None:
+        arr = self.tv.setdefault(symbol, np.zeros(LAST_ENTRY_MIN + 1))
+        book = self.bars.setdefault(symbol, {})
+        for t, o, h, lo, c, v in zip(ts, opn, high, low, close, volume):
+            t = str(t)
+            if t[:8] != self.day:
+                continue
+            mi = (int(t[8:10]) - 9) * 60 + int(t[10:12])
+            book[t] = (float(o), float(h), float(lo), float(c), float(v))
+            if 0 <= mi <= LAST_ENTRY_MIN:
+                # 같은 분이 다시 오면 **덮어쓴다** — 지난 조회 때 진행 중이던 분이 완성된 값으로 온다
+                arr[mi] = float(c) * float(v)

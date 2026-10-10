@@ -35,6 +35,7 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import numpy as np
 import pandas as pd
 
 from api.base import AbstractBroker, is_ok, to_int
@@ -57,6 +58,8 @@ from core.events import (
 from monitor.app import DashboardServer
 from strategy.ai_model import EnsembleAlphaStrategy
 from strategy.exit_rules import daily_alive_burst
+from strategy.sliding import (LAST_ENTRY_MIN, SlidingWatcher, minute_turnover, rolling_sum,
+                              same_time_base)
 from strategy.opening import (minute_index, opening_ratio, rank_triggers, same_window_ratio,
                               window_turnover)
 from strategy.risk_manager import ExitOrder, RiskManager, RiskState
@@ -167,6 +170,11 @@ class TradingEngine:
         self._opening_hist: Dict[str, List[float]] = {}
         # 종목 → 분봉 파일의 마지막 날짜. 같은 날을 두 번 기록하지 않으려고 들고 있다.
         self._opening_file_last: Dict[str, str] = {}
+        # --- sliding 모드 (장중 직전 W분 거래대금) ---
+        self.sliding = SlidingWatcher(self.s.SLIDING_WINDOW_MIN, self.s.SLIDING_MULT)
+        self._sl_task: Optional[asyncio.Task] = None
+        self._sl_queue: List[tuple] = []        # (발동 분, 배수, 종목) — _tick 이 처리한다
+        self._sl_file_last: Dict[str, str] = {}  # 종목 → 하루 전체 분봉 파일의 마지막 날짜
         # 대시보드 자산곡선/유량 그래프용 링버퍼 (메모리 상한 고정)
         self.equity_history: deque = deque(maxlen=720)
         self.rps_history: deque = deque(maxlen=90)
@@ -369,6 +377,8 @@ class TradingEngine:
         self._prime_intraday()
         self._refresh_alive(today)
         self._load_opening_history(today)
+        self._flush_sliding_bars()
+        self._load_sliding_history(today)
         self._ref_day = today
         if not self.s.USE_MOCK_MODE and self.universe and self.universe[0] in self.panel:
             df = self.panel[self.universe[0]]
@@ -378,6 +388,179 @@ class TradingEngine:
 
     def _opening_mode(self) -> bool:
         return bool(self.s.USE_INTRADAY) and self.s.INTRADAY_ENTRY_MODE == "opening"
+
+    def _sliding_mode(self) -> bool:
+        return bool(self.s.USE_INTRADAY) and self.s.INTRADAY_ENTRY_MODE == "sliding"
+
+    def _rule_entry_mode(self) -> bool:
+        """규칙이 정한 시점에 판정하는 모드(opening·sliding) — 누적 감시·아침 스캔을 쓰지 않는다."""
+        return self._opening_mode() or self._sliding_mode()
+
+    def _load_sliding_history(self, today: str) -> None:
+        """sliding 기준선을 하루 한 번 만든다(기동·날짜 변경).
+
+        same_time: `SLIDING_HISTORY_DIR`의 하루 전체 분봉에서 오늘 이전 마지막 20거래일의
+        직전 W분 합을 시각별로 만들고 중앙값을 낸다(`same_time_base`, 측정과 같은 함수).
+        day_avg: 평소 하루 거래대금(20봉 중앙) x W/390.
+        """
+        if not self._sliding_mode():
+            return
+        w = int(self.s.SLIDING_WINDOW_MIN)
+        self.sliding = SlidingWatcher(w, self.s.SLIDING_MULT)
+        self.sliding.reset_day(today)
+        same = self.s.SLIDING_BASELINE == "same_time"
+        ok = 0
+        for symbol in self.universe:
+            if not same:
+                vals = self._prev_daily.get(symbol)
+                med20 = vals[2] if vals and len(vals) > 2 else 0.0
+                if med20 > 0:
+                    self.sliding.set_base(symbol, med20 * w / 390.0)
+                    ok += 1
+                continue
+            path = Path(self.s.SLIDING_HISTORY_DIR) / f"{symbol}.csv"
+            if not path.exists():
+                continue
+            try:
+                m = pd.read_csv(path, dtype={"ts": str})
+            except Exception as exc:
+                logger.warning(f"[장중·슬라이딩] {symbol} 과거 분봉 읽기 실패: {exc}")
+                continue
+            if m.empty:
+                continue
+            self._sl_file_last[symbol] = str(m["ts"].str[:8].max())
+            m = m[m["ts"].str[:8] < today]
+            days = sorted(m["ts"].str[:8].unique())[-20:]
+            if len(days) < 10:
+                continue
+            m = m[m["ts"].str[:8].isin(days)]
+            rows = []
+            for _, g in m.groupby(m["ts"].str[:8], sort=True):
+                tv = minute_turnover(minute_index(g["ts"]), g["close"].to_numpy(float),
+                                     g["volume"].to_numpy(float), LAST_ENTRY_MIN + 1)
+                rows.append(rolling_sum(tv, w))
+            self.sliding.set_base(symbol, same_time_base(np.vstack(rows)))
+            ok += 1
+        msg = (f"[장중·슬라이딩] 기준선({self.s.SLIDING_BASELINE}) {ok}/{len(self.universe)}종목 · "
+               f"W={w}분 · x{self.s.SLIDING_MULT:g}")
+        if self.universe and ok < 0.8 * len(self.universe):
+            logger.warning(msg + " — 기준선이 없는 종목은 발동하지 않는다")
+        else:
+            logger.info(msg)
+
+    def _flush_sliding_bars(self) -> None:
+        """감시하며 받은 그날 분봉을 하루 전체 분봉 파일에 이어 붙인다(날짜 변경·종료 때).
+
+        KIS 당일분봉은 그날만 받을 수 있다. 저장하지 않으면 대회 중 same_time 기준선이 토스
+        수집분에서 멈춘다. 추가 조회 없이 이미 받은 봉을 쓴다.
+        """
+        day = self.sliding.day
+        if not (self._sliding_mode() and day and self.s.SLIDING_BASELINE == "same_time"):
+            return
+        n = 0
+        for symbol, book in self.sliding.bars.items():
+            if not book or self._sl_file_last.get(symbol, "") >= day:
+                continue
+            rows = [(ts_, *v) for ts_, v in sorted(book.items()) if ts_[:8] == day]
+            if not rows:
+                continue
+            path = Path(self.s.SLIDING_HISTORY_DIR) / f"{symbol}.csv"
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"]
+                             ).to_csv(path, mode="a", header=not path.exists(), index=False)
+                self._sl_file_last[symbol] = day
+                n += 1
+            except Exception as exc:
+                logger.warning(f"[장중·슬라이딩] {symbol} 분봉 기록 실패: {exc}")
+        if n:
+            logger.info(f"[장중·슬라이딩] {day} 분봉 {n}종목 기록 → {self.s.SLIDING_HISTORY_DIR}")
+
+    async def _sliding_poll_once(self, symbol: str) -> None:
+        """한 종목의 당일분봉(최근 30분)을 받아 감시기에 넣고, 발동하면 대기열에 쌓는다."""
+        now = self._now()
+        try:
+            bars = await self.broker.get_minute_bars(symbol, now.strftime("%H%M%S"))
+        except Exception as exc:
+            logger.debug(f"[장중·슬라이딩] {symbol} 분봉 실패: {exc}")
+            return
+        if bars is None or bars.empty:
+            return
+        now_min = (now.hour - 9) * 60 + now.minute
+        hit = self.sliding.update(
+            symbol, bars["ts"].astype(str).tolist(), bars["open"].tolist(),
+            bars["high"].tolist(), bars["low"].tolist(), bars["close"].tolist(),
+            bars["volume"].tolist(), now_min)
+        last_px = float(bars["close"].iloc[-1])
+        if last_px > 0:
+            self.latest_prices[symbol] = last_px
+        if hit is not None and symbol not in self.portfolio.open_positions():
+            mm, ratio = hit
+            self._sl_queue.append((mm, ratio, symbol))
+            logger.warning(f"[장중·슬라이딩] 발동 {symbol} — {9 + (mm + 1) // 60:02d}:"
+                           f"{(mm + 1) % 60:02d}까지 {self.s.SLIDING_WINDOW_MIN}분 거래대금 "
+                           f"x{ratio:.1f} (감지 {now.strftime('%H:%M:%S')})")
+            self.ledger.write("sliding_trigger", {
+                "symbol": symbol, "minute": mm, "ratio": round(ratio, 3),
+                "detected": now.isoformat()})
+
+    async def _sliding_poll_loop(self) -> None:
+        """장중 내내 유니버스 당일분봉을 돌아가며 받는다(한 바퀴 약 2.6분 — 측정의 '지연 4분').
+
+        시세 P2라 주문(P0)·계좌(P1)를 밀지 않는다. 주문은 하지 않는다 — 발동은 대기열에
+        쌓고 `_tick`이 리스크 관문을 거쳐 낸다.
+        """
+        while self._running:
+            if self._session() is not MarketSession.REGULAR:
+                await asyncio.sleep(5.0)
+                continue
+            self.sliding.reset_day(self._now().strftime("%Y%m%d"))
+            for symbol in list(self.universe):
+                if not self._running:
+                    return
+                await self._sliding_poll_once(symbol)
+            await asyncio.sleep(0.1)
+
+    async def _sliding_entries(self, now: dt.datetime, prices: Dict[str, float]) -> None:
+        """대기열의 발동으로 빈 슬롯을 채운다 — 발동이 이른 순, 같은 분이면 배수가 큰 순.
+
+        측정과 같은 규칙이다. 슬롯이 없어 못 산 발동은 버린다(청산은 시가에 나서 장중에
+        슬롯이 다시 비지 않는다).
+        """
+        if not self._sl_queue:
+            return
+        queued = sorted(self._sl_queue, key=lambda x: (x[0], -x[1]))
+        self._sl_queue = []
+        inflight = self.open_orders_symbols()
+        held = set(self.portfolio.open_positions())
+        free = max(0, int(self.s.MAX_POSITIONS) - len(held | set(inflight)))
+        for mm, ratio, symbol in queued:
+            if free <= 0:
+                logger.info(f"[장중·슬라이딩] {symbol} 발동 — 슬롯 없음, 버림")
+                continue
+            if symbol in held or symbol in inflight:
+                continue
+            px = prices.get(symbol) or self.latest_prices.get(symbol, 0.0)
+            if not px or px <= 0:
+                continue
+            sig = Signal(symbol=symbol, score=RULE_TRIGGER_SCORE, price=px, ts=now,
+                         atr=self.atr_map.get(symbol, 0.0),
+                         volatility=self.vol_map.get(symbol, 0.0),
+                         bet=-1.0, reason="sliding_turnover")
+            decision = self.risk.evaluate_entry(sig, self.portfolio, now,
+                                                pending=self._pending_notional())
+            self.ledger.write("risk_decision", {
+                "symbol": symbol, "score": round(sig.score, 4), "ratio": round(ratio, 3),
+                "approved": decision.approved, "qty": decision.qty,
+                "reason": decision.reason, "path": "sliding", **decision.detail})
+            if not decision.approved:
+                logger.info(f"[장중·슬라이딩] {symbol} 진입 거부 — {decision.reason}")
+                continue
+            ok = await self._submit(symbol, Side.BUY, decision.qty, px,
+                                    f"SLIDING|{self.s.SLIDING_WINDOW_MIN}분 거래대금 x{ratio:.1f}")
+            if ok:
+                free -= 1
+                inflight = self.open_orders_symbols()
 
     def _opening_dir(self) -> Path:
         return Path(self.s.OPENING_HISTORY_DIR)
@@ -714,6 +897,7 @@ class TradingEngine:
         await self._load_held_bars()
         self._refresh_alive(today)
         self._load_opening_history(today)
+        self._load_sliding_history(today)
         self._ref_day = today
         # 장중 전략은 일봉 신호를 **하루에 한 번도 다시 계산하지 않으므로**
         # (`_current_signals` 참고) 첫 계산을 장 전 기동 시점에 끝낸다. 그대로 두면
@@ -733,6 +917,8 @@ class TradingEngine:
             await self.dashboard.start()
 
         self._running = True
+        if self._sliding_mode():
+            self._sl_task = asyncio.create_task(self._sliding_poll_loop())
         logger.success(
             f"[Startup] 준비 완료 | 유니버스 {len(self.universe)}종목 | "
             f"자산 {self.portfolio.equity:,.0f}원"
@@ -935,8 +1121,8 @@ class TradingEngine:
         """
         ws_ok = self.ws is not None and self.ws.is_healthy()
         held: List[str] = []
-        if self._opening_mode():
-            # opening 모드는 진입 판정이 09:0N 분봉 한 번이라 유니버스를 하루 종일 돌
+        if self._rule_entry_mode():
+            # opening·sliding 모드는 진입 판정이 09:0N 분봉 한 번이라 유니버스를 하루 종일 돌
             # 이유가 없다. 오히려 그 유량이 판정 조회를 늦춘다. **WS 밖 보유 종목만** 본다.
             covered = set(self.watchlist) if ws_ok else set()
             held = [h for h in self.portfolio.open_positions() if h not in covered]
@@ -1241,7 +1427,7 @@ class TradingEngine:
         # **opening 모드에서는 돌지 않는다.** 그 스캔은 누적 폭증을 실시간으로 보려고
         # WS 40종목을 고르는 것인데 opening은 09:0N 분봉 판정 한 번이 전부다. 그리고
         # 같은 유량(284건)을 판정 조회와 나눠 쓰면 판정이 진입 시각(09:0N+지연)을 넘긴다.
-        if (self.s.USE_INTRADAY and not self._opening_mode()
+        if (self.s.USE_INTRADAY and not self._rule_entry_mode()
                 and self._scanned_day != now.strftime("%Y%m%d")):
             if self._scan_task is None or self._scan_task.done():
                 self._scan_task = asyncio.create_task(self._scan_candidates(now))
@@ -1359,8 +1545,12 @@ class TradingEngine:
         if self._opening_mode() and self.risk.state == RiskState.NORMAL:
             await self._opening_entries(now, prices)
 
+        # --- 장중 진입: sliding 모드 (감시 루프가 쌓은 발동) ---
+        if self._sliding_mode() and self.risk.state == RiskState.NORMAL:
+            await self._sliding_entries(now, prices)
+
         # --- 장중 진입 (분봉 전략) ---
-        if self.s.USE_INTRADAY and not self._opening_mode():
+        if self.s.USE_INTRADAY and not self._rule_entry_mode():
             # 발동한 사건을 **명부에 올린다.** 매 루프 비우면 같은 분에 동시 발동한
             # 것들 사이에서만 고르게 되고, 실측에서 슬롯 2개가 09:00~09:01에 차는
             # 날이 76.9%라 나머지 12건이 선택 기회 없이 버려졌다
@@ -1720,6 +1910,9 @@ class TradingEngine:
             self._scan_task.cancel()
         if self._opening_task is not None and not self._opening_task.done():
             self._opening_task.cancel()        # 같은 이유 — 284종목 분봉 조회
+        if self._sl_task is not None and not self._sl_task.done():
+            self._sl_task.cancel()
+        self._flush_sliding_bars()             # 오늘 받은 분봉을 남긴다(내일 기준선)
         if not self._running:
             return
         self._running = False

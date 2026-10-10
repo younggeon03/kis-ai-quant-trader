@@ -1781,6 +1781,118 @@ def test_sliding():
     return "창 경계 · 분 집계 · 같은 시각 기준선(pandas 대조) · 첫 발동·마감 · 측정과 같은 함수 모두 작동"
 
 
+@check("24. 장중 슬라이딩 배관 (sliding 모드)")
+async def test_sliding_wiring():
+    """감시 루프 → 대기열 → 리스크 관문 → 주문, 그리고 그날 분봉 기록.
+
+    (1) 진행 중인 분은 판정하지 않는다(거래량이 덜 찼다 — 측정은 끝난 분만 쓴다)
+    (2) 같은 분이 다시 오면 완성된 값으로 덮어쓴다 (3) 하루 한 번만 발동한다
+    (4) 기준선은 과거 하루 전체 분봉에서 같은 시각으로 만든다(측정과 같은 함수)
+    (5) 발동이 이른 순으로 빈 슬롯만 채우고 나머지는 버린다 (6) 그날 분봉을 한 번만 기록한다
+    """
+    import datetime as dt
+    import tempfile
+    import types
+
+    from main import TradingEngine
+    from strategy.sliding import LAST_ENTRY_MIN, SlidingWatcher
+
+    def bars_of(day, vols, start=0):
+        ts = [f"{day}{9 + (start + k) // 60:02d}{(start + k) % 60:02d}" for k in range(len(vols))]
+        px = [1_000.0] * len(vols)
+        return ts, px, px, px, px, list(map(float, vols))
+
+    # --- 감시기 단독 ---
+    w = SlidingWatcher(window=3, mult=5.0)
+    w.reset_day("20261012")
+    w.set_base("A", np.full(LAST_ENTRY_MIN + 1, 3e6))            # 3분 기준 300만(=1천원 x 3천주)
+    # 09:00~09:03 거래량 1천주씩, 09:04는 진행 중(아직 10주) — 지금 09:04
+    assert w.update("A", *bars_of("20261012", [1000, 1000, 1000, 1000, 10]), now_minute=4) is None, \
+        "평소 수준(x1)인데 발동했다"
+    # 09:04가 완성되며 2만주로 바뀌었다 → 09:02~09:04 합 = 1천원 x 2.2만주 = 2,200만 ≥ 5 x 300만
+    hit = w.update("A", *bars_of("20261012", [1000, 1000, 1000, 1000, 20000, 5]), now_minute=5)
+    assert hit is not None and hit[0] == 4, f"완성된 분 덮어쓰기·발동 분 오류: {hit}"
+    assert w.update("A", *bars_of("20261012", [9e9] * 8), now_minute=8) is None, "하루 두 번 발동했다"
+    w.reset_day("20261013")
+    assert "A" not in w.fired and not w.bars, "날짜가 바뀌었는데 상태가 남았다"
+    # 진행 중인 분만 크면 발동하지 않는다
+    w2 = SlidingWatcher(window=3, mult=5.0)
+    w2.reset_day("20261012")
+    w2.set_base("B", 3e6)
+    assert w2.update("B", *bars_of("20261012", [1000, 1000, 1000, 9e9]), now_minute=3) is None, \
+        "진행 중인 분(거래량이 덜 찬 분)으로 발동했다"
+
+    # --- 엔진 배선 ---
+    s = get_settings()
+    keys = ("USE_INTRADAY", "INTRADAY_ENTRY_MODE", "SLIDING_WINDOW_MIN", "SLIDING_MULT",
+            "SLIDING_BASELINE", "SLIDING_HISTORY_DIR", "MAX_POSITIONS", "SIZING_MODE",
+            "FIXED_POSITION_WEIGHT", "MAX_POSITION_WEIGHT", "MAX_GROSS_EXPOSURE", "USE_MOCK_MODE")
+    saved = {k: getattr(s, k) for k in keys}
+    try:
+        s.USE_INTRADAY, s.INTRADAY_ENTRY_MODE = True, "sliding"
+        s.SLIDING_WINDOW_MIN, s.SLIDING_MULT, s.SLIDING_BASELINE = 3, 5.0, "same_time"
+        s.MAX_POSITIONS, s.SIZING_MODE, s.FIXED_POSITION_WEIGHT = 2, "fixed", 0.45
+        s.MAX_POSITION_WEIGHT, s.MAX_GROSS_EXPOSURE, s.USE_MOCK_MODE = 0.50, 0.95, False
+        codes = list(get_settings().UNIVERSE[:4])
+        with tempfile.TemporaryDirectory() as tmp:
+            s.SLIDING_HISTORY_DIR = tmp
+            past = [f"202609{d:02d}" for d in range(1, 21)]
+            for c in codes:                                       # 과거 매 분 1천원 x 1천주
+                rows_ = [(f"{dd}{9 + m // 60:02d}{m % 60:02d}", 1e3, 1e3, 1e3, 1e3, 1000.0)
+                         for dd in past for m in range(0, 30)]
+                pd.DataFrame(rows_, columns=["ts", "open", "high", "low", "close", "volume"]
+                             ).to_csv(Path(tmp) / f"{c}.csv", index=False)
+            eng = TradingEngine(s, enable_dashboard=False)
+            eng.universe = codes
+            eng._load_sliding_history("20261012")
+            base = np.asarray(eng.sliding.base[codes[0]])
+            assert abs(base[5] - 3e6) < 1.0 and np.isnan(base[0]), \
+                f"같은 시각 기준선 오류(3분 합 300만, 첫 2분은 창이 안 참): {base[:6]}"
+
+            # 오늘: c0 은 09:03에, c1 은 09:02에, c2 는 09:04에 터진다. c3 는 보유 중
+            spike = {codes[0]: 3, codes[1]: 2, codes[2]: 4, codes[3]: 2}
+
+            class _Broker:
+                async def get_minute_bars(self, symbol, hour):
+                    vols = [1000.0] * 10
+                    vols[spike[symbol]] = 50_000.0
+                    ts, o, h, lo, c, v = bars_of("20261012", vols)
+                    return pd.DataFrame({"ts": ts, "open": o, "high": h, "low": lo,
+                                         "close": c, "volume": v})
+
+            eng.broker = _Broker()
+            eng._now = lambda: dt.datetime(2026, 10, 12, 9, 9, 30)
+            eng.portfolio.positions[codes[3]] = Position(symbol=codes[3], qty=10,
+                                                         avg_price=1e3, last_price=1e3)
+            for c in codes:
+                await eng._sliding_poll_once(c)
+            got = sorted(eng._sl_queue)
+            assert [x[2] for x in got] == [codes[1], codes[0], codes[2]], \
+                f"발동 순서 오류(보유 제외, 이른 순): {got}"
+            submitted = []
+
+            async def _submit(symbol, side, qty, price, reason):
+                submitted.append(symbol)
+                eng.open_orders[f"o{len(submitted)}"] = {"symbol": symbol, "side": side.value,
+                                                         "qty": qty, "price": price}
+                return True
+            eng._submit = _submit
+            await eng._sliding_entries(dt.datetime(2026, 10, 12, 9, 10), {})
+            assert submitted == [codes[1]], f"빈 슬롯 1개를 가장 이른 발동으로 채우지 않았다: {submitted}"
+            assert not eng._sl_queue, "못 산 발동을 다음 루프로 넘겼다(측정은 버린다)"
+
+            # 그날 분봉을 한 번만 기록한다
+            eng._flush_sliding_bars()
+            eng._flush_sliding_bars()
+            d_ = pd.read_csv(Path(tmp) / f"{codes[0]}.csv", dtype={"ts": str})
+            assert (d_["ts"].str[:8] == "20261012").sum() == 10, "오늘 분봉 기록 누락·중복"
+    finally:
+        for k, v in saved.items():
+            setattr(s, k, v)
+    return ("완성된 분만 판정 · 진행 중 분 덮어쓰기 · 하루 1회 · 날짜 초기화 · 같은 시각 기준선 적재 · "
+            "이른 순 빈 슬롯만(보유 제외·나머지 버림) · 그날 분봉 1회 기록 모두 작동")
+
+
 # ============================================================ 실행
 
 async def run_all() -> int:
@@ -1793,7 +1905,7 @@ async def run_all() -> int:
         test_competition_rules, test_selection_and_phase, test_panel_min_bars,
         test_intraday, test_intraday_book, test_decay_exits,
         test_orderbook_recorder, test_burst_wiring, test_opening_entry,
-        test_sliding,
+        test_sliding, test_sliding_wiring,
     ]
     print("\n" + "=" * 86)
     print(" KIS AI Quant Trader — 셀프 테스트")

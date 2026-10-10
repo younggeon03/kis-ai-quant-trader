@@ -309,7 +309,8 @@ class Settings(BaseSettings):
         default="breakout",
         description="장중 진입 판정: breakout=가격 돌파+분당 거래량 / "
                     "burst=당일 누적 거래대금 폭증 / "
-                    "opening=장 시작 N분 거래대금이 평소 N분 몫의 k배(strategy/opening.py)")
+                    "opening=장 시작 N분 거래대금이 평소 N분 몫의 k배(strategy/opening.py) / "
+                    "sliding=장중 직전 W분 거래대금이 기준선의 k배(strategy/sliding.py)")
     INTRADAY_BURST_MULT: float = Field(
         default=10.0,
         description="burst 모드의 거래대금 폭증 배수(20봉 중앙값 대비). "
@@ -333,6 +334,22 @@ class Settings(BaseSettings):
         default="same_window",
         description="opening 모드 기준선: same_window=지난 20거래일 같은 09:00~09:0N 거래대금 중앙 / "
                     "day_avg=평소 하루 거래대금(20봉 중앙) x N/390")
+    # --- sliding 모드 (2026-10-10 구현, **측정 전** — scripts/sliding_study.py) ---
+    #
+    # 장 전체 시간에 매 분 "직전 W분 거래대금 >= k x 기준선"이 되는 그날 첫 분을 잡는다.
+    # 감시는 284종목 당일분봉(최근 30분)을 KIS로 돌아가며 받는다(한 바퀴 약 2.6분 —
+    # 측정의 '지연 4분'). 모의 유량(초당 약 1.8건)을 거의 다 쓴다 — 주문(P0)·계좌(P1)는
+    # 우선순위로 보호된다.
+    SLIDING_WINDOW_MIN: int = Field(default=5, description="sliding 모드 창 W(분)")
+    SLIDING_MULT: float = Field(default=5.0, description="sliding 모드 배수 k. 측정 전 자리표시")
+    SLIDING_BASELINE: str = Field(
+        default="same_time",
+        description="sliding 기준선: same_time=지난 20거래일 같은 시각 같은 W분 중앙 / "
+                    "day_avg=평소 하루 거래대금(20봉 중앙) x W/390")
+    SLIDING_HISTORY_DIR: str = Field(
+        default="data/cache/fullday",
+        description="same_time 기준선의 과거 하루 전체 분봉(종목별 CSV). 대회 중 감시하며 받은 "
+                    "KIS 분봉이 날짜가 바뀔 때 여기 이어 붙는다")
     OPENING_HISTORY_DIR: str = Field(
         default="data/cache/opening",
         description="same_window 기준선의 과거 분봉(종목별 CSV). 토스 수집(collect_opening.py)과 "
