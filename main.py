@@ -175,6 +175,9 @@ class TradingEngine:
         self._sl_task: Optional[asyncio.Task] = None
         self._sl_queue: List[tuple] = []        # (발동 분, 배수, 종목) — _tick 이 처리한다
         self._sl_file_last: Dict[str, str] = {}  # 종목 → 하루 전체 분봉 파일의 마지막 날짜
+        # --- 요건 전용 소액 매매 — 종목 → 매수일. 전략 자리 수에서 뺀다 ---
+        self._compliance_syms: Dict[str, str] = {}
+        self._compliance_day: str = ""
         # 대시보드 자산곡선/유량 그래프용 링버퍼 (메모리 상한 고정)
         self.equity_history: deque = deque(maxlen=720)
         self.rps_history: deque = deque(maxlen=90)
@@ -531,8 +534,8 @@ class TradingEngine:
             return
         queued = sorted(self._sl_queue, key=lambda x: (x[0], -x[1]))
         self._sl_queue = []
-        inflight = self.open_orders_symbols()
-        held = set(self.portfolio.open_positions())
+        inflight = self.open_orders_symbols() - self._compliance_exempt()
+        held = self._strategy_held()
         free = max(0, int(self.s.MAX_POSITIONS) - len(held | set(inflight)))
         for mm, ratio, symbol in queued:
             if free <= 0:
@@ -548,7 +551,8 @@ class TradingEngine:
                          volatility=self.vol_map.get(symbol, 0.0),
                          bet=-1.0, reason="sliding_turnover")
             decision = self.risk.evaluate_entry(sig, self.portfolio, now,
-                                                pending=self._pending_notional())
+                                                pending=self._pending_notional(),
+                                                slot_exempt=self._compliance_exempt())
             self.ledger.write("risk_decision", {
                 "symbol": symbol, "score": round(sig.score, 4), "ratio": round(ratio, 3),
                 "approved": decision.approved, "qty": decision.qty,
@@ -561,6 +565,83 @@ class TradingEngine:
             if ok:
                 free -= 1
                 inflight = self.open_orders_symbols()
+
+    def _compliance_exempt(self) -> set:
+        """전략 자리 수에서 빼는 종목 — 요건 전용 소액 매매 포지션."""
+        return set(self._compliance_syms)
+
+    def _strategy_held(self) -> set:
+        return set(self.portfolio.open_positions()) - self._compliance_exempt()
+
+    async def _compliance_trades(self, now: dt.datetime, prices: Dict[str, float]) -> None:
+        """지수 종목 요건 — 모자라면 소액으로 사서 당일 판다(2026-10-10, 사용자 결정).
+
+        측정(scripts/compliance_study.py)에서 지금 진입 규칙은 30거래일에 지수 종목을 중앙
+        2개만 샀다(5종목 요건 충족 10.7%). 요건을 놓치면 수익률과 무관하게 실격이다.
+        """
+        if not (self.s.COMPLIANCE_TRADES and self.phase.is_competition):
+            return
+        day = now.strftime("%Y%m%d")
+        hhmm = now.strftime("%H%M")
+        # --- 매도: 당일 매도 시각 이후, 또는 전날 남은 것은 바로 ---
+        for symbol, bought in list(self._compliance_syms.items()):
+            pos = self.portfolio.positions.get(symbol)
+            if pos is None or pos.qty <= 0:
+                continue
+            if bought < day or hhmm >= self.s.COMPLIANCE_SELL_HHMM:
+                qty = self._sellable_qty(symbol, pos.qty)
+                if qty > 0:
+                    px = prices.get(symbol, pos.last_price or pos.avg_price)
+                    await self._submit(symbol, Side.SELL, qty, px, "COMPLIANCE|요건 매매 당일 청산")
+        # --- 매수: 하루 한 번, 시작일 이후 ---
+        try:
+            start = dt.date.fromisoformat(self.s.COMPLIANCE_START)
+        except ValueError:
+            return
+        if (self._compliance_day == day or now.date() < start
+                or hhmm < self.s.COMPLIANCE_BUY_HHMM or hhmm >= self.s.COMPLIANCE_SELL_HHMM):
+            return
+        self._compliance_day = day
+        from strategy.compliance import compliance_picks, index_symbols_traded, read_fills
+        members = {x for lst in self.s.index_members().values() for x in lst}
+        if not members:
+            logger.warning("[대회·요건] 지수 멤버십 정보가 없어 요건 매매를 하지 않는다")
+            return
+        fills = read_fills(Path(self.s.LOG_DIR) / "ledger.jsonl", since=start)
+        traded = index_symbols_traded(fills, members)
+        # 거래대금이 큰 지수 종목부터 — 체결이 확실하고 호가가 촘촘하다
+        ranked = sorted((s_ for s_ in self.universe if s_ in members),
+                        key=lambda s_: -(self._prev_daily.get(s_, (0, 0, 0.0))[2]
+                                         if len(self._prev_daily.get(s_, ())) > 2 else 0.0))
+        exclude = set(self.portfolio.open_positions()) | set(self.open_orders_symbols())
+        picks = compliance_picks(traded, members, ranked, int(self.s.MIN_TRADE_SYMBOLS),
+                                 exclude=exclude)
+        if not picks:
+            return
+        logger.warning(f"[대회·요건] 지수 종목 {len(traded)}/{self.s.MIN_TRADE_SYMBOLS} — "
+                       f"소액 매매 {len(picks)}건: {', '.join(picks)}")
+        for symbol in picks:
+            try:
+                q = await self.broker.get_quote(symbol)
+                px = float(q.price) if q and q.price > 0 else prices.get(symbol, 0.0)
+            except Exception:
+                px = prices.get(symbol, 0.0)
+            if px <= 0:
+                continue
+            sig = Signal(symbol=symbol, score=RULE_TRIGGER_SCORE, price=px, ts=now,
+                         bet=-1.0, reason="compliance")
+            decision = self.risk.evaluate_entry(sig, self.portfolio, now,
+                                                pending=self._pending_notional(),
+                                                max_notional=float(self.s.COMPLIANCE_TRADE_KRW))
+            self.ledger.write("risk_decision", {
+                "symbol": symbol, "approved": decision.approved, "qty": decision.qty,
+                "reason": decision.reason, "path": "compliance", **decision.detail})
+            if not decision.approved:
+                logger.info(f"[대회·요건] {symbol} 거부 — {decision.reason}")
+                continue
+            if await self._submit(symbol, Side.BUY, decision.qty, px, "COMPLIANCE|지수 종목 요건"):
+                self._compliance_syms[symbol] = day
+                self._save_state()
 
     def _opening_dir(self) -> Path:
         return Path(self.s.OPENING_HISTORY_DIR)
@@ -705,8 +786,8 @@ class TradingEngine:
         late = (now.hour - 9) * 60 + now.minute - start
         if late > 0 and self._opening_picks:
             logger.warning(f"[장중·개장] 진입이 측정보다 {late}분 늦다(분봉 판정 지연)")
-        inflight = self.open_orders_symbols()
-        held = set(self.portfolio.open_positions())
+        inflight = self.open_orders_symbols() - self._compliance_exempt()
+        held = self._strategy_held()
         free = max(0, int(self.s.MAX_POSITIONS) - len(held | set(inflight)))
         for symbol, ratio in self._opening_picks:
             if free <= 0:
@@ -727,7 +808,8 @@ class TradingEngine:
                          volatility=self.vol_map.get(symbol, 0.0),
                          bet=-1.0, reason="opening_turnover")
             decision = self.risk.evaluate_entry(sig, self.portfolio, now,
-                                                pending=self._pending_notional())
+                                                pending=self._pending_notional(),
+                                                slot_exempt=self._compliance_exempt())
             self.ledger.write("risk_decision", {
                 "symbol": symbol, "score": round(sig.score, 4), "ratio": round(ratio, 3),
                 "approved": decision.approved, "qty": decision.qty,
@@ -1087,6 +1169,8 @@ class TradingEngine:
             if pos_after is None or pos_after.qty <= 0:
                 self.intraday.close_watch(fill.symbol)
                 if self._entry_dates.pop(fill.symbol, None) is not None:
+                    self._save_state()
+                if self._compliance_syms.pop(fill.symbol, None) is not None:
                     self._save_state()
         record = fill.to_dict()
         record["ts"] = fill.ts.isoformat()
@@ -1567,8 +1651,9 @@ class TradingEngine:
                 if queued:
                     logger.info(f"[장중] 마감 정리 시각 — 돌파 {len(queued)}건 진입하지 않음")
             else:
-                held = set(self.portfolio.open_positions())
-                free = max(0, int(self.s.MAX_POSITIONS) - len(held | set(inflight)))
+                held = self._strategy_held()          # 요건 매매 포지션은 자리 수에서 뺀다
+                free = max(0, int(self.s.MAX_POSITIONS)
+                           - len(held | (set(inflight) - self._compliance_exempt())))
                 picks = self.intraday.pick_entries(now, free, exclude=set(inflight))
                 # 슬롯이 꽉 찼으면 교체를 검토한다. 매도만 내고, 매수는 슬롯이
                 # 비는 다음 루프에서 `pick_entries()`가 집는다.
@@ -1608,7 +1693,8 @@ class TradingEngine:
                         volatility=self.vol_map.get(sig.symbol, 0.0),
                         bet=-1.0, reason="intraday_breakout")
                     decision = self.risk.evaluate_entry(entry_sig, self.portfolio, now,
-                                                        pending=self._pending_notional())
+                                                        pending=self._pending_notional(),
+                                                slot_exempt=self._compliance_exempt())
                     self.ledger.write("risk_decision", {
                         "symbol": sig.symbol, "score": round(entry_sig.score, 4),
                         "approved": decision.approved, "qty": decision.qty,
@@ -1640,7 +1726,8 @@ class TradingEngine:
             for sig in candidates:
                 if sig.symbol in self.open_orders_symbols():
                     continue
-                decision = self.risk.evaluate_entry(sig, self.portfolio, now, pending=self._pending_notional())
+                decision = self.risk.evaluate_entry(sig, self.portfolio, now, pending=self._pending_notional(),
+                                                slot_exempt=self._compliance_exempt())
                 self.ledger.write("risk_decision", {
                     "symbol": sig.symbol, "score": round(sig.score, 4),
                     "approved": decision.approved, "qty": decision.qty,
@@ -1651,6 +1738,10 @@ class TradingEngine:
                 price = prices.get(sig.symbol, sig.price)
                 await self._submit(sig.symbol, Side.BUY, decision.qty, price,
                                    f"ENTRY|score={sig.score:.3f}")
+
+        # --- 요건 전용 소액 매매(지수 종목 5개) ---
+        if self.risk.state == RiskState.NORMAL or self._compliance_syms:
+            await self._compliance_trades(now, prices)
 
         # --- 체결 확인 ---
         if self.s.USE_MOCK_MODE or self._loops % FILL_POLL_LOOPS == 0:
@@ -1981,6 +2072,7 @@ class TradingEngine:
                 "loops": self._loops,
                 "peak_equity": self.portfolio.peak_equity,
                 "entry_dates": self._entry_dates,
+                "compliance_syms": self._compliance_syms,
             }
             self._state_path().write_text(
                 json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
@@ -2007,6 +2099,8 @@ class TradingEngine:
             logger.info(f"[State] 이전 상태 복구 (peak_equity={self.portfolio.peak_equity:,.0f})")
             saved = data.get("entry_dates") or {}
             self._entry_dates = {str(k): str(v) for k, v in saved.items()}
+            comp = data.get("compliance_syms") or {}
+            self._compliance_syms = {str(k): str(v) for k, v in comp.items()}
         except Exception as exc:
             logger.debug(f"[State] 복구 실패: {exc}")
 

@@ -240,3 +240,24 @@ def status_from_ledger(ledger_path: str | Path,
                 since = None
     fills = read_fills(ledger_path, since=since)
     return evaluate(fills, s, days_remaining=trading_days_remaining(now, s))
+
+
+def index_symbols_traded(fills: List[Dict[str, Any]], members: set) -> set:
+    """체결 기록에서 **지수 소속** 매매 종목 집합."""
+    return {str(r.get("symbol") or "") for r in fills} & set(members)
+
+
+def compliance_picks(traded: set, members: set, ranked: List[str], required: int,
+                     exclude: Optional[set] = None, spare: int = 1) -> List[str]:
+    """지수 종목 요건을 채우려면 오늘 무엇을 살지 — 모자란 수 + 여유 `spare`개.
+
+    `ranked`는 우선순위(거래대금이 큰 순)다. 이미 매매했거나(`traded`) 제외(`exclude`, 보유·
+    미체결) 종목은 건너뛴다. 모자라지 않으면 빈 목록이다. 여유분을 두는 이유는 거부·미체결이
+    나도 그날 안에 채우기 위해서다(체결 기준이라 주문만으로는 세지 않는다).
+    """
+    need = int(required) - len(set(traded) & set(members))
+    if need <= 0:
+        return []
+    skip = set(traded) | set(exclude or set())
+    out = [s_ for s_ in ranked if s_ in members and s_ not in skip]
+    return out[: need + max(0, int(spare))]

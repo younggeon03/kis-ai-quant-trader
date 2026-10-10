@@ -1893,6 +1893,116 @@ async def test_sliding_wiring():
             "이른 순 빈 슬롯만(보유 제외·나머지 버림) · 그날 분봉 1회 기록 모두 작동")
 
 
+@check("25. 요건 전용 소액 매매 (지수 종목 5개)")
+async def test_compliance_trades():
+    """지수 종목 요건 — 모자라면 소액으로 사서 당일 판다. 전략 자리 2개를 먹지 않는다.
+
+    측정에서 지금 진입 규칙은 30거래일에 지수 종목을 중앙 2개만 샀다(충족 10.7%). 요건을
+    놓치면 수익률과 무관하게 실격이다. 보는 것: (1) 모자란 수 + 여유만 고른다 (2) 관문이
+    금액을 묶고 자리 한도를 면제한다 (3) 요건 포지션이 전략 자리를 막지 않는다 (4) 시작일
+    전에는 사지 않고, 매수 시각에 한 번 사고, 매도 시각에 판다.
+    """
+    import datetime as dt
+    import json
+    import tempfile
+    import types
+
+    from main import TradingEngine
+    from strategy.compliance import compliance_picks, index_symbols_traded
+    from strategy.phase import phase_config
+    from strategy.risk_manager import RiskManager
+
+    members = {"I1", "I2", "I3", "I4", "I5", "I6", "I7"}
+    ranked = ["X1", "I1", "I2", "I3", "I4", "I5", "I6", "I7"]
+    assert compliance_picks({"I1", "I2"}, members, ranked, 5) == ["I3", "I4", "I5", "I6"], \
+        "모자란 3개 + 여유 1개를 거래대금 순으로 골라야 한다(이미 매매한 것·지수 밖 제외)"
+    assert compliance_picks({"I1", "I2", "I3", "I4", "I5"}, members, ranked, 5) == [], "충족인데 골랐다"
+    assert compliance_picks({"I1"}, members, ranked, 5, exclude={"I2"})[0] == "I3", "보유·미체결 제외 실패"
+    assert index_symbols_traded([{"symbol": "I1"}, {"symbol": "X1"}], members) == {"I1"}
+
+    s = get_settings()
+    keys = ("SIZING_MODE", "FIXED_POSITION_WEIGHT", "MAX_POSITIONS", "MAX_POSITION_WEIGHT",
+            "MAX_GROSS_EXPOSURE", "COMPLIANCE_TRADES", "COMPLIANCE_TRADE_KRW", "COMPLIANCE_START",
+            "COMPLIANCE_BUY_HHMM", "COMPLIANCE_SELL_HHMM", "MIN_TRADE_SYMBOLS", "LOG_DIR",
+            "LEDGER_PATH", "COMP_START", "COMP_END", "PHASE1_END", "USE_MOCK_MODE", "UNIVERSE")
+    saved = {k: getattr(s, k) for k in keys}
+    try:
+        s.SIZING_MODE, s.FIXED_POSITION_WEIGHT, s.MAX_POSITIONS = "fixed", 0.45, 2
+        s.MAX_POSITION_WEIGHT, s.MAX_GROSS_EXPOSURE = 0.50, 0.95
+        codes = list(get_settings().UNIVERSE[:8])
+        # --- (2) 관문: 금액을 묶고 자리 한도를 면제한다 ---
+        rm = RiskManager(s)
+        pf = Portfolio(cash=10_000_000.0, initial_capital=100_000_000.0)
+        for c in codes[:2]:                                        # 전략 2자리 꽉 참
+            pf.positions[c] = Position(symbol=c, qty=4_500, avg_price=10_000.0, last_price=10_000.0)
+        now = dt.datetime(2026, 10, 19, 9, 30)
+        sig = Signal(symbol=codes[2], score=1.0, price=10_000.0, ts=now, bet=-1.0)
+        d1 = rm.evaluate_entry(sig, pf, now, pending={}, max_notional=1_000_000.0)
+        assert d1.approved and d1.qty == 100, f"요건 매매가 자리 한도에 막혔거나 금액이 안 묶였다: {d1.reason} {d1.qty}"
+        d2 = rm.evaluate_entry(sig, pf, now, pending={})
+        assert not d2.approved, "전략 진입이 자리 한도를 넘었다"
+        # 요건 포지션은 전략 자리를 먹지 않는다
+        pf.positions[codes[1]].qty = 100
+        d3 = rm.evaluate_entry(sig, pf, now, pending={}, slot_exempt={codes[1]})
+        assert d3.approved, f"요건 포지션이 전략 자리를 막았다: {d3.reason}"
+
+        # --- (4) 엔진: 시작일 · 매수 시각 · 매도 시각 ---
+        with tempfile.TemporaryDirectory() as tmp:
+            s.LOG_DIR, s.LEDGER_PATH = tmp, str(Path(tmp) / "ledger.jsonl")
+            s.COMP_START, s.COMP_END, s.PHASE1_END = "2026-10-12", "2026-11-20", "2026-10-16"
+            s.COMPLIANCE_TRADES, s.COMPLIANCE_TRADE_KRW = True, 1_000_000.0
+            s.COMPLIANCE_START, s.COMPLIANCE_BUY_HHMM, s.COMPLIANCE_SELL_HHMM = "2026-10-19", "0930", "1430"
+            s.MIN_TRADE_SYMBOLS, s.USE_MOCK_MODE = 5, False
+            mem = sorted(x for lst in s.index_members().values() for x in lst)
+            tradable = set((s._universe_blob() or {}).get("tradable") or mem)
+            uni = [m_ for m_ in mem if m_ in tradable][:8]   # 실거래처럼 유니버스 ∩ 지수
+            s.UNIVERSE = list(uni)              # 규정 필터(유니버스 밖 거부)를 통과시킨다
+            assert len(uni) >= 6, "지수 멤버십 정보가 부족하다(유니버스 파일 확인)"
+            # 이미 지수 종목 2개를 매매했다(10/19 이후 체결)
+            with open(s.LEDGER_PATH, "w", encoding="utf-8") as f:
+                for c in uni[:2]:
+                    f.write(json.dumps({"event": "fill", "ts": "2026-10-19T09:13:00",
+                                        "symbol": c, "qty": 1, "price": 10000.0}) + "\n")
+            eng = TradingEngine(s, enable_dashboard=False)
+            eng.universe = uni
+            eng._prev_daily = {c: (1e4, 1e5, 1e9 - k) for k, c in enumerate(uni)}
+
+            class _Broker:
+                async def get_quote(self, symbol):
+                    return types.SimpleNamespace(price=10_000.0, volume=0.0)
+            eng.broker = _Broker()
+            bought = []
+
+            async def _submit(symbol, side, qty, price, reason):
+                bought.append((symbol, side.value, qty))
+                return True
+            eng._submit = _submit
+            eng.phase = phase_config(settings=s, now=dt.date(2026, 10, 15))
+            await eng._compliance_trades(dt.datetime(2026, 10, 15, 9, 31), {})
+            assert not bought, "시작일(10/19) 전에 요건 매매를 했다(초기화가 실적을 지울 수 있다)"
+            eng.phase = phase_config(settings=s, now=dt.date(2026, 10, 19))
+            await eng._compliance_trades(dt.datetime(2026, 10, 19, 9, 29), {})
+            assert not bought, "매수 시각 전에 샀다"
+            await eng._compliance_trades(dt.datetime(2026, 10, 19, 9, 31), {})
+            buys = [b for b in bought if b[1] == "BUY"]
+            assert [b[0] for b in buys] == uni[2:6] and all(b[2] == 100 for b in buys), \
+                f"모자란 3 + 여유 1을 100만원씩 사야 한다: {buys}"
+            await eng._compliance_trades(dt.datetime(2026, 10, 19, 10, 0), {})
+            assert len([b for b in bought if b[1] == "BUY"]) == 4, "하루에 두 번 샀다"
+            # 체결됐다고 치고 매도 시각에 판다. 전략 자리는 비어 있어야 한다
+            for c in uni[2:6]:
+                eng.portfolio.positions[c] = Position(symbol=c, qty=100, avg_price=1e4, last_price=1e4)
+            assert not eng._strategy_held(), "요건 포지션이 전략 자리를 차지했다"
+            await eng._compliance_trades(dt.datetime(2026, 10, 19, 14, 31), {})
+            sells = [b for b in bought if b[1] == "SELL"]
+            assert sorted(b[0] for b in sells) == sorted(uni[2:6]), f"당일 청산 실패: {sells}"
+    finally:
+        for k, v in saved.items():
+            setattr(s, k, v)
+    return ("모자란 수+여유 선택 · 관문 금액 제한·자리 면제 · 전략 자리 미점유 · 시작일 전 금지 · "
+            "하루 1회 매수 · 당일 청산 모두 작동")
+
+
 # ============================================================ 실행
 
 async def run_all() -> int:
@@ -1905,7 +2015,7 @@ async def run_all() -> int:
         test_competition_rules, test_selection_and_phase, test_panel_min_bars,
         test_intraday, test_intraday_book, test_decay_exits,
         test_orderbook_recorder, test_burst_wiring, test_opening_entry,
-        test_sliding, test_sliding_wiring,
+        test_sliding, test_sliding_wiring, test_compliance_trades,
     ]
     print("\n" + "=" * 86)
     print(" KIS AI Quant Trader — 셀프 테스트")

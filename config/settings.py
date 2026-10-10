@@ -626,6 +626,24 @@ class Settings(BaseSettings):
                     "때문이며, 이 논리는 1단계가 끝나면 성립하지 않는다. 감쇠 청산"
                     "(EXIT_RULES)은 전략의 기본 청산이라 끄지 않는다")
 
+    # 요건 전용 소액 매매 (2026-10-10, 사용자 결정)
+    #
+    # 측정(scripts/compliance_study.py): 폭증 진입은 소형주를 골라 30거래일에 지수
+    # (코스피200·코스닥150) 종목을 중앙 2개만 산다 — 5종목 요건 충족 10.7%. 그래서 전략과
+    # 별개로 지수 대형주를 소액씩 사서 당일 판다. 전략 자리(MAX_POSITIONS)에서 빼고 센다.
+    COMPLIANCE_TRADES: bool = Field(
+        default=True, description="지수 종목 요건이 모자라면 소액 매매로 채운다")
+    COMPLIANCE_TRADE_KRW: float = Field(
+        default=1_000_000.0,
+        description="요건 매매 종목당 금액(원). 리스크 관문 최소 주문금액(50만원)보다 커야 한다. "
+                    "규정에 종목당 최소 금액이 있으면 그 이상으로 올린다")
+    COMPLIANCE_START: str = Field(
+        default="2026-10-19",
+        description="요건 매매를 시작하는 날. 수익률 초기화(10/12~16)가 거래 실적도 지우는지 "
+                    "확인되지 않아 2주차부터 하고, 그날 이후 체결만 센다")
+    COMPLIANCE_BUY_HHMM: str = Field(default="0930", description="요건 매매 매수 시각")
+    COMPLIANCE_SELL_HHMM: str = Field(default="1430", description="요건 매매 매도 시각(당일 청산)")
+
     # 대회 최소 요건 — 못 채우면 수익률과 무관하게 실격이다(모두 체결 기준).
     MIN_TRADE_COUNT: int = Field(default=0, description="최소 거래 횟수")
     MIN_TRADE_AMOUNT: float = Field(default=0.0, description="최소 매매금액(원)")

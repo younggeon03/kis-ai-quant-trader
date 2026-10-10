@@ -368,6 +368,19 @@ def check(settings, live: bool) -> List[Tuple[str, str, str, str]]:
             "(ablate_exits_v2.json config.symbols=40). 284종목 스윙은 미측정이고, "
             "동일가중 매수보유 벤치마크가 +61.8%로 모든 전략 설정을 이긴다")
 
+    # --- 지수 종목 요건 (2026-10-10) ---
+    #
+    # 측정(scripts/compliance_study.py): 폭증 진입은 소형주를 골라 30거래일에 지수 종목을 중앙
+    # 2개만 산다 — 5종목 요건 충족 10.7%. 요건 전용 소액 매매가 꺼져 있으면 실격 위험이 크다.
+    if s.MIN_TRADE_SYMBOLS > 0:
+        add(FATAL, "요건 전용 소액 매매", bool(s.COMPLIANCE_TRADES),
+            f"{'ON' if s.COMPLIANCE_TRADES else 'OFF'} · {s.COMPLIANCE_START}부터 · "
+            f"{s.COMPLIANCE_BUY_HHMM} 매수 → {s.COMPLIANCE_SELL_HHMM} 매도",
+            "지수(코스피200·코스닥150) 5종목 요건 충족률이 10.7%다 — 끄면 실격 위험")
+        add(FATAL, "요건 매매 금액", s.COMPLIANCE_TRADE_KRW >= 500_000,
+            f"종목당 {s.COMPLIANCE_TRADE_KRW:,.0f}원",
+            "리스크 관문의 최소 주문금액(50만원)보다 작으면 전부 거부돼 조용히 아무것도 사지 않는다")
+
     # --- 주문 ---
     add(FATAL, "지정가 비대칭", s.BUY_LIMIT_BAND > s.SELL_LIMIT_BAND,
         f"매수 +{s.BUY_LIMIT_BAND:.1%} / 매도 −{s.SELL_LIMIT_BAND:.1%}",

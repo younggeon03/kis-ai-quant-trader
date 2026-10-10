@@ -261,8 +261,16 @@ class RiskManager:
         portfolio: Portfolio,
         now: Optional[dt.datetime] = None,
         pending: Optional[Dict[str, float]] = None,
+        max_notional: Optional[float] = None,
+        slot_exempt: Optional[set] = None,
     ) -> RiskDecision:
         """신규/추가 진입 심사. 거부 사유를 반드시 남긴다.
+
+        `max_notional`(원)이 있으면 **요건 전용 소액 매매**다 — 금액을 그 이하로 묶고 보유
+        종목 수 한도(`MAX_POSITIONS`)를 적용하지 않는다. 규정 필터·리스크 상태·가용 현금·
+        익스포저·단일 종목 한도는 그대로 거친다(관문을 우회하지 않는다).
+        `slot_exempt`는 보유 종목 수를 셀 때 빼는 종목(요건 매매 포지션)이다 — 그것이 전략
+        자리 2개를 먹으면 안 된다.
 
         `pending`은 아직 체결되지 않은 매수 주문의 평가금액({종목코드: 원})이다.
         이를 한도 계산에 넣지 않으면, 체결 전에 같은 섹터로 주문이 연달아 나가
@@ -293,8 +301,9 @@ class RiskManager:
         open_positions = portfolio.open_positions()
         already = signal.symbol in open_positions
         # 미체결 주문이 걸린 종목도 '보유 예정'으로 세어 한도를 지킨다
-        slots_used = len(set(open_positions) | set(pending))
-        if not already and signal.symbol not in pending and slots_used >= self.s.MAX_POSITIONS:
+        slots_used = len((set(open_positions) | set(pending)) - set(slot_exempt or set()))
+        if (max_notional is None and not already and signal.symbol not in pending
+                and slots_used >= self.s.MAX_POSITIONS):
             return self._reject(f"최대 보유 종목 수 도달 ({slots_used}/{self.s.MAX_POSITIONS})")
 
         pending_total = sum(pending.values())
@@ -383,6 +392,8 @@ class RiskManager:
             # 조금만 담는다"는 중간 지대가 기대값은 지키지만 꼬리를 깎는다.
         else:
             target_w = vol_w * kelly_mult * signal_scale * signal.regime
+        if max_notional is not None:
+            target_w = float(max_notional) / equity        # 요건 매매 — 소액으로 묶는다
         target_w = min(target_w, weight_cap, symbol_room, sector_room, gross_room)
         if target_w <= 0.005:
             return self._reject(f"산출 비중 과소 {target_w:.3%}")

@@ -177,6 +177,13 @@ k x 지난 20일 같은 시각 중앙)은 구현만 됐고 측정 전이다 — 
 모의 유량을 거의 다 쓴다). 분봉은 날짜가 바뀔 때 `data/cache/fullday/`에 이어 붙는다(내일 기준선).
 측정 데이터는 `collect_opening.py --until 1530 --dir fullday`(모든 날 하루 전체 분봉)다.
 
+**지수 종목 요건은 소액 매매로 채운다.** 폭증 진입은 소형주를 골라 30거래일에 지수(코스피200·
+코스닥150) 종목을 중앙 2개만 산다(5종목 요건 충족 10.7%, `scripts/compliance_study.py`). 그래서
+`main.py::_compliance_trades`가 `COMPLIANCE_START`(10/19)부터 모자라면 지수 대형주를 종목당
+`COMPLIANCE_TRADE_KRW`(100만원)씩 09:30에 사서 14:30에 판다. 관문은 `evaluate_entry(max_notional=...)`
+로 금액을 묶고 자리 한도를 면제한다. 전략 경로는 `slot_exempt`로 이 포지션을 자리 수에서 뺀다.
+**진입 규칙을 바꾸면 `compliance_study.py`를 다시 돌린다.**
+
 **규칙 진입의 점수는 `RULE_TRIGGER_SCORE`(1.0)다.** 리스크 관문의 `SIGNAL_BUY_THRESHOLD`
 (0.22)는 일봉 모델용이다. burst 경로가 "가격 상승률 x 10"을 점수로 넣어 **+2.2% 미만에서 터진
 폭증이 전부 거부되고 있었다**(측정에 없는 가격 필터, 2026-10-09 수정).
