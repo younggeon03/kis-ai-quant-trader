@@ -136,6 +136,7 @@ async def run(args) -> int:
             frames: List[pd.DataFrame] = [have] if not have.empty else []
             if todo:
                 full, full_days = _load(base / MINUTE_DIR / f"{sym}.csv")
+                need: List[str] = []
                 for day in todo:
                     if day in full_days:
                         w = _window(full, day, args.until)
@@ -143,26 +144,39 @@ async def run(args) -> int:
                             frames.append(w)
                             reused += 1
                             continue
-                    try:
-                        # 하루 전체(--until 1530)는 15:31에서 뒤로 2~3회 페이징한다
-                        # (collect_minute.fetch_day 그대로). 장 시작 구간은 1회.
-                        got = (await fetch_day(cli, sym, day) if whole_day
-                               else await fetch_opening(cli, sym, day, args.until))
-                    except Exception as exc:
-                        failed += 1
-                        logger.warning(f"[Opening] {sym} {day} 실패: "
-                                       f"{type(exc).__name__}: {str(exc)[:90]}")
-                        if "IP address" in str(exc) or "403" in str(exc):
-                            logger.error("[Opening] 접근 거부 — IP 화이트리스트를 확인하십시오. "
-                                         "전체 수집을 중단합니다")
-                            aborted = True
-                            break
-                        continue
-                    if got.empty:
-                        empty += 1
-                        continue
-                    frames.append(got)
-                    fetched += 1
+                    need.append(day)
+
+                async def _one(day: str) -> pd.DataFrame:
+                    # 하루 전체(--until 1530)는 15:31에서 뒤로 2~3회 페이징한다
+                    # (collect_minute.fetch_day 그대로). 장 시작 구간은 1회.
+                    return (await fetch_day(cli, sym, day) if whole_day
+                            else await fetch_opening(cli, sym, day, args.until))
+
+                # **동시에 요청한다.** 순서대로 보내면 응답 왕복이 병목이라 한도(TOSS_CHART_TPS)
+                # 보다 훨씬 낮게(초당 약 5.5건) 돈다. 한도는 토큰 버킷이 지키고, 넘으면 429
+                # 백오프가 처리한다.
+                step = max(1, int(args.concurrency))
+                for k in range(0, len(need), step):
+                    batch = need[k:k + step]
+                    results = await asyncio.gather(*[_one(d) for d in batch],
+                                                   return_exceptions=True)
+                    for day, got in zip(batch, results):
+                        if isinstance(got, Exception):
+                            failed += 1
+                            logger.warning(f"[Opening] {sym} {day} 실패: "
+                                           f"{type(got).__name__}: {str(got)[:90]}")
+                            if "IP address" in str(got) or "403" in str(got):
+                                aborted = True
+                            continue
+                        if got.empty:
+                            empty += 1
+                            continue
+                        frames.append(got)
+                        fetched += 1
+                    if aborted:
+                        logger.error("[Opening] 접근 거부 — IP 화이트리스트를 확인하십시오. "
+                                     "전체 수집을 중단합니다(받은 것은 저장한다)")
+                        break
                 if frames:
                     merged = (pd.concat(frames, ignore_index=True)
                               .sort_values("ts").drop_duplicates("ts").reset_index(drop=True))
@@ -191,6 +205,8 @@ def main() -> int:
     ap.add_argument("--dir", default=OPENING_DIR,
                     help="저장 폴더(source 아래). 하루 전체는 fullday — minute/(급등일 모음)와 "
                          "섞지 않는다: 다른 측정 스크립트가 그 폴더를 '급등일 집단'으로 쓴다")
+    ap.add_argument("--concurrency", type=int, default=6,
+                    help="동시 요청 날짜 수(유량 한도는 TOSS_CHART_TPS 토큰 버킷이 지킨다)")
     ap.add_argument("--probe", action="store_true")
     args = ap.parse_args()
     return asyncio.run(run(args))
