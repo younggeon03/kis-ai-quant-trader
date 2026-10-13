@@ -24,7 +24,7 @@ export PATH="$HOME/.local/bin:$PATH"
 
 cd "$APP"
 uv python install 3.13
-uv venv --python 3.13 .venv
+[ -x .venv/bin/python ] || uv venv --python 3.13 .venv   # 재실행해도 안전(멱등)
 uv pip install --python .venv/bin/python -r deploy/oracle/requirements-lock.txt
 
 mkdir -p logs state data/cache models
@@ -89,7 +89,8 @@ sudo sysctl --system >/dev/null
 
 # --- 원장·상태 백업 — 대회 근거자료. 장 마감 뒤 매일 압축 보관(30일) ---
 mkdir -p "$HOME/backups"
-( crontab -l 2>/dev/null | grep -v bankis-backup;
+# 새 서버는 crontab 이 비어 있어 'crontab -l'이 1을 낸다 — set -e·pipefail 에서 멈추지 않게 흡수한다
+( { crontab -l 2>/dev/null || true; } | { grep -v bankis-backup || true; };
   echo "40 15 * * 1-5 tar -czf \$HOME/backups/bankis-\$(date +\%Y\%m\%d).tgz -C $APP logs/ledger.jsonl state 2>/dev/null; find \$HOME/backups -name 'bankis-*.tgz' -mtime +30 -delete  # bankis-backup"
 ) | crontab -
 
