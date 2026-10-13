@@ -55,4 +55,11 @@ if ! swapon --show | grep -q swapfile; then
 fi
 
 .venv/bin/python -c "import numpy, pandas, sklearn, lightgbm; print('패키지 OK', numpy.__version__, sklearn.__version__, lightgbm.__version__)"
+# 키 로그인이 확인된 상태(이 스크립트가 키로 실행되고 있다)이므로 비밀번호 로그인을 끈다.
+# NCP 는 22번을 전체에 열어 두므로 비밀번호 대입 공격을 막아야 한다.
+if [ -s "$HOME/.ssh/authorized_keys" ]; then
+  echo "PasswordAuthentication no" | sudo tee /etc/ssh/sshd_config.d/99-bankis.conf >/dev/null
+  sudo systemctl reload ssh 2>/dev/null || sudo systemctl reload sshd 2>/dev/null || true
+  echo "SSH 비밀번호 로그인 끔(키로만 접속)"
+fi
 echo "설정 완료 — 서비스는 deploy.sh 가 켠다(bankis.service)"
