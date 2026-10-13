@@ -1,0 +1,19 @@
+# 서버 실행용 고정 버전 — 노트북(2026-10-13)과 같다.
+# 모델(models/alpha_gbdt.pkl)이 이 버전들로 저장돼 있어 버전이 다르면 읽히지 않을 수 있다.
+# loguru 는 노트북에 없어서 서버에도 설치하지 않는다(로거 동작을 같게 둔다).
+numpy==2.4.3
+pandas==2.3.3
+scipy==1.17.1
+scikit-learn==1.9.0
+joblib==1.5.3
+threadpoolctl==3.6.0
+lightgbm==4.7.0
+httpx==0.28.1
+websockets==17.0.1
+cryptography==46.0.5
+pydantic==2.12.4
+pydantic-settings==2.12.0
+python-dotenv==1.2.1
+fastapi==0.141.1
+uvicorn==0.52.1
+pyarrow==25.0.1
