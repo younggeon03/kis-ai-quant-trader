@@ -3,6 +3,11 @@
 제16회 뱅키스 대학생 모의투자대회(AI 부문) 대응 기록. 갱신 **2026-10-03**.
 대회 시작 **2026-10-12 — 9일 남음.**
 
+> **실거래 운영 위치(2026-10-13 20:37~): NCP 서버 `$BANKIS_SERVER`** (root · 키 `~/.ssh/bankis_oracle`).
+> 노트북 엔진은 멈췄고 `logs/STOP`이 있다 — **노트북에서 `main.py`·`run_live.ps1`을 다시 켜지 않는다**(같은 계좌 이중 주문).
+> 코드 수정 반영: `BANKIS_SSH_USER=root bash deploy/oracle/deploy.sh $BANKIS_SERVER code` · 상태: `... status`.
+> 데이터(장 시작 분봉 기록)는 `code`가 보내지 않는다 — 수집 결과를 반영하려면 `switch`(장 마감 후)를 다시 쓴다.
+
 ---
 
 ## 대회 규정 (전문 확인 완료)
