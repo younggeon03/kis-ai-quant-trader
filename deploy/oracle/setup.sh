@@ -58,18 +58,18 @@ sudo systemctl daemon-reload
 
 # 메모리 여유(무료 A1 12GB면 충분하지만 혹시 모를 급증 대비 스왑 2GB)
 if ! swapon --show | grep -q swapfile; then
-  sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
+  sudo fallocate -l 1G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
   echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null
 fi
 
 # --- 비밀파일 권한 — KIS 앱키·계좌가 들어 있다 ---
 [ -f "$APP/.env" ] && chmod 600 "$APP/.env"
 
-# --- 로그 순환 — 하루 단위 30일 보관·압축. copytruncate: 엔진을 재시작하지 않고 자른다 ---
+# --- 로그 순환 — 하루 단위 14일 보관·압축(디스크 10GB 기준. 원장 ledger.jsonl 은 대상이 아니다). copytruncate: 엔진을 재시작하지 않고 자른다 ---
 sudo tee /etc/logrotate.d/bankis >/dev/null <<EOF
 $APP/logs/*.log $APP/logs/*.err {
     daily
-    rotate 30
+    rotate 14
     compress
     delaycompress
     missingok
@@ -92,6 +92,15 @@ mkdir -p "$HOME/backups"
 ( crontab -l 2>/dev/null | grep -v bankis-backup;
   echo "40 15 * * 1-5 tar -czf \$HOME/backups/bankis-\$(date +\%Y\%m\%d).tgz -C $APP logs/ledger.jsonl state 2>/dev/null; find \$HOME/backups -name 'bankis-*.tgz' -mtime +30 -delete  # bankis-backup"
 ) | crontab -
+
+# --- 디스크 절약(10GB) — 시스템 로그 상한 · 설치 캐시 삭제 ---
+sudo mkdir -p /etc/systemd/journald.conf.d
+printf '[Journal]
+SystemMaxUse=200M
+' | sudo tee /etc/systemd/journald.conf.d/90-bankis.conf >/dev/null
+sudo systemctl restart systemd-journald
+sudo apt-get clean
+uv cache clean >/dev/null 2>&1 || true
 
 .venv/bin/python -c "import numpy, pandas, sklearn, lightgbm; print('패키지 OK', numpy.__version__, sklearn.__version__, lightgbm.__version__)"
 # 키 로그인이 확인된 상태(이 스크립트가 키로 실행되고 있다)이므로 비밀번호 로그인을 끈다.

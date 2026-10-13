@@ -23,7 +23,16 @@ push_code() {
   git archive --format=tar HEAD | "${SSH[@]}" "mkdir -p ~/bankis && tar -x -C ~/bankis"
 }
 push_data() {
-  tar -cf - .env models config/universe.json data/cache/opening | "${SSH[@]}" "tar -x -C ~/bankis"
+  # 수집기가 data/cache/opening 에 쓰는 중이면 GNU tar 가 'file changed as we read it'(종료 코드 1)로
+  # 끝나고 set -e 가 배포를 멈춘다. 먼저 임시 파일로 묶고 1(경고)은 허용, 2(치명)만 실패로 본다.
+  # 쓰는 중이던 파일은 switch 때 다시 보낸다(push_data 를 다시 부른다).
+  local tmp rc=0
+  tmp="$(mktemp)"
+  tar -cf "$tmp" .env models config/universe.json data/cache/opening || rc=$?
+  if [ "$rc" -gt 1 ]; then rm -f "$tmp"; echo "데이터 묶기 실패(tar $rc)"; exit 1; fi
+  [ "$rc" -eq 1 ] && echo "경고: 수집 중인 파일이 있어 일부는 쓰는 도중 상태로 복사됐다(switch 때 다시 보낸다)"
+  "${SSH[@]}" "tar -x -C ~/bankis" < "$tmp"
+  rm -f "$tmp"
 }
 laptop_engine_running() {
   powershell.exe -NoProfile -Command "if (Get-CimInstance Win32_Process | Where-Object { \$_.CommandLine -like '*main.py*' -and \$_.CommandLine -notlike '*deploy*' }) { exit 0 } else { exit 1 }"

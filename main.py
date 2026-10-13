@@ -74,6 +74,7 @@ from utils.market_rules import round_to_tick
 BAR_REFRESH_LOOPS = 40      # 전체 일봉 재적재 주기(루프 수)
 QUOTE_CHUNK = 4             # 루프당 현재가 갱신 종목 수(유량 보호)
 RECONCILE_LOOPS = 30        # 브로커 잔고 대조 주기
+DISK_WARN_GB = 1.0          # 남은 디스크가 이 아래면 경고(서버 디스크 10GB — 원장·상태 저장 실패 방지)
 FLATTEN_ORDER_TTL = 30.0    # 마감 정리 구간의 미체결 매도 취소 기준(초)
 FILL_POLL_LOOPS = 5         # 체결 폴링 주기(실서버)
 # 규칙 기반 진입(burst·opening)의 신호 점수. 진입 결정은 규칙이 이미 내렸으므로 리스크
@@ -194,6 +195,8 @@ class TradingEngine:
         self._signals: List[Signal] = []
         self._signals_bar_ts: str = ""
         self._signals_failed_ts: str = ""   # 신호 계산이 실패한 봉 — 같은 봉에서 재시도하지 않는다
+        self._disk_free_gb: Optional[float] = None
+        self._disk_warned_at: Optional[dt.datetime] = None
         self._started_at: Optional[dt.datetime] = None
 
     # ================================================================== 시간
@@ -1421,6 +1424,17 @@ class TradingEngine:
                     self.open_orders.pop(fill.order_no, None)
             await self.bus.publish(TOPIC_FILL, fill)
 
+    def _check_disk(self, now: dt.datetime) -> None:
+        """남은 디스크를 재고 모자라면 경고한다(한 시간에 한 번). 디스크가 차면 원장·상태를 못 쓴다."""
+        self._disk_free_gb = disk_free_gb(str(Path(self.s.LOG_DIR)))
+        if self._disk_free_gb is None or self._disk_free_gb >= DISK_WARN_GB:
+            return
+        if self._disk_warned_at and (now - self._disk_warned_at).total_seconds() < 3600:
+            return
+        self._disk_warned_at = now
+        logger.warning(f"[디스크] 남은 용량 {self._disk_free_gb:.2f}GB < {DISK_WARN_GB}GB — "
+                       f"로그·백업 정리 필요(원장 저장 실패 위험)")
+
     async def _sync_open_orders(self, max_age_seconds: float = 180.0) -> None:
         """브로커의 미체결 잔량과 내부 추적을 일치시키고, 오래된 주문은 취소한다.
 
@@ -1779,6 +1793,7 @@ class TradingEngine:
         if self._loops % RECONCILE_LOOPS == 0 and self._loops > 0:
             await self._sync_portfolio()
             await self._sync_open_orders()
+            self._check_disk(now)
         elif (self.s.USE_INTRADAY and self.intraday.should_flatten(now)
               and any(o.get("side") == Side.SELL.value for o in self.open_orders.values())):
             # **마감 정리 구간만 촘촘하게 본다.** 미체결 매도는 취소되고 나서야
@@ -2270,8 +2285,19 @@ class TradingEngine:
                                       if getattr(self.broker, "http_stats", None) else []),
                 "event_dropped": self.bus.dropped,
                 "clock_skew_s": getattr(self.broker, "clock_skew_s", None),
+                "disk_free_gb": self._disk_free_gb,
             },
         }
+
+
+# ====================================================================== 디스크
+def disk_free_gb(path: str = ".") -> Optional[float]:
+    """원장·로그가 쓰이는 디스크의 남은 용량(GB). 확인 실패면 None."""
+    import shutil
+    try:
+        return round(shutil.disk_usage(path).free / 1024 ** 3, 2)
+    except OSError:
+        return None
 
 
 # ====================================================================== CLI
