@@ -13,11 +13,13 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import json
+import time
 from typing import Any, Dict, List, Optional
 
 from api.base import (
     RATE_LIMIT_CODES,
     TOKEN_ERROR_CODES,
+    UNKNOWN_RESULT_CODE,
     AbstractBroker,
     is_ok,
     make_response,
@@ -27,6 +29,7 @@ from api.base import (
 from config.settings import Settings
 from core.auth import TokenManager
 from core.events import Fill, OrderType, Side
+from core.latency import LatencyStats
 from core.rate_limiter import (
     PRIORITY_ACCOUNT,
     PRIORITY_ORDER,
@@ -56,6 +59,11 @@ class KISClient(AbstractBroker):
         self.auth = token_manager or TokenManager(settings)
         self._client = None
         self._seen_fills: set[str] = set()
+        # API(TR)별 지연·결과 지표 — `/metrics`로 내보낸다(`core/latency.py`)
+        self.http_stats = LatencyStats()
+        # 증권사 서버 시각 - 로컬 시각(초). 첫 응답의 `Date` 헤더로 잰다(1초 해상도).
+        # 09:10 판정·진입이 로컬 시계로 돌기 때문에 몇 초만 틀려도 판정이 이르거나 늦다.
+        self.clock_skew_s: Optional[float] = None
         self._connected = False
 
     # ------------------------------------------------------------------ 수명주기
@@ -160,7 +168,20 @@ class KISClient(AbstractBroker):
         body: Optional[Dict[str, Any]] = None,
         priority: int = PRIORITY_QUOTE,
         use_hashkey: bool = False,
+        idempotent: bool = True,
     ) -> Dict[str, Any]:
+        """KIS REST 공용 경로 — 유량 제어 · 재시도 · 토큰 갱신 · 지연 지표.
+
+        ## 주문은 멱등하지 않다 (`idempotent=False`)
+
+        응답을 받지 못한 실패(읽기 타임아웃 · 연결 중 끊김 · 5xx)는 **요청이 증권사에 도착해
+        처리됐을 수 있다.** 그대로 재시도하면 같은 매수가 두 번 나간다. 그래서 주문은
+        "요청이 나가지 않은 것이 확실한" 실패(접속 실패 · 접속 타임아웃 · 커넥션 풀 대기)만
+        재시도하고, 나머지는 `LOCAL_UNKNOWN`으로 돌려준다 — 엔진이 미체결·잔고 조회로 확인한다.
+        429·`EGW00201`은 게이트웨이가 **거절한** 것이라(실행 안 됨) 주문도 재시도한다.
+        """
+        import httpx
+
         if self._client is None:
             await self.connect()
 
@@ -172,18 +193,31 @@ class KISClient(AbstractBroker):
             headers = await self._headers(tr_id, hashkey)
 
             await self.limiter.acquire(priority)
+            t0 = time.perf_counter()
             try:
                 if method == "GET":
                     resp = await self._client.get(path, params=params, headers=headers)
                 else:
                     resp = await self._client.post(path, json=body, headers=headers)
             except Exception as exc:
+                self.http_stats.observe(tr_id, time.perf_counter() - t0, "error")
+                not_sent = isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout,
+                                            httpx.PoolTimeout))
+                if not idempotent and not not_sent:
+                    logger.error(f"[KISClient] 주문 결과 불명({type(exc).__name__}: {exc}) — "
+                                 "재시도하지 않는다(이중 주문 방지). 미체결·잔고로 확인한다")
+                    return make_response(rt_cd="1", msg_cd=UNKNOWN_RESULT_CODE,
+                                         msg1=f"주문 결과 불명: {type(exc).__name__}")
                 backoff = self.settings.HTTP_BACKOFF_BASE * (2 ** (attempt - 1))
                 logger.warning(f"[KISClient] 통신 오류({path}) {attempt}회차: {exc} → {backoff:.1f}s 후 재시도")
                 last_payload = make_response(rt_cd="1", msg_cd="LOCAL001", msg1=f"통신 오류: {exc}")
                 await asyncio.sleep(backoff)
                 continue
 
+            self.http_stats.observe(tr_id, time.perf_counter() - t0,
+                                    "ok" if resp.status_code == 200 else str(resp.status_code))
+            if self.clock_skew_s is None:
+                self._measure_clock_skew(resp.headers.get("date"), time.perf_counter() - t0)
             if resp.status_code == 429:
                 delay = self.limiter.notify_rate_limit_error()
                 logger.warning(f"[KISClient] HTTP 429 유량 초과 → {delay:.1f}s 감축 후 재시도")
@@ -214,6 +248,10 @@ class KISClient(AbstractBroker):
                 last_payload = payload if isinstance(payload, dict) else {}
                 last_payload.setdefault("rt_cd", "1")
                 logger.warning(f"[KISClient] HTTP {resp.status_code} {path} :: {payload}")
+                if not idempotent and resp.status_code >= 500:
+                    # 5xx 는 처리 도중 실패일 수 있다 — 주문은 결과를 모른다
+                    last_payload["msg_cd"] = UNKNOWN_RESULT_CODE
+                    return last_payload
                 await asyncio.sleep(self.settings.HTTP_BACKOFF_BASE * attempt)
                 continue
 
@@ -221,6 +259,21 @@ class KISClient(AbstractBroker):
             return payload
 
         return last_payload
+
+    def _measure_clock_skew(self, date_header: Optional[str], rtt: float) -> None:
+        """`Date` 헤더(서버 시각, 1초 해상도)와 로컬 시각의 차이. 왕복 절반을 보정한다."""
+        if not date_header:
+            return
+        try:
+            from email.utils import parsedate_to_datetime
+            server = parsedate_to_datetime(date_header)
+        except (TypeError, ValueError):
+            return
+        local = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=rtt / 2)
+        self.clock_skew_s = round((server - local).total_seconds(), 2)
+        level = logger.warning if abs(self.clock_skew_s) >= 2.0 else logger.info
+        level(f"[KISClient] 시계 오차 {self.clock_skew_s:+.2f}s (증권사 서버 - 로컬)"
+              + (" — 2초 이상이다. 시간 동기화(w32tm/chrony)를 확인하라" if abs(self.clock_skew_s) >= 2.0 else ""))
 
     # ------------------------------------------------------------------ 시세 API
     async def inquire_price(self, symbol: str) -> Dict[str, Any]:
@@ -409,6 +462,7 @@ class KISClient(AbstractBroker):
             body=body,
             priority=PRIORITY_ORDER,
             use_hashkey=True,
+            idempotent=False,          # 이중 주문 방지 — `_request` 참고
         )
         if is_ok(payload):
             out = payload.get("output") or {}

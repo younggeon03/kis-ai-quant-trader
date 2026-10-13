@@ -38,7 +38,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-from api.base import AbstractBroker, is_ok, to_int
+from api.base import UNKNOWN_RESULT_CODE, AbstractBroker, is_ok, to_int
 from api.factory import create_broker
 from config.settings import Settings, get_settings
 from core.events import (
@@ -1379,6 +1379,16 @@ class TradingEngine:
             return False
 
         if not ack.success:
+            if ack.msg_cd == UNKNOWN_RESULT_CODE:
+                # 응답을 못 받았다 — 접수됐을 수도 있다. 재전송하지 않고 **즉시 대조**한다.
+                # 접수됐다면 미체결 목록에 잡혀 `open_orders`로 들어오고(이후 같은 종목 중복
+                # 주문을 막는다), 체결됐다면 잔고에 잡힌다.
+                logger.error(f"[주문불명] {side.value} {symbol} {qty}주 — 미체결·잔고 즉시 대조")
+                self.ledger.write("order_unknown", {"symbol": symbol, "side": side.value,
+                                                    "qty": qty, "price": limit_price})
+                await self._sync_open_orders()
+                await self._sync_portfolio()
+                return False
             logger.error(f"[주문거부] {side.value} {symbol} {qty}주 :: {ack.msg_cd} {ack.msg}")
             self.ledger.write("order_reject", {"symbol": symbol, "side": side.value,
                                                "qty": qty, "msg": ack.msg, "code": ack.msg_cd})
@@ -2253,6 +2263,13 @@ class TradingEngine:
                 "rate_limiter": limiter.snapshot() if limiter else {},
                 "websocket": self.ws.snapshot() if self.ws else {"connected": False},
                 "auth": auth.snapshot() if auth else {},
+                # 외부 API(TR)별 왕복 지연 p50/p95/p99 · 오류 — `core/latency.py`
+                "http_latency": (self.broker.http_stats.snapshot()
+                                 if getattr(self.broker, "http_stats", None) else {}),
+                "http_latency_prom": (self.broker.http_stats.prometheus()
+                                      if getattr(self.broker, "http_stats", None) else []),
+                "event_dropped": self.bus.dropped,
+                "clock_skew_s": getattr(self.broker, "clock_skew_s", None),
             },
         }
 

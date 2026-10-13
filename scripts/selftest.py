@@ -80,6 +80,11 @@ def check(name: str):
     return wrapper
 
 
+import tempfile as _tempfile
+
+_SELFTEST_TMP = Path(_tempfile.mkdtemp(prefix="bankis_selftest_"))
+
+
 def make_settings() -> Settings:
     """테스트 전용 경량 설정(종목 수/봉 수 축소)."""
     s = get_settings()
@@ -108,6 +113,14 @@ def make_settings() -> Settings:
                 "PHASE1_TOP_K", "PHASE2_TOP_K"):
         if key in fields:
             setattr(s, key, fields[key].default)
+    # --- 실거래 파일과 격리한다 ---
+    #
+    # 셀프테스트가 `TradingEngine`을 만들면 원장(`logs/ledger.jsonl`)·상태 파일·로그에 기록한다.
+    # 실거래 중에 셀프테스트를 돌렸더니 **대회 근거자료인 원장에 테스트 기록 65건이 섞였다**
+    # (2026-10-13 — 체결은 0건이라 요건 집계는 무사). 그래서 항상 임시 폴더로 돌린다.
+    s.LEDGER_PATH = str(_SELFTEST_TMP / "ledger.jsonl")
+    s.LOG_DIR = str(_SELFTEST_TMP / "logs")
+    s.STATE_DIR = str(_SELFTEST_TMP / "state")
     return s
 
 
@@ -2031,10 +2044,142 @@ async def test_compliance_trades():
             "하루 1회 매수 · 당일 청산 모두 작동")
 
 
+@check("26. 서버 신뢰성 (주문 멱등성·무손실 채널·지연 지표·시계 오차)")
+async def test_server_reliability():
+    """실무 백엔드 관점의 장치 넷 — 네트워크 없이 httpx MockTransport 로 검증한다.
+
+    (1) 주문은 '결과를 모르는' 실패(읽기 타임아웃·5xx)에 재시도하지 않는다 — 이중 주문 방지.
+        접속 실패(요청이 나가지 않음)는 재시도한다. 시세 조회는 멱등이라 재시도한다.
+    (2) 시세가 폭주해 큐가 넘쳐도 체결 이벤트는 버려지지 않는다.
+    (3) 지연 히스토그램의 분위수와 Prometheus 출력.
+    (4) 증권사 `Date` 헤더로 시계 오차를 잰다.
+    """
+    import datetime as dt
+
+    import httpx
+
+    from api.base import UNKNOWN_RESULT_CODE
+    from api.client import KISClient
+    from core.events import EventBus
+    from core.latency import LatencyStats
+
+    s = get_settings()
+    saved = {k: getattr(s, k) for k in ("HTTP_MAX_RETRY", "HTTP_BACKOFF_BASE", "DRY_RUN")}
+    try:
+        s.HTTP_MAX_RETRY, s.HTTP_BACKOFF_BASE, s.DRY_RUN = 3, 0.0, False
+
+        def client_with(handler):
+            c = KISClient(s)
+            c._client = httpx.AsyncClient(base_url="https://kis.test",
+                                          transport=httpx.MockTransport(handler))
+
+            async def _headers(tr_id, hashkey=None):
+                return {"tr_id": tr_id}
+
+            async def _hashkey(body):
+                return "h"
+            c._headers, c._hashkey = _headers, _hashkey
+            return c
+
+        ok_body = {"rt_cd": "0", "msg_cd": "MCA00000", "msg1": "ok", "output": {"ODNO": "1"}}
+
+        # (1-a) 주문 + 읽기 타임아웃 → 재시도하지 않고 결과 불명
+        calls = {"n": 0}
+
+        def read_timeout(request):
+            calls["n"] += 1
+            raise httpx.ReadTimeout("응답 대기 초과", request=request)
+        c = client_with(read_timeout)
+        r = await c._request("POST", "/order", "TTTC0802U", body={"a": 1}, idempotent=False)
+        assert calls["n"] == 1 and r.get("msg_cd") == UNKNOWN_RESULT_CODE, \
+            f"주문이 읽기 타임아웃 뒤 재시도됐다(이중 주문 위험): 호출 {calls['n']}회 {r.get('msg_cd')}"
+
+        # (1-b) 주문 + 접속 실패(요청이 나가지 않음) → 재시도해서 성공
+        calls["n"] = 0
+
+        def connect_then_ok(request):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise httpx.ConnectError("접속 실패", request=request)
+            return httpx.Response(200, json=ok_body)
+        c = client_with(connect_then_ok)
+        r = await c._request("POST", "/order", "TTTC0802U", body={"a": 1}, idempotent=False)
+        assert calls["n"] == 2 and r.get("rt_cd") == "0", "접속 실패는 재시도해야 한다(요청이 나가지 않았다)"
+
+        # (1-c) 주문 + 5xx → 결과 불명(재시도 안 함)
+        calls["n"] = 0
+
+        def server_error(request):
+            calls["n"] += 1
+            return httpx.Response(500, json={"rt_cd": "1", "msg_cd": "E500", "msg1": "err"})
+        c = client_with(server_error)
+        r = await c._request("POST", "/order", "TTTC0802U", body={"a": 1}, idempotent=False)
+        assert calls["n"] == 1 and r.get("msg_cd") == UNKNOWN_RESULT_CODE, "주문 5xx 를 재시도했다"
+
+        # (1-d) 시세 조회(멱등) + 읽기 타임아웃 → 재시도
+        calls["n"] = 0
+
+        def timeout_then_ok(request):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise httpx.ReadTimeout("x", request=request)
+            return httpx.Response(200, json=ok_body,
+                                  headers={"date": "Tue, 13 Oct 2026 08:00:00 GMT"})
+        c = client_with(timeout_then_ok)
+        r = await c._request("GET", "/quote", "FHKST01010100", params={})
+        assert calls["n"] == 2 and r.get("rt_cd") == "0", "멱등한 조회는 재시도해야 한다"
+        snap = c.http_stats.snapshot()["FHKST01010100"]
+        assert snap["count"] == 2 and snap["errors"] == 1, f"지연 지표 기록 오류: {snap}"
+        # (4) 시계 오차 — 서버 08:00:00 UTC 를 기준으로 로컬과의 차이를 낸다
+        assert c.clock_skew_s is not None, "Date 헤더로 시계 오차를 재지 않았다"
+        for v in (c._client,):
+            await v.aclose()
+
+        # (2) 무손실 채널 — 손실 채널을 넘치게 해도 체결은 다 온다
+        bus = EventBus(maxsize=5)
+        got_fills, got_quotes = [], []
+
+        async def on_fill(x):
+            got_fills.append(x)
+
+        async def on_quote(x):
+            got_quotes.append(x)
+        bus.subscribe("fill", on_fill)
+        bus.subscribe("quote", on_quote)
+        for i in range(50):
+            await bus.publish("quote", i)
+            if i % 10 == 0:
+                await bus.publish("fill", f"F{i}")
+        bus.start()
+        for _ in range(50):
+            await asyncio.sleep(0)
+            if len(got_fills) == 5 and not bus.pending:
+                break
+        await bus.stop()
+        assert got_fills == ["F0", "F10", "F20", "F30", "F40"], f"체결 이벤트가 유실됐다: {got_fills}"
+        assert bus.dropped == 45 and got_quotes == list(range(45, 50)), \
+            f"손실 채널은 최신 5개만 남겨야 한다: dropped={bus.dropped} quotes={got_quotes}"
+
+        # (3) 히스토그램 분위수·Prometheus
+        ls = LatencyStats()
+        for ms in [20] * 90 + [400] * 9 + [3000]:
+            ls.observe("TR", ms / 1000)
+        q = ls.snapshot()["TR"]
+        assert q["p50_ms"] == 25.0 and q["p95_ms"] == 500.0 and q["p99_ms"] == 500.0 \
+            and q["max_ms"] == 3000.0, f"분위수 오류: {q}"
+        prom = "\n".join(ls.prometheus())
+        assert 'kis_http_request_seconds_bucket{tr="TR",le="+Inf"} 100' in prom, "Prometheus 누적 버킷 오류"
+    finally:
+        for k, v in saved.items():
+            setattr(s, k, v)
+    return ("주문 읽기 타임아웃·5xx 재시도 안 함(결과 불명) · 접속 실패 재시도 · 조회 재시도 · "
+            "무손실 체결 채널 · 히스토그램 분위수·Prometheus · Date 헤더 시계 오차 모두 작동")
+
+
 # ============================================================ 실행
 
 async def run_all() -> int:
-    setup_logging("logs", "WARNING")
+    setup_logging(str(_SELFTEST_TMP / "logs"), "WARNING")   # 실거래 로그와 섞지 않는다
     tests = [
         test_settings, test_market_rules, test_indicators,
         test_rate_limiter, test_priority, test_mock_broker,
@@ -2044,6 +2189,7 @@ async def run_all() -> int:
         test_intraday, test_intraday_book, test_decay_exits,
         test_orderbook_recorder, test_burst_wiring, test_opening_entry,
         test_sliding, test_sliding_wiring, test_compliance_trades,
+        test_server_reliability,
     ]
     print("\n" + "=" * 86)
     print(" KIS AI Quant Trader — 셀프 테스트")

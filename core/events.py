@@ -380,15 +380,28 @@ Handler = Callable[[Any], Awaitable[None]]
 
 
 class EventBus:
-    """토픽 기반 비동기 이벤트 버스.
+    """토픽 기반 비동기 이벤트 버스 — **채널 두 개**.
+
+    | 채널 | 토픽 | 가득 차면 |
+    |---|---|---|
+    | 무손실 | `fill` · `order` | 버리지 않는다(크기 제한 없음 — 하루 수십 건) |
+    | 손실 허용 | `quote` · `signal` · 나머지 | 가장 오래된 것을 버린다(최신 값만 의미) |
+
+    예전에는 한 큐였고 가득 차면 **토픽과 무관하게** 가장 오래된 이벤트를 버렸다 — 시세 폭주로
+    큐가 차면 체결 이벤트가 버려져 포지션 장부가 브로커와 어긋날 수 있었다(2026-10-13 수정).
+    채널마다 소비자가 따로 돌아 시세가 밀려도 체결 처리가 늦어지지 않는다.
 
     구독자 예외가 전체 루프를 멈추지 않도록 각 핸들러를 개별 보호한다.
     """
 
+    LOSSLESS_TOPICS = frozenset({"fill", "order"})
+
     def __init__(self, maxsize: int = 10_000):
-        self._queue: asyncio.Queue = asyncio.Queue(maxsize=maxsize)
+        self._queue: asyncio.Queue = asyncio.Queue(maxsize=maxsize)       # 손실 허용
+        self._critical: asyncio.Queue = asyncio.Queue()                    # 무손실
         self._handlers: Dict[str, List[Handler]] = defaultdict(list)
         self._task: Optional[asyncio.Task] = None
+        self._task_critical: Optional[asyncio.Task] = None
         self._running = False
         self.dropped = 0
 
@@ -396,10 +409,13 @@ class EventBus:
         self._handlers[topic].append(handler)
 
     async def publish(self, topic: str, payload: Any) -> None:
+        if topic in self.LOSSLESS_TOPICS:
+            self._critical.put_nowait((topic, payload))
+            return
         try:
             self._queue.put_nowait((topic, payload))
         except asyncio.QueueFull:
-            # 시세 폭주 시 최신성이 중요하므로 가장 오래된 이벤트를 버린다.
+            # 시세 폭주 시 최신성이 중요하므로 가장 오래된 이벤트를 버린다(이 채널에는 체결이 없다).
             try:
                 self._queue.get_nowait()
                 self._queue.task_done()
@@ -408,12 +424,12 @@ class EventBus:
             except (asyncio.QueueEmpty, asyncio.QueueFull):
                 self.dropped += 1
 
-    async def _consume(self) -> None:
+    async def _consume(self, queue: asyncio.Queue) -> None:
         from utils.logger import logger
 
         while self._running:
             try:
-                topic, payload = await self._queue.get()
+                topic, payload = await queue.get()
             except asyncio.CancelledError:
                 break
             try:
@@ -425,26 +441,30 @@ class EventBus:
                     except Exception as exc:
                         logger.exception(f"[EventBus] 핸들러 오류 topic={topic}: {exc}")
             finally:
-                self._queue.task_done()
+                queue.task_done()
 
     def start(self) -> None:
         if self._task is None:
             self._running = True
-            self._task = asyncio.create_task(self._consume(), name="event-bus")
+            self._task = asyncio.create_task(self._consume(self._queue), name="event-bus")
+            self._task_critical = asyncio.create_task(self._consume(self._critical),
+                                                      name="event-bus-critical")
 
     async def stop(self) -> None:
         self._running = False
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except (asyncio.CancelledError, Exception):
-                pass
-            self._task = None
+        for task in (self._task, self._task_critical):
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+        self._task = None
+        self._task_critical = None
 
     @property
     def pending(self) -> int:
-        return self._queue.qsize()
+        return self._queue.qsize() + self._critical.qsize()
 
 
 # 토픽 상수

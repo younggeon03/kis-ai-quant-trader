@@ -24,6 +24,8 @@ from core.events import Fill, OrderAck, OrderRequest, OrderType, Position, Quote
 # 유량 초과 관련 메시지 코드
 RATE_LIMIT_CODES = {"EGW00201", "EGW00202"}
 TOKEN_ERROR_CODES = {"EGW00121", "EGW00123", "EGW00133"}
+# 주문 결과 불명 — 응답을 못 받아 접수 여부를 모른다. 재시도하지 않고 미체결·잔고로 확인한다.
+UNKNOWN_RESULT_CODE = "LOCAL_UNKNOWN"
 
 
 class KISAPIError(RuntimeError):

@@ -592,6 +592,20 @@ def create_app(state_provider: StateProvider, settings=None):
             "# TYPE kis_kill_switches counter",
             f"kis_kill_switches {r.get('kill_switches', 0)}",
         ]
+        sysd = state.get("system", {}) or {}
+        lines += [
+            "# HELP kis_event_dropped 손실 허용 채널에서 버린 이벤트(시세) 누적",
+            "# TYPE kis_event_dropped counter",
+            f"kis_event_dropped {sysd.get('event_dropped', 0)}",
+            "# HELP kis_rate_limit_wait_ms 유량 제어 평균 대기(ms)",
+            "# TYPE kis_rate_limit_wait_ms gauge",
+            f"kis_rate_limit_wait_ms {rl.get('avg_wait_ms', 0)}",
+        ]
+        if sysd.get("clock_skew_s") is not None:
+            lines += ["# HELP kis_clock_skew_seconds 증권사 서버 시각 - 로컬 시각",
+                      "# TYPE kis_clock_skew_seconds gauge",
+                      f"kis_clock_skew_seconds {sysd['clock_skew_s']}"]
+        lines += list(sysd.get("http_latency_prom") or [])
         return "\n".join(lines) + "\n"
 
     return app

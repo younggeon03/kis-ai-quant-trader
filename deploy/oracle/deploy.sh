@@ -58,6 +58,8 @@ case "$MODE" in
     ;;
   status)
     "${SSH[@]}" "systemctl is-active bankis.service; tail -n 15 ~/bankis/logs/trader.log 2>/dev/null || tail -n 15 ~/bankis/logs/service.log"
+    # 지연·유량·시계 오차 지표(Prometheus 형식) — 대시보드는 SSH 터널로
+    "${SSH[@]}" "curl -s 127.0.0.1:8500/metrics | grep -E 'clock_skew|rate_limit|event_dropped|_count' | head -20" || true
     ;;
   *) echo "모드: setup | switch | code | status"; exit 1 ;;
 esac

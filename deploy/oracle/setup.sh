@@ -12,7 +12,10 @@ APP="$HOME/bankis"
 
 sudo timedatectl set-timezone Asia/Seoul
 sudo apt-get update -y
-sudo apt-get install -y curl ca-certificates build-essential
+sudo apt-get install -y curl ca-certificates build-essential chrony logrotate
+
+# --- 시간 동기화 — 09:10 판정·진입이 서버 시계로 돈다. 엔진도 증권사 Date 헤더로 오차를 잰다 ---
+sudo systemctl enable --now chrony
 
 if ! command -v uv >/dev/null 2>&1; then
   curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -40,6 +43,11 @@ Environment=PYTHONIOENCODING=utf-8
 ExecStart=$APP/.venv/bin/python main.py
 Restart=always
 RestartSec=30
+# 종료(SIGTERM) 때 엔진이 미체결 취소·상태 저장을 끝낼 시간을 준다(main.shutdown)
+TimeoutStopSec=60
+# 메모리 상한 — 실측 RSS 약 250MB. 누수가 나면 시스템 전체가 아니라 이 서비스만 재시작된다
+MemoryMax=2G
+LimitNOFILE=65536
 StandardOutput=append:$APP/logs/service.log
 StandardError=append:$APP/logs/service.err
 
@@ -53,6 +61,37 @@ if ! swapon --show | grep -q swapfile; then
   sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
   echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null
 fi
+
+# --- 비밀파일 권한 — KIS 앱키·계좌가 들어 있다 ---
+[ -f "$APP/.env" ] && chmod 600 "$APP/.env"
+
+# --- 로그 순환 — 하루 단위 30일 보관·압축. copytruncate: 엔진을 재시작하지 않고 자른다 ---
+sudo tee /etc/logrotate.d/bankis >/dev/null <<EOF
+$APP/logs/*.log $APP/logs/*.err {
+    daily
+    rotate 30
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
+EOF
+
+# --- 커널 — 죽은 연결을 2시간이 아니라 약 2분 안에 정리(증권사 세션·WebSocket) ---
+sudo tee /etc/sysctl.d/90-bankis.conf >/dev/null <<EOF
+net.ipv4.tcp_keepalive_time = 60
+net.ipv4.tcp_keepalive_intvl = 10
+net.ipv4.tcp_keepalive_probes = 6
+net.core.somaxconn = 1024
+EOF
+sudo sysctl --system >/dev/null
+
+# --- 원장·상태 백업 — 대회 근거자료. 장 마감 뒤 매일 압축 보관(30일) ---
+mkdir -p "$HOME/backups"
+( crontab -l 2>/dev/null | grep -v bankis-backup;
+  echo "40 15 * * 1-5 tar -czf \$HOME/backups/bankis-\$(date +\%Y\%m\%d).tgz -C $APP logs/ledger.jsonl state 2>/dev/null; find \$HOME/backups -name 'bankis-*.tgz' -mtime +30 -delete  # bankis-backup"
+) | crontab -
 
 .venv/bin/python -c "import numpy, pandas, sklearn, lightgbm; print('패키지 OK', numpy.__version__, sklearn.__version__, lightgbm.__version__)"
 # 키 로그인이 확인된 상태(이 스크립트가 키로 실행되고 있다)이므로 비밀번호 로그인을 끈다.
