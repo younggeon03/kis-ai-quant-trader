@@ -1599,6 +1599,21 @@ async def test_opening_entry():
     import main as main_mod
     assert main_mod.RULE_TRIGGER_SCORE >= Settings.model_fields["SIGNAL_BUY_THRESHOLD"].default,         "규칙 진입 점수가 모델 문턱보다 낮다 — 측정에 없는 필터가 생긴다"
 
+    # --- 3-2) 복수시세 파서: 30종목씩 나눠 요청 · KIS 필드명 해석 ---
+    calls_ = []
+
+    async def _multi(symbols):
+        calls_.append(list(symbols))
+        return {"rt_cd": "0", "msg_cd": "", "msg1": "", "output": [
+            {"inter_shrn_iscd": c, "inter2_prpr": "1000", "acml_vol": "10",
+             "acml_tr_pbmn": "12345"} for c in symbols]}
+    fake2 = types.SimpleNamespace(inquire_multi_price=_multi)
+    syms_ = [f"{i:06d}" for i in range(65)]
+    tq = await AbstractBroker.get_turnovers(fake2, syms_)
+    assert [len(c) for c in calls_] == [30, 30, 5], f"30종목씩 나눠 요청하지 않았다: {[len(c) for c in calls_]}"
+    assert len(tq) == 65 and tq["000007"]["turnover"] == 12345.0 and tq["000007"]["price"] == 1000.0, \
+        "복수시세 필드(inter_shrn_iscd·inter2_prpr·acml_tr_pbmn) 해석 오류"
+
     # --- 4) 엔진 배선 ---
     s = get_settings()
     keys = ("USE_INTRADAY", "INTRADAY_ENTRY_MODE", "OPENING_WINDOW_MIN", "OPENING_MULT",
@@ -1626,6 +1641,13 @@ async def test_opening_entry():
         class _Broker:
             def __init__(self):
                 self.minute_calls = []
+                self.turnover_calls = 0
+
+            async def get_turnovers(self, symbols):
+                # 복수시세 — 장 시작부터 지금까지의 누적 거래대금(5분치 = 500만 x 배수)
+                self.turnover_calls += 1
+                return {c: {"price": 10_000.0, "acml_vol": 0.0, "turnover": 5e6 * mult[c]}
+                        for c in symbols}
 
             async def get_minute_bars(self, symbol, hour):
                 self.minute_calls.append((symbol, hour))
@@ -1654,8 +1676,9 @@ async def test_opening_entry():
         eng._submit = _submit
 
         await eng._opening_scan(dt.datetime(2026, 10, 12, 9, 5, 1))
-        assert all(h == "090500" for _, h in eng.broker.minute_calls), "분봉 조회 시각이 09:05가 아니다"
-        assert codes[4] not in [c for c, _ in eng.broker.minute_calls], "보유 종목을 판정했다"
+        # 판정은 복수시세 한 번(30종목/호출)이다 — 종목마다 분봉을 받으면 5분이 걸린다
+        assert eng.broker.turnover_calls == 1 and not eng.broker.minute_calls, \
+            "판정에 분봉을 종목마다 받았다(복수시세여야 한다 — day_avg 는 기록도 하지 않는다)"
         picks = [c for c, _ in eng._opening_picks]
         assert picks == [codes[0], codes[2], codes[1]], f"배수 큰 순·문턱 적용 오류: {picks}"
 
@@ -1715,6 +1738,9 @@ async def test_opening_entry():
             assert all(len(eng2._opening_hist[c]) == 20 for c in codes), "과거 20일 적재 실패"
             assert abs(eng2._opening_hist[codes[0]][-1] - 5e6) < 1.0, "과거 구간 거래대금 계산 오류"
             await eng2._opening_scan(dt.datetime(2026, 10, 12, 9, 5, 1))
+            assert eng2._opening_hist[codes[0]][-1] == 5e6, \
+                "판정 직후 기준선에 오늘이 들어갔다(기록은 진입 뒤여야 한다)"
+            await eng2._opening_record_task                           # 진입 뒤 기록
             got_picks = dict(eng2._opening_picks)
             assert abs(got_picks.get(codes[0], 0) - 20.0) < 1e-6,                 f"기준선에 오늘이 섞였거나 배수가 틀렸다: {got_picks}"
             assert codes[4] not in got_picks, "보유 종목을 후보로 올렸다"
@@ -1727,17 +1753,19 @@ async def test_opening_entry():
             eng3.broker, eng3.universe, eng3._prev_daily = _Broker(), codes, {}
             eng3._load_opening_history("20261012")
             await eng3._opening_scan(dt.datetime(2026, 10, 12, 9, 6))
+            await eng3._opening_record_task
             d_ = pd.read_csv(Path(tmp) / f"{codes[0]}.csv", dtype={"ts": str})
             assert (d_["ts"].str[:8] == "20261012").sum() == 5, "같은 날을 두 번 기록했다"
             # 기준선이 10일 미만이면 발동하지 않는다
             eng3._opening_hist = {c: [5e6] * 9 for c in codes}
             await eng3._opening_scan(dt.datetime(2026, 10, 13, 9, 5))
+            eng3._opening_record_task.cancel()
             assert not eng3._opening_picks, "기준선 9일인데 발동했다(최소 10일)"
     finally:
         for k, v in saved.items():
             setattr(s, k, v)
     return ("창 경계(09:00~09:0N-1) · 측정과 같은 함수 · KIS 분봉 파서(분 단위·분당 체결량) · "
-            "판정→지연 후 1회 진입(배수 순·빈 슬롯·보유 제외·전날 결과 차단) · "
+            "복수시세 1회 판정 · 판정→지연 후 1회 진입(배수 순·빈 슬롯·보유 제외·전날 결과 차단) · "
             "시세 1건 미발동 · 보유만 시세 조회 · same_window(측정과 같은 값·판정 후 기록·"
             "보유 기록·중복 기록 없음·10일 미만 미발동) 모두 작동")
 

@@ -39,6 +39,7 @@ TR_MAP: Dict[str, Tuple[str, str]] = {
     "inquire_asking_price": ("FHKST01010200", "FHKST01010200"),
     "inquire_daily_chart": ("FHKST03010100", "FHKST03010100"),
     "inquire_minute_chart": ("FHKST03010200", "FHKST03010200"),
+    "inquire_multi_price": ("FHKST11300006", "FHKST11300006"),   # 관심종목 복수시세(30종목)
     "inquire_investor": ("FHKST01010900", "FHKST01010900"),
 }
 

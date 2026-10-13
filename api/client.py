@@ -262,6 +262,19 @@ class KISClient(AbstractBroker):
             priority=PRIORITY_QUOTE,
         )
 
+    async def inquire_multi_price(self, symbols: List[str]) -> Dict[str, Any]:
+        params: Dict[str, str] = {}
+        for i, code in enumerate(list(symbols)[:30], 1):
+            params[f"FID_COND_MRKT_DIV_CODE_{i}"] = "J"
+            params[f"FID_INPUT_ISCD_{i}"] = code
+        return await self._request(
+            "GET",
+            "/uapi/domestic-stock/v1/quotations/intstock-multprice",
+            self.settings.tr("inquire_multi_price"),
+            params=params,
+            priority=PRIORITY_QUOTE,
+        )
+
     async def inquire_minute_chart(self, symbol: str, hour: str = "", past: bool = True) -> Dict[str, Any]:
         hour = hour or dt.datetime.now(tz=KST).strftime("%H%M%S")
         return await self._request(

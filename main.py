@@ -165,6 +165,7 @@ class TradingEngine:
         self._opening_day: str = ""                      # 판정을 시작한 날
         self._opening_task: Optional[asyncio.Task] = None
         self._opening_picks: Optional[List[tuple]] = None  # [(종목, 배수)] 배수 큰 순
+        self._opening_record_task: Optional[asyncio.Task] = None  # 기준선 분봉 기록(진입 뒤)
         self._opening_done_day: str = ""                 # 진입을 처리한 날
         # same_window 기준선 — 종목 → 지난 거래일들의 09:00~09:0N 거래대금(오래된 것부터, 최대 20)
         self._opening_hist: Dict[str, List[float]] = {}
@@ -192,6 +193,7 @@ class TradingEngine:
         # 신호 캐시. 일봉 전략이므로 봉이 바뀔 때만 재계산한다(아래 _current_signals 참고).
         self._signals: List[Signal] = []
         self._signals_bar_ts: str = ""
+        self._signals_failed_ts: str = ""   # 신호 계산이 실패한 봉 — 같은 봉에서 재시도하지 않는다
         self._started_at: Optional[dt.datetime] = None
 
     # ================================================================== 시간
@@ -709,15 +711,20 @@ class TradingEngine:
         del h[:-20]
 
     async def _opening_scan(self, now: dt.datetime) -> None:
-        """09:0N에 유니버스 전 종목의 당일 분봉을 받아 장 시작 N분 거래대금을 판정한다.
+        """09:0N 직후 유니버스 전 종목의 **누적 거래대금을 복수시세로 한꺼번에** 받아 판정한다.
 
-        **분봉을 받는 이유:** 누적 거래량(`acml_vol`) x 현재가로 근사하면 조회 시각까지의
-        거래가 섞인다 — 284종목을 도는 데 약 2.6분이 걸려 종목마다 창이 달라진다. 분봉의
-        09:00~09:0(N-1)만 합하면 측정(`scripts/opening_study.py`)과 같은 창이 된다.
+        ## 왜 복수시세인가 (2026-10-13)
+
+        예전에는 종목마다 당일분봉을 받았다. KIS 모의투자의 **실효 유량은 초당 약 1건**이라
+        (1.0건 거절 0 · 1.2건 30중 5 · 1.5건 30중 10 · 1.8건 30중 13 — 실측) 284종목에 약 5분이
+        걸려 진입이 09:15로 밀렸다. 복수시세(`FHKST11300006`)는 30종목/호출이라 10번, 약 10초다.
+
+        `acml_tr_pbmn`(장 시작부터의 실제 체결대금)을 09:0N 직후에 읽으므로 측정의 "09:00~09:0(N-1)
+        분봉 종가 x 거래량 합"과 정의가 거의 같다(차이는 조회까지의 몇 초와 분봉 근사).
         판정은 `strategy/opening.py` 순수 함수가 한다(측정과 같은 코드).
 
-        결과(`_opening_picks`)는 배수가 큰 순이다. 진입은 `_tick`이 09:(N+지연)부터 한 번
-        처리한다. 실패해도 하루 한 번만 시도한다(`_opening_day`).
+        **내일 기준선용 분봉 기록은 진입 뒤로 미룬다**(`_record_opening_history`). 기록은 종목마다
+        분봉이 필요해 5분이 걸리므로, 판정 앞에 두면 진입이 다시 늦어진다.
         """
         n = int(self.s.OPENING_WINDOW_MIN)
         day = now.strftime("%Y%m%d")
@@ -725,13 +732,41 @@ class TradingEngine:
         held = set(self.portfolio.open_positions())
         same = self.s.OPENING_BASELINE == "same_window"
         ratios: Dict[str, float] = {}
-        checked = 0
-        # **보유 종목도 조회한다** — 사지는 않지만 오늘 분봉을 기록해야 내일 기준선이 이어진다.
-        for symbol in self.universe:
+        quotes = await self.broker.get_turnovers(list(self.universe))
+        for symbol, q in quotes.items():
+            if q.get("price", 0) > 0:
+                self.latest_prices[symbol] = float(q["price"])
+            if symbol in held:
+                continue
+            tv = float(q.get("turnover", 0.0))
             vals = self._prev_daily.get(symbol)
             med20 = vals[2] if vals and len(vals) > 2 else 0.0
-            if not same and (symbol in held or med20 <= 0):
-                continue              # day_avg 는 기록하지 않으므로 보유 종목을 볼 이유가 없다
+            r = (same_window_ratio(tv, self._opening_hist.get(symbol, [])) if same
+                 else opening_ratio(tv, med20, n))
+            if r > 0:
+                ratios[symbol] = r
+        picks = rank_triggers(ratios, float(self.s.OPENING_MULT))
+        self._opening_picks = picks
+        top = ", ".join(f"{s_} x{r:.1f}" for s_, r in picks[:5]) or "없음"
+        logger.info(f"[장중·개장] 09:00~{hour[:2]}:{hour[2:4]} 판정 {len(quotes)}종목 "
+                    f"({self.s.OPENING_BASELINE} · 복수시세 {self._now().strftime('%H:%M:%S')}) → "
+                    f"발동 {len(picks)}건 (x{self.s.OPENING_MULT:g} 이상 · 상위: {top})")
+        self.ledger.write("opening_scan", {
+            "window_min": n, "mult": float(self.s.OPENING_MULT), "checked": len(quotes),
+            "baseline": self.s.OPENING_BASELINE,
+            "picks": [{"symbol": s_, "ratio": round(r, 3)} for s_, r in picks[:20]]})
+        if same:
+            self._opening_record_task = asyncio.create_task(self._record_opening_history(day, hour))
+
+    async def _record_opening_history(self, day: str, hour: str) -> None:
+        """오늘 09:00~09:0(N-1) 분봉을 받아 기준선 파일에 붙인다(진입 뒤 백그라운드).
+
+        기준선은 측정과 같은 정의(분봉 종가 x 거래량 합)로 이어져야 한다 — 그래서 판정에 쓴
+        복수시세 값이 아니라 분봉으로 기록한다. 시세 P2라 주문을 밀지 않는다.
+        """
+        n = int(self.s.OPENING_WINDOW_MIN)
+        done = 0
+        for symbol in list(self.universe):
             try:
                 bars = await self.broker.get_minute_bars(symbol, hour)
             except Exception as exc:
@@ -740,32 +775,15 @@ class TradingEngine:
             bars = bars[bars["ts"].astype(str).str[:8] == day] if not bars.empty else bars
             if bars.empty:
                 continue
-            checked += 1
             mi = minute_index(bars["ts"])
             tv = window_turnover(mi, bars["close"].to_numpy(float),
                                  bars["volume"].to_numpy(float), n)
-            # 판정은 **기록 전에** 한다 — 기준선에 오늘이 섞이면 안 된다(측정의 shift(1)).
-            if symbol not in held:
-                r = (same_window_ratio(tv, self._opening_hist.get(symbol, [])) if same
-                     else opening_ratio(tv, med20, n))
-                if r > 0:
-                    ratios[symbol] = r
-            if same:
-                self._record_opening_bars(symbol, day, bars[(mi >= 0) & (mi < n)], tv)
-            # 시각 표기(시작/끝) 확인용 — 첫 종목의 봉 시각을 남긴다(실서버 첫날 확인)
-            if checked == 1:
+            self._record_opening_bars(symbol, day, bars[(mi >= 0) & (mi < n)], tv)
+            done += 1
+            if done == 1:   # 시각 표기(시작/끝) 확인용 — 실서버 첫날 확인
                 logger.info(f"[장중·개장] 분봉 시각 확인 {symbol}: "
                             f"{', '.join(bars['ts'].astype(str).str[8:12].tolist()[:8])}")
-        picks = rank_triggers(ratios, float(self.s.OPENING_MULT))
-        self._opening_picks = picks
-        top = ", ".join(f"{s_} x{r:.1f}" for s_, r in picks[:5]) or "없음"
-        logger.info(f"[장중·개장] 09:00~{hour[:2]}:{hour[2:4]} 판정 {checked}종목 "
-                    f"({self.s.OPENING_BASELINE}) → 발동 {len(picks)}건 "
-                    f"(x{self.s.OPENING_MULT:g} 이상 · 상위: {top})")
-        self.ledger.write("opening_scan", {
-            "window_min": n, "mult": float(self.s.OPENING_MULT), "checked": checked,
-            "baseline": self.s.OPENING_BASELINE,
-            "picks": [{"symbol": s_, "ratio": round(r, 3)} for s_, r in picks[:20]]})
+        logger.info(f"[장중·개장] 기준선 분봉 기록 {done}/{len(self.universe)}종목 ({day})")
 
     async def _opening_entries(self, now: dt.datetime, prices: Dict[str, float]) -> None:
         """판정 결과로 **하루 한 번** 빈 슬롯을 채운다.
@@ -1858,6 +1876,17 @@ class TradingEngine:
         그래서 `_last_bar_ts`가 달라졌을 때만 재계산한다. 봉 재적재는
         `BAR_REFRESH_LOOPS` 주기로 일어나므로 하루 1회 수준이다.
         """
+        # **규칙 진입 모드(opening·sliding)에서는 일봉 신호를 계산하지 않는다** (2026-10-13).
+        #
+        # 그 모드에서 신호는 진입에 쓰이지 않는다 — 손절선은 ATR 이 있든 없든 25%로 같고(넓은 쪽을
+        # 쓴다), 사이징은 고정 비중, 신호 반전 청산은 꺼져 있다. 그런데 계산은 실서버에서 **실패**한다:
+        # KIS 일봉 조회가 한 번에 100봉만 주는데 피처가 120봉 이상을 요구한다(`index -120 is out of
+        # bounds ... size 100`). 실패하면 매 루프 다시 시도해 장중 루프가 약 20초씩 멈췄을 것이다.
+        if self._rule_entry_mode():
+            return []
+        # 같은 봉에서 이미 실패했으면 다시 시도하지 않는다(매 루프 수십 초씩 막힌다)
+        if self._signals_failed_ts and self._signals_failed_ts == self._last_bar_ts:
+            return self._signals
         if self._signals and self._signals_bar_ts == self._last_bar_ts:
             return self._signals
         # 장중 전략에서는 **한 번 계산하면 그날은 다시 하지 않는다.**
@@ -1877,6 +1906,7 @@ class TradingEngine:
         except Exception as exc:
             self._errors += 1
             logger.exception(f"[Engine] 신호 생성 실패: {exc}")
+            self._signals_failed_ts = self._last_bar_ts
             return self._signals          # 직전 신호를 유지한다(빈 목록으로 떨어뜨리지 않는다)
         self._signals = signals
         self._signals_bar_ts = self._last_bar_ts
@@ -2001,6 +2031,8 @@ class TradingEngine:
             self._scan_task.cancel()
         if self._opening_task is not None and not self._opening_task.done():
             self._opening_task.cancel()        # 같은 이유 — 284종목 분봉 조회
+        if self._opening_record_task is not None and not self._opening_record_task.done():
+            self._opening_record_task.cancel()
         if self._sl_task is not None and not self._sl_task.done():
             self._sl_task.cancel()
         self._flush_sliding_bars()             # 오늘 받은 분봉을 남긴다(내일 기준선)

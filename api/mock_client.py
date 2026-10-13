@@ -220,6 +220,22 @@ class MockKISClient(AbstractBroker):
         output1 = {"hts_kor_isnm": f"MOCK{symbol}", "stck_prpr": str(int(last["close"]))}
         return make_response(None, output1=output1, output2=rows)
 
+    async def inquire_multi_price(self, symbols: List[str]) -> Dict[str, Any]:
+        await self._throttle(PRIORITY_QUOTE)
+        rows = []
+        for code in list(symbols)[:30]:
+            bar = self.sim.current_bar(code)
+            if bar is None:
+                continue
+            price = self.sim.current_price(code)
+            rows.append({
+                "inter_shrn_iscd": code,
+                "inter2_prpr": str(int(price)),
+                "acml_vol": str(int(bar["volume"])),
+                "acml_tr_pbmn": str(int(bar["volume"] * price)),
+            })
+        return make_response(rows)          # KIS 복수시세는 output 하나에 행 목록이다
+
     async def inquire_minute_chart(self, symbol: str, hour: str = "", past: bool = True) -> Dict[str, Any]:
         await self._throttle(PRIORITY_QUOTE)
         hist = self.sim.history(symbol, count=120)

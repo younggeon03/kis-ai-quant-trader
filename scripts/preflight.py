@@ -285,9 +285,10 @@ def check(settings, live: bool) -> List[Tuple[str, str, str, str]]:
                 f"{s.OPENING_WINDOW_MIN}분 · 배수 x{s.OPENING_MULT:g} · 진입 +{s.OPENING_LAG_MIN}분",
                 "same_window 가 일관되게 앞선 범위는 3~15분이다(20분은 6.85%로 현재와 비슷)")
             add(FATAL, "opening 진입 시각", s.OPENING_WINDOW_MIN + s.OPENING_LAG_MIN <= 30
-                and s.OPENING_LAG_MIN >= 3,
+                and s.OPENING_LAG_MIN >= 0,
                 f"09:{s.OPENING_WINDOW_MIN + s.OPENING_LAG_MIN:02d}",
-                "지연이 3분보다 짧으면 284종목 분봉 조회(모의 유량 약 2.6분)가 끝나기 전이다")
+                "판정은 복수시세(30종목/호출, 284종목 약 10초)라 지연 0도 된다. 측정(2026-10-13): "
+                "10분 구간 바로 진입 P(+100%) 9.14% vs 3분 지연 9.64% — 차이 없음")
             # **기준선 데이터가 실제로 있는지.** 없으면 그 종목은 조용히 발동하지 않는다.
             hist_dir = Path(s.OPENING_HISTORY_DIR)
             n_ok, newest = 0, ""

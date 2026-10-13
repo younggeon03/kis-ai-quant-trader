@@ -111,6 +111,10 @@ class AbstractBroker(abc.ABC):
     async def inquire_minute_chart(self, symbol: str, hour: str = "", past: bool = True) -> Dict[str, Any]:
         """주식당일분봉조회 (TR: FHKST03010200)."""
 
+    @abc.abstractmethod
+    async def inquire_multi_price(self, symbols: List[str]) -> Dict[str, Any]:
+        """관심종목(멀티종목) 시세조회 — 최대 30종목 (TR: FHKST11300006)."""
+
     # ------------------------------------------------------------------ 계좌
     @abc.abstractmethod
     async def inquire_balance(self) -> Dict[str, Any]:
@@ -190,6 +194,31 @@ class AbstractBroker(abc.ABC):
         df = pd.DataFrame(records)
         df = df.iloc[::-1].reset_index(drop=True)  # KIS는 최신순이므로 뒤집는다
         return df
+
+    async def get_turnovers(self, symbols: List[str]) -> Dict[str, Dict[str, float]]:
+        """종목 → {price, acml_vol, turnover}. **30종목씩 한 번에** 받는다.
+
+        09:0N 판정에 쓴다. 분봉을 종목마다 받으면 모의투자 실효 유량(초당 약 1건)으로 284종목에
+        약 5분이 걸려 진입이 늦어진다. 복수시세는 30종목/호출이라 10번이면 끝난다.
+        `turnover`는 KIS 누적거래대금(`acml_tr_pbmn`) — 장 시작부터 지금까지의 실제 체결대금이다.
+        """
+        out: Dict[str, Dict[str, float]] = {}
+        for k in range(0, len(symbols), 30):
+            chunk = list(symbols[k:k + 30])
+            try:
+                payload = await self.inquire_multi_price(chunk)
+            except Exception:
+                continue
+            if not is_ok(payload):
+                continue
+            for row in payload.get("output") or []:
+                code = str(row.get("inter_shrn_iscd") or "").strip()
+                if not code:
+                    continue
+                out[code] = {"price": to_float(row.get("inter2_prpr")),
+                             "acml_vol": to_float(row.get("acml_vol")),
+                             "turnover": to_float(row.get("acml_tr_pbmn"))}
+        return out
 
     async def get_minute_bars(self, symbol: str, hour: str) -> pd.DataFrame:
         """당일 분봉(과거→최신) — `ts`는 **`YYYYMMDDHHMM` 12자리**다.
