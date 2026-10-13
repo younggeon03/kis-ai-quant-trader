@@ -34,8 +34,11 @@ push_data() {
   "${SSH[@]}" "tar -x -C ~/bankis" < "$tmp"
   rm -f "$tmp"
 }
+# 이 PowerShell 명령줄 자체에 'main.py'가 들어 있어 자기 자신이 걸린다 — 자기 PID(\$PID)를 뺀다.
+# (빼지 않았을 때 엔진을 멈추는 PowerShell이 자기를 종료해 set -e 로 전환이 중간에 끊겼다)
+WIN_ROOT="$(cygpath -w "$ROOT" 2>/dev/null || echo "$ROOT")"
 laptop_engine_running() {
-  powershell.exe -NoProfile -Command "if (Get-CimInstance Win32_Process | Where-Object { \$_.CommandLine -like '*main.py*' -and \$_.CommandLine -notlike '*deploy*' }) { exit 0 } else { exit 1 }"
+  powershell.exe -NoProfile -Command "if (Get-CimInstance Win32_Process | Where-Object { \$_.ProcessId -ne \$PID -and \$_.CommandLine -like '*python*main.py*' }) { exit 0 } else { exit 1 }"
 }
 
 case "$MODE" in
@@ -52,12 +55,14 @@ case "$MODE" in
       echo "장중(08:30~15:40)에는 전환하지 않는다 — 진입·청산 도중 엔진이 바뀐다"; exit 1
     fi
     echo "노트북 엔진 정지(재시작 안 함)..."
-    powershell.exe -NoProfile -Command "New-Item -ItemType File -Force '$ROOT\\logs\\STOP' | Out-Null; Get-CimInstance Win32_Process | Where-Object { \$_.CommandLine -like '*main.py*' } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force }; Get-CimInstance Win32_Process | Where-Object { \$_.CommandLine -like '*run_live.ps1*' } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force }"
+    powershell.exe -NoProfile -Command "New-Item -ItemType File -Force '$WIN_ROOT\\logs\\STOP' | Out-Null; Get-CimInstance Win32_Process | Where-Object { \$_.ProcessId -ne \$PID -and \$_.CommandLine -like '*run_live.ps1*' } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force }; Get-CimInstance Win32_Process | Where-Object { \$_.ProcessId -ne \$PID -and \$_.CommandLine -like '*python*main.py*' } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force }"
     sleep 3
     if laptop_engine_running; then echo "노트북 엔진이 아직 돈다 — 중단"; exit 1; fi
     push_code
     push_data
-    tar -cf - logs/ledger.jsonl state 2>/dev/null | "${SSH[@]}" "tar -x -C ~/bankis"
+    # 원장은 아직 없을 수 있다(첫 체결 전) — 있는 것만 보낸다. 없는 경로를 넘기면 tar 가 2로 끝나 전환이 멈춘다
+    carry=(); for f in logs/ledger.jsonl state; do [ -e "$f" ] && carry+=("$f"); done
+    [ ${#carry[@]} -gt 0 ] && tar -cf - "${carry[@]}" | "${SSH[@]}" "mkdir -p ~/bankis/logs && tar -x -C ~/bankis"
     "${SSH[@]}" "sudo systemctl enable --now bankis.service && sleep 5 && systemctl is-active bankis.service"
     echo "전환 완료 — 노트북 엔진은 멈췄고 서버 엔진이 돈다. 확인: bash deploy/oracle/deploy.sh $IP status"
     ;;
