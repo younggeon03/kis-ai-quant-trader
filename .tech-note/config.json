@@ -1,0 +1,10 @@
+{
+  "note": "docs/기술노트.md",
+  "title": "BanKis16 기술노트",
+  "subtitle": "BanKis16 으로 배우는 실무 백엔드·운영 기술",
+  "repoUrl": "https://github.com/younggeon03/kis-ai-quant-trader",
+  "branch": "main",
+  "out": ".tech-note/out/기술노트.html",
+  "linkcheck": null,
+  "shortenPaths": {}
+}

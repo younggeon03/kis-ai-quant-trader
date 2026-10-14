@@ -56,3 +56,5 @@ docs/snapshot.json
 # .env 파생 파일(백업 등)도 절대 커밋하지 않는다
 .env.*
 !.env.example
+# 기술노트 HTML 판(결과물)
+.tech-note/out/
