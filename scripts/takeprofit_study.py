@@ -138,6 +138,65 @@ def tp_exit(entry_px: float, i: int, entry_mi: int, max_hold: int, stop: float,
     return i + max_hold, float(c[i + max_hold]), "close", False, missing
 
 
+def trail_exit(entry_px: float, i: int, entry_mi: int, max_hold: int, stop: float,
+               o: np.ndarray, c: np.ndarray, burst: np.ndarray, vol_n: float,
+               ts: np.ndarray, intraday: Dict[str, pd.DataFrame], act: float, giveback: float,
+               press: Optional[float], roll_w: int) -> Tuple[int, float, str, bool, int]:
+    """장중 고점 대비 되돌림(+ 매도 압력) 청산.
+
+    매 분: 진입 이후 고점이 진입가 x (1+act) 이상이었고, 종가가 고점 x (1-giveback) 이하이며,
+    (press 가 있으면) 직전 roll_w 분 거래대금 중 **하락봉(종가<시가) 거래대금 비중** ≥ press 이면
+    다음 분 시가에 판다. 하락봉 비중은 진짜 매도 주도 체결량의 분봉 근삿값이다(틱 이력이 없다).
+    아니면 종가 판정(`path_exit`와 같다) → t+1 시가.
+    """
+    missing = 0
+    peak = entry_px
+    armed_at = entry_px * (1.0 + act)
+    for t in range(i, i + max_hold):
+        g = intraday.get(ts[t])
+        if g is None:
+            missing += 1
+        else:
+            mi_all = g["mi"].to_numpy()
+            sel = mi_all >= entry_mi if t == i else mi_all >= 0
+            mi = mi_all[sel]
+            hi = g["high"].to_numpy(float)[sel]
+            cl = g["close"].to_numpy(float)[sel]
+            op = g["open"].to_numpy(float)[sel]
+            tv = cl * g["volume"].to_numpy(float)[sel]
+            if press is not None:
+                down = np.where(cl < op, tv, 0.0)
+                rt = pd.Series(tv).rolling(roll_w, min_periods=roll_w).sum().to_numpy()
+                rd = pd.Series(down).rolling(roll_w, min_periods=roll_w).sum().to_numpy()
+            for j in range(len(cl)):
+                if t == i and mi[j] <= entry_mi:
+                    if np.isfinite(hi[j]):
+                        peak = max(peak, hi[j])
+                    continue
+                if np.isfinite(hi[j]):
+                    peak = max(peak, hi[j])
+                if peak < armed_at or not (cl[j] <= peak * (1.0 - giveback)):
+                    continue
+                if press is not None and not (np.isfinite(rt[j]) and rt[j] > 0
+                                              and rd[j] / rt[j] >= press):
+                    continue
+                px = float(op[j + 1]) if j + 1 < len(op) and op[j + 1] > 0 else float(cl[j])
+                return t, px, "close", True, missing
+        px = float(c[t])
+        if not (np.isfinite(px) and px > 0):
+            continue
+        hit = stop > 0 and px / entry_px - 1.0 <= -stop
+        if not hit:
+            b = burst[t]
+            hit = not (np.isfinite(b) and b >= vol_n)
+        if hit:
+            nxt = float(o[t + 1]) if (t + 1) < len(o) else px
+            if not (np.isfinite(nxt) and nxt > 0):
+                nxt = px
+            return t + 1, nxt, "open", False, missing
+    return i + max_hold, float(c[i + max_hold]), "close", False, missing
+
+
 def tp_exit_daily(entry_px: float, i: int, post_entry_high: float, max_hold: int,
                   stop: float, o: np.ndarray, h: np.ndarray, c: np.ndarray,
                   burst: np.ndarray, vol_n: float, tp: float
@@ -197,6 +256,12 @@ def main() -> int:
     ap.add_argument("--max-hold", type=int, default=30)
     ap.add_argument("--stop", type=float, default=0.25)
     ap.add_argument("--slots", type=int, default=2)
+    ap.add_argument("--trail", action="store_true",
+                    help="장중 고점 대비 되돌림(+매도 압력) 격자만 잰다(다른 변형은 건너뜀)")
+    ap.add_argument("--acts", default="0.1,0.2,0.3", help="되돌림 감시를 켜는 상승폭")
+    ap.add_argument("--givebacks", default="0.05,0.1,0.15", help="고점 대비 하락폭")
+    ap.add_argument("--presses", default="none,0.6,0.7,0.8", help="하락봉 거래대금 비중 하한")
+    ap.add_argument("--press-rolls", default="10,30", help="매도 압력을 보는 창(분)")
     ap.add_argument("--daily-approx", action="store_true",
                     help="장중 분봉 없이 일봉 고가로 지정가 익절을 근사(494 확대분용, 꺾임 조건 없음)")
     ap.add_argument("--out", default="reports/takeprofit_study.json")
@@ -220,11 +285,26 @@ def main() -> int:
             variants += [(_opt(f), float(k), int(w), "same")
                          for k in args.same_mults.split(",") for w in args.rolls.split(",")
                          for f in args.floors.split(",")]
+    if args.trail:
+        # 변형 = (상승폭 act, 되돌림 giveback, 창, "trail<압력>")
+        variants = []
+        for a in args.acts.split(","):
+            for b in args.givebacks.split(","):
+                for pr in args.presses.split(","):
+                    if pr.strip() == "none":
+                        variants.append((float(a), float(b), 0, "trail-"))
+                    else:
+                        variants += [(float(a), float(b), int(w), f"trail{pr.strip()}")
+                                     for w in args.press_rolls.split(",")]
     same_ws = sorted({v[2] for v in variants if v[3] == "same"})
     N, entry_mi = args.window, args.window + args.lag
 
     odir, fdir = Path(args.opening_dir), Path(args.fullday_dir)
-    symbols = [x for x in s.UNIVERSE if args.daily_approx or (fdir / f"{x}.csv").exists()]
+    def _fd(x: str) -> Path:
+        # 압축본(.csv.gz)도 읽는다 — 서버 디스크(10GB)에 하루 전체 분봉을 풀어 둘 자리가 없다
+        p_ = fdir / f"{x}.csv"
+        return p_ if p_.exists() else fdir / f"{x}.csv.gz"
+    symbols = [x for x in s.UNIVERSE if args.daily_approx or _fd(x).exists()]
     panel = load_panel_from_dir(args.source, symbols)
     all_days = sorted({str(t) for df in panel.values() if df is not None
                        for t in df["ts"].astype(str)})
@@ -269,7 +349,7 @@ def main() -> int:
         if args.daily_approx:
             fp_src[sym] = (m["close"] * m["volume"]).to_numpy(float)
         else:
-            fd = pd.read_csv(fdir / f"{sym}.csv", dtype={"ts": str})
+            fd = pd.read_csv(_fd(sym), dtype={"ts": str})
             fd = fd.assign(mi=minute_index(fd["ts"]), day=fd["ts"].str[:8])
             intraday = {dy: g.sort_values("mi").reset_index(drop=True)
                         for dy, g in fd.groupby("day", sort=False)}
@@ -321,6 +401,12 @@ def main() -> int:
                     ex_i, ex_px, when, hit, miss = tp_exit_daily(
                         entry_px, i, post_hi, args.max_hold, args.stop, o, hi, c, burst,
                         args.hold_vol, v[0])
+                elif v[3].startswith("trail"):
+                    pr = v[3][len("trail"):]
+                    ex_i, ex_px, when, hit, miss = trail_exit(
+                        entry_px, i, entry_mi, args.max_hold, args.stop, o, c, burst,
+                        args.hold_vol, ts, intraday, v[0], v[1],
+                        None if pr == "-" else float(pr), max(1, v[2]))
                 else:
                     ex_i, ex_px, when, hit, miss = tp_exit(
                         entry_px, i, entry_mi, args.max_hold, args.stop, o, c, burst,
