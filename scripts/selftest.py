@@ -881,10 +881,12 @@ def test_selection_and_phase():
     # 됐다. 백테스트에는 대회 날짜가 없어 어떤 측정에도 나타나지 않았다.
     saved ={k: getattr(s, k) for k in ("EXIT_RULES", "EXIT_VOL_ALIVE_MULT",
                                         "EXIT_VOL_ALIVE_MIN_BARS", "STOP_LOSS_PCT",
-                                        "MAX_HOLDING_BARS", "PHASE1_DISABLE_RISK")}
+                                        "MAX_HOLDING_BARS", "PHASE1_DISABLE_RISK",
+                                        "TAKE_PROFIT_PCT")}
     try:
         s.EXIT_RULES, s.EXIT_VOL_ALIVE_MULT, s.EXIT_VOL_ALIVE_MIN_BARS = "vol_alive", 2.0, 1
         s.STOP_LOSS_PCT, s.MAX_HOLDING_BARS, s.PHASE1_DISABLE_RISK = 0.25, 30, True
+        s.TAKE_PROFIT_PCT = 0.0
         c1 = phase_config(settings=s, now=dt.date(2026, 10, 13))
 
         def exits_for(cfg, price: float, burst: float):
@@ -905,6 +907,13 @@ def test_selection_and_phase():
         assert not exits_for(c1, 7_000.0, 5.0), "1단계인데 손절이 걸렸다(초기화가 하방을 덮는다)"
         ex = exits_for(c2, 7_000.0, 5.0)
         assert ex and ex[0].reason == ExitReason.STOP_LOSS, f"2단계 손절 미작동: {ex}"
+        # 익절은 전략 청산이라 1단계에도 돈다(꺼져 있으면 안 판다)
+        assert not exits_for(c1, 12_500.0, 5.0), "익절 0인데 +25%에서 팔았다"
+        s.TAKE_PROFIT_PCT = 0.2
+        for cfg, label in ((c1, "1단계"), (c2, "2단계")):
+            ex = exits_for(cfg, 12_500.0, 5.0)
+            assert ex and ex[0].reason == ExitReason.TAKE_PROFIT, f"{label} 익절 미작동: {ex}"
+            assert not exits_for(cfg, 11_500.0, 5.0), f"{label}: +15%인데 익절 20%가 걸렸다"
     finally:
         for k, v in saved.items():
             setattr(s, k, v)
