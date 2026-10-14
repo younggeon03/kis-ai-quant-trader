@@ -43,6 +43,26 @@ MAX_SINGLE_WEIGHT = 0.50       # 단일 종목 최대 투자 한도
 BLOCKED_SECTIONS = ("관리종목", "투자주의환기", "SPAC", "외국기업")
 ALLOWED_MARKETS = ("KOSPI", "KOSDAQ", "KOSDAQ GLOBAL")
 
+# 모의투자 서버가 주문을 거부하는 종목(`40070000 매매불가 종목`). 2026-10-14 실측: 거부된 5종목이
+# 전부 증거금률 100%(종목상태 57, 그중 하나는 투자경고 53)였고 체결된 2종목은 40%(55)였다.
+# 종목상태(`iscd_stat_cls_code`): 51 관리 · 52 투자위험 · 53 투자경고 · 58 거래정지 · 59 단기과열.
+VTS_BLOCKED_STATUS = frozenset({"51", "52", "53", "58", "59"})
+
+
+def vts_tradable(status: Optional[dict]) -> bool:
+    """현재가 응답의 상태 필드로 모의투자에서 살 수 있는지 판정한다.
+
+    상태를 모르면(조회 실패·새 종목) 막지 않는다 — 거부되면 엔진이 그날 다시 시도하지 않는다.
+    """
+    if not status:
+        return True
+    if str(status.get("iscd_stat_cls_code", "")) in VTS_BLOCKED_STATUS:
+        return False
+    try:
+        return float(status.get("marg_rate") or 0.0) < 100.0
+    except (TypeError, ValueError):
+        return True
+
 
 def is_buyable(symbol: str, price: float,
                settings: Optional[Settings] = None) -> Tuple[bool, str]:

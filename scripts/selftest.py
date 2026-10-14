@@ -792,8 +792,16 @@ def test_competition_rules():
     # 거래가 전혀 없으면 4개 요건 모두 미충족
     empty = evaluate([], s_req, 20)
     assert len(empty.unmet) == 4, empty.describe()
+
+    # 모의투자 매매불가 — 2026-10-14 실측 상태값(거부 5종목 · 체결 2종목)
+    from strategy.eligibility import vts_tradable
+    assert not vts_tradable({"iscd_stat_cls_code": "57", "marg_rate": "100.00"}), "증거금 100% 통과"
+    assert not vts_tradable({"iscd_stat_cls_code": "53", "marg_rate": "100.00"}), "투자경고 통과"
+    assert not vts_tradable({"iscd_stat_cls_code": "53", "marg_rate": "40.00"}), "경고인데 증거금만 봄"
+    assert vts_tradable({"iscd_stat_cls_code": "55", "marg_rate": "40.00"}), "신용 가능 종목을 막음"
+    assert vts_tradable({}), "상태를 모르면 막지 않는다(거부되면 당일 차단 목록이 막는다)"
     return (f"매수/매도 판정 · 한도 {MAX_SINGLE_WEIGHT:.0%} 클립 · "
-            f"지수 멤버십 {len(members)}종목 · 요건 4항목 집계")
+            f"지수 멤버십 {len(members)}종목 · 요건 4항목 집계 · 모의투자 매매불가 판정")
 
 
 # ============================================================ 15. 선정·국면
@@ -1519,6 +1527,9 @@ async def _check_live_vol_alive(s) -> str:
             def __init__(self):
                 self.calls = []
 
+            async def inquire_price(self, symbol):   # 진입 직전 현재가·종목 상태(모의 매매불가 거름)
+                return {"output": {"stck_prpr": "10000", "iscd_stat_cls_code": "55", "marg_rate": "40.00"}}
+
             async def get_quote(self, symbol):
                 self.calls.append(symbol)
                 return types.SimpleNamespace(price=1000.0, volume=1.0)
@@ -1678,6 +1689,9 @@ async def test_opening_entry():
                                      "open": [10_000.0] * 5, "high": [10_000.0] * 5,
                                      "low": [10_000.0] * 5, "close": [10_000.0] * 5,
                                      "volume": [per_min / 10_000.0] * 5})
+
+            async def inquire_price(self, symbol):   # 진입 직전 현재가·종목 상태(모의 매매불가 거름)
+                return {"output": {"stck_prpr": "10000", "iscd_stat_cls_code": "55", "marg_rate": "40.00"}}
 
             async def get_quote(self, symbol):
                 return types.SimpleNamespace(price=10_000.0, volume=0.0)
@@ -2018,6 +2032,9 @@ async def test_compliance_trades():
             eng._prev_daily = {c: (1e4, 1e5, 1e9 - k) for k, c in enumerate(uni)}
 
             class _Broker:
+                async def inquire_price(self, symbol):   # 진입 직전 현재가·종목 상태(모의 매매불가 거름)
+                    return {"output": {"stck_prpr": "10000", "iscd_stat_cls_code": "55", "marg_rate": "40.00"}}
+
                 async def get_quote(self, symbol):
                     return types.SimpleNamespace(price=10_000.0, volume=0.0)
             eng.broker = _Broker()

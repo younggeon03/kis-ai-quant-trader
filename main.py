@@ -38,7 +38,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-from api.base import UNKNOWN_RESULT_CODE, AbstractBroker, is_ok, to_int
+from api.base import UNKNOWN_RESULT_CODE, AbstractBroker, is_ok, to_float, to_int
 from api.factory import create_broker
 from config.settings import Settings, get_settings
 from core.events import (
@@ -62,6 +62,7 @@ from strategy.sliding import (LAST_ENTRY_MIN, SlidingWatcher, minute_turnover, r
                               same_time_base)
 from strategy.opening import (minute_index, opening_ratio, rank_triggers, same_window_ratio,
                               window_turnover)
+from strategy.eligibility import vts_tradable
 from strategy.risk_manager import ExitOrder, RiskManager, RiskState
 from strategy.selection import select_entries, select_rotation_exits
 from strategy.intraday import IntradayWatcher, TriggerSignal
@@ -168,6 +169,8 @@ class TradingEngine:
         self._opening_picks: Optional[List[tuple]] = None  # [(종목, 배수)] 배수 큰 순
         self._opening_record_task: Optional[asyncio.Task] = None  # 기준선 분봉 기록(진입 뒤)
         self._opening_done_day: str = ""                 # 진입을 처리한 날
+        # 오늘 '매매불가'로 거부된 종목(종목 → 날짜). 같은 날 다시 주문하지 않는다
+        self._reject_today: Dict[str, str] = {}
         # same_window 기준선 — 종목 → 지난 거래일들의 09:00~09:0N 거래대금(오래된 것부터, 최대 20)
         self._opening_hist: Dict[str, List[float]] = {}
         # 종목 → 분봉 파일의 마지막 날짜. 같은 날을 두 번 기록하지 않으려고 들고 있다.
@@ -393,6 +396,10 @@ class TradingEngine:
             last = df[df["ts"].astype(str) < today]
             if not last.empty:
                 logger.info(f"[기준] 마지막 확정 봉 {last['ts'].iloc[-1]} (기준 종목 {self.universe[0]})")
+
+    def _vts_live(self) -> bool:
+        """모의투자 실서버에 붙어 있는가(매매불가 종목 거름이 필요한 곳)."""
+        return (not self.s.USE_MOCK_MODE) and str(self.s.KIS_ENV).lower() == "vts"
 
     def _opening_mode(self) -> bool:
         return bool(self.s.USE_INTRADAY) and self.s.INTRADAY_ENTRY_MODE == "opening"
@@ -815,12 +822,23 @@ class TradingEngine:
                 break
             if symbol in held or symbol in inflight:
                 continue
-            # 관심목록 밖 종목은 현재가가 묵어 있을 수 있다 — 주문 직전에 새로 받는다.
+            if self._reject_today.get(symbol) == day:
+                continue
+            # 현재가와 종목 상태를 한 호출로 받는다. 관심목록 밖 종목은 현재가가 묵어 있을 수 있고,
+            # 모의투자는 증거금 100%·경보 종목 주문을 거부한다(`vts_tradable`) — 거부 주문 한 건이
+            # 유량 대기까지 약 3초라, 미리 걸러 다음 순위로 바로 내려간다(2026-10-14 5건 연속 거부).
+            status: Dict[str, Any] = {}
             try:
-                q = await self.broker.get_quote(symbol)
-                px = float(q.price) if q and q.price > 0 else prices.get(symbol, 0.0)
+                raw = await self.broker.inquire_price(symbol)
+                status = raw.get("output") or {}
+                px = to_float(status.get("stck_prpr")) or prices.get(symbol, 0.0)
             except Exception:
                 px = prices.get(symbol, 0.0)
+            if self._vts_live() and not vts_tradable(status):
+                logger.info(f"[장중·개장] {symbol} 건너뜀 — 모의투자 매매불가 "
+                            f"(상태 {status.get('iscd_stat_cls_code')} · 증거금 {status.get('marg_rate')}%)")
+                self._reject_today[symbol] = day
+                continue
             if px <= 0:
                 continue
             self.latest_prices[symbol] = px
@@ -1393,6 +1411,8 @@ class TradingEngine:
                 await self._sync_portfolio()
                 return False
             logger.error(f"[주문거부] {side.value} {symbol} {qty}주 :: {ack.msg_cd} {ack.msg}")
+            if ack.msg_cd == "40070000":      # 모의투자 매매불가 종목 — 오늘은 다시 주문하지 않는다
+                self._reject_today[symbol] = self._now().strftime("%Y%m%d")
             self.ledger.write("order_reject", {"symbol": symbol, "side": side.value,
                                                "qty": qty, "msg": ack.msg, "code": ack.msg_cd})
             return False
