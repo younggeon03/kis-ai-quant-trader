@@ -290,10 +290,14 @@ class AbstractBroker(abc.ABC):
             pos.peak_price = max(pos.avg_price, pos.last_price)
             positions[symbol] = pos
         summary = (payload.get("output2") or [{}])
-        cash = to_float(summary[0].get("dnca_tot_amt")) if summary else 0.0
-        # 예수금이 0으로 오는 계좌는 D+2 예수금을 사용
-        if cash <= 0 and summary:
-            cash = to_float(summary[0].get("prvs_rcdl_excc_amt"))
+        # 현금은 D+2 예수금(`prvs_rcdl_excc_amt`)을 쓴다. 예수금총액(`dnca_tot_amt`)은 결제(T+2)
+        # 전까지 당일 매수 대금이 빠지지 않아, 사자마자 현금 + 보유평가가 겹쳐 자산이 두 배로
+        # 읽혔다(2026-10-14 실서버: 매수 직후 1억 → 1.9억, 누적 +91%). D+2 값이 없는 응답만 예전 필드.
+        row = summary[0] if summary else {}
+        if row.get("prvs_rcdl_excc_amt") not in (None, ""):
+            cash = to_float(row.get("prvs_rcdl_excc_amt"))
+        else:
+            cash = to_float(row.get("dnca_tot_amt"))
         return cash, positions
 
     async def submit_order(self, request: OrderRequest) -> OrderAck:
