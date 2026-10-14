@@ -77,6 +77,10 @@ def main() -> int:
     ap.add_argument("--windows", default="3,5")
     ap.add_argument("--mults", default="3,5,10,20")
     ap.add_argument("--lags", default="1,4")
+    ap.add_argument("--open-window", type=int, default=5, help="기준 규칙(현재 실거래) 장 시작 구간(분)")
+    ap.add_argument("--open-lag", type=int, default=0, help="기준 규칙 진입 지연(분)")
+    ap.add_argument("--no-hybrid", action="store_true",
+                    help="혼합(장 시작에 채우고 빈자리는 장중 발동으로) 칸을 계산하지 않는다")
     ap.add_argument("--hold-vol", type=float, default=2.0)
     ap.add_argument("--max-hold", type=int, default=30)
     ap.add_argument("--stop", type=float, default=0.25)
@@ -146,7 +150,8 @@ def main() -> int:
             ok = (mi >= 0) & (mi < N_MIN)
             OP[j, mi[ok]] = g["open"].to_numpy(float)[ok]
         S = {W: np.vstack([rolling_sum(TV[j], W) for j in range(len(days))]) for W in windows}
-        W10 = TV[:, :10].sum(axis=1)                       # 장 시작 10분(기준 규칙)
+        OW, OL = int(args.open_window), int(args.open_lag)
+        W10 = TV[:, :OW].sum(axis=1)                       # 장 시작 OW분(기준 규칙)
         CUM = np.cumsum(TV, axis=1)                        # 당일 누적(기준 규칙)
 
         for j, dy in enumerate(days):
@@ -155,13 +160,13 @@ def main() -> int:
                 continue
             sym_days += 1
             dc = cal[dy]
-            # --- 기준 1: 장 시작 10분 같은 시간대 x3 → 09:13 (현재 실거래) ---
+            # --- 기준 1: 장 시작 OW분 같은 시간대 x3 → 09:(OW+OL) (현재 실거래) ---
             base10 = same_window_base(W10[:j].tolist())
             if base10 > 0 and W10[j] >= 3.0 * base10:
-                px = _entry_px(OP[j], 13)
+                px = _entry_px(OP[j], OW + OL)
                 if np.isfinite(px):
                     r = W10[j] / base10
-                    add(("opening", 10, 3.0, 3), dc, (13 + 1 / (1 + r), sym, i, px))
+                    add(("opening", OW, 3.0, OL), dc, (OW + OL + 1 / (1 + r), sym, i, px))
             # --- 기준 2: 누적 10배 → 다음 분 시가 ---
             if np.isfinite(med_day[i]) and med_day[i] > 0:
                 hit = np.flatnonzero(CUM[j] >= 10.0 * med_day[i])
@@ -222,11 +227,19 @@ def main() -> int:
     rets: Dict[Cell, np.ndarray] = {}
     per_day: Dict[Cell, float] = {}
     n_days = len([t for t in all_days if t >= args.since])
+    open_cell = ("opening", int(args.open_window), 3.0, int(args.open_lag))
+    open_evs = events_of(open_cell) if open_cell in cells else []
     for cell in sorted(cells, key=str):
         evs = events_of(cell)
         rets[cell] = evaluate(evs)
         per_day[cell] = len(evs) / max(1, n_days)
-    ref_open = rets.get(("opening", 10, 3.0, 3))
+        # 혼합: 장 시작 발동이 먼저(감지 분이 작다) 자리를 채우고, 빈자리는 장중 발동이 채운다.
+        # 같은 종목 같은 날 중복은 run_window 가 보유 중이면 건너뛴다.
+        if not args.no_hybrid and cell[0] in ("day_avg", "same_time") and open_evs:
+            hcell = ("hybrid·" + cell[0], cell[1], cell[2], cell[3])
+            rets[hcell] = evaluate(open_evs + evs)
+            per_day[hcell] = (len(open_evs) + len(evs)) / max(1, n_days)
+    ref_open = rets.get(open_cell)
 
     rows = []
     for cell, r in rets.items():
@@ -244,7 +257,8 @@ def main() -> int:
     op_.parent.mkdir(parents=True, exist_ok=True)
     op_.write_text(json.dumps(out, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
 
-    order = {"opening": 0, "cum10": 1, "day_avg": 2, "same_time": 3}
+    order = {"opening": 0, "cum10": 1, "day_avg": 2, "same_time": 3,
+             "hybrid·day_avg": 4, "hybrid·same_time": 5}
     rows.sort(key=lambda x: (order.get(x["rule"], 9), str(x["window"]), x["mult"], x["lag"]))
     print()
     print("=" * 112)
@@ -253,16 +267,17 @@ def main() -> int:
     print(f" 데이터 지문 {fp} ({len(fp_src)}종목 · {sym_days:,}종목-일) · 30거래일 창 "
           f"{len(starts)}개(하루씩 이동, 겹친다 — 독립 약 {len(starts) // COMP_BARS}개)")
     print("=" * 112)
-    print(f" {'규칙':<10}{'W':>4}{'배수':>6}{'지연':>5}{'중앙':>9}{'평균':>9}{'p90':>9}"
+    print(f" {'규칙':<17}{'W':>4}{'배수':>6}{'지연':>5}{'중앙':>9}{'평균':>9}{'p90':>9}"
           f"{'최대':>9}{'P(+50%)':>10}{'P(+100%)':>10}{'장시작대비':>11}")
     print("-" * 112)
     for x in rows:
-        print(f" {x['rule']:<10}{str(x['window']):>4}{x['mult']:6g}{x['lag']:5d}"
+        print(f" {x['rule']:<17}{str(x['window']):>4}{x['mult']:6g}{x['lag']:5d}"
               f"{x['median'] * 100:+8.1f}%{x['mean'] * 100:+8.1f}%{x['p90'] * 100:+8.1f}%"
               f"{x['max'] * 100:+8.1f}%{x['p50up'] * 100:9.2f}%{x['p100up'] * 100:9.2f}%"
               f"{(x['beats_opening'] or 0) * 100:10.1f}%")
     print("=" * 112)
-    print(" opening = 현재 실거래(장 시작 10분 같은 시간대 x3 → 09:13) · cum10 = 예전 누적 10배")
+    print(f" opening = 현재 실거래(장 시작 {args.open_window}분 같은 시간대 x3 → 지연 {args.open_lag}분) · "
+          "cum10 = 예전 누적 10배 · hybrid = 장 시작에 채우고 빈자리는 장중 발동")
     print(" 지연 1분 = WS 실시간 구독 종목, 4분 = REST 순회 종목(실거래 대부분)")
     print(" 장시작대비 = 같은 30일 창에서 opening 보다 수익이 높은 창의 비율")
     print(" 격자가 크다 — 한 칸이 아니라 넓은 영역에서 일관된 방향만 믿는다.")
