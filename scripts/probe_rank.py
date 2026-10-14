@@ -35,6 +35,11 @@ async def main() -> int:
     enable_utf8_console()
     ap = argparse.ArgumentParser(description="KIS 순위 API 확인")
     ap.add_argument("--raw", action="store_true")
+    ap.add_argument("--div", default="0", help="FID_DIV_CLS_CODE: 0 전체 · 1 보통주 · 2 우선주")
+    ap.add_argument("--excl", default="0000000000",
+                    help="FID_TRGT_EXLS_CLS_CODE 10자리 — 1이면 제외(투자위험·경고·주의·관리·정리매매·불성실·우선주·거래정지·ETF·ETN 순서로 추정, 확인용)")
+    ap.add_argument("--min-price", default="")
+    ap.add_argument("--min-vol", default="")
     args = ap.parse_args()
     s = get_settings()
     broker = create_broker(s)
@@ -44,9 +49,9 @@ async def main() -> int:
         for code, label in BLNG.items():
             params = {
                 "FID_COND_MRKT_DIV_CODE": "J", "FID_COND_SCR_DIV_CODE": "20171",
-                "FID_INPUT_ISCD": "0000", "FID_DIV_CLS_CODE": "0", "FID_BLNG_CLS_CODE": code,
-                "FID_TRGT_CLS_CODE": "111111111", "FID_TRGT_EXLS_CLS_CODE": "0000000000",
-                "FID_INPUT_PRICE_1": "", "FID_INPUT_PRICE_2": "", "FID_VOL_CNT": "",
+                "FID_INPUT_ISCD": "0000", "FID_DIV_CLS_CODE": args.div, "FID_BLNG_CLS_CODE": code,
+                "FID_TRGT_CLS_CODE": "111111111", "FID_TRGT_EXLS_CLS_CODE": args.excl,
+                "FID_INPUT_PRICE_1": args.min_price, "FID_INPUT_PRICE_2": "", "FID_VOL_CNT": args.min_vol,
                 "FID_INPUT_DATE_1": "",
             }
             t0 = time.perf_counter()
