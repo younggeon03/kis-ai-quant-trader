@@ -197,6 +197,63 @@ def trail_exit(entry_px: float, i: int, entry_mi: int, max_hold: int, stop: floa
     return i + max_hold, float(c[i + max_hold]), "close", False, missing
 
 
+def vwap_exit(entry_px: float, i: int, entry_mi: int, max_hold: int, stop: float,
+              o: np.ndarray, c: np.ndarray, burst: np.ndarray, vol_n: float,
+              ts: np.ndarray, intraday: Dict[str, pd.DataFrame], below: float,
+              vmult: Optional[float], same: Optional[Dict[str, Tuple[np.ndarray, np.ndarray]]],
+              min_mi: int = 10) -> Tuple[int, float, str, bool, int]:
+    """당일 VWAP 아래로 밀리면(+ 거래가 몰리면) 판다 — '거래대금은 큰데 매도세가 이기는' 날을 장중에 잡는다.
+
+    VWAP = 그날 09:00 부터의 누적 거래대금 / 누적 거래량(그날 산 사람들의 평균 단가).
+    매 분(09:{min_mi} 이후, 진입일은 진입 뒤): 종가 < VWAP x (1-below) 이고, vmult 가 있으면 직전 W분
+    거래대금 ≥ vmult x 지난 20일 같은 시각 중앙(`same`)일 때 다음 분 시가에 판다.
+    장 시작 직후는 VWAP 가 몇 분치뿐이라 잡음이 커서 09:{min_mi} 전에는 보지 않는다.
+    """
+    missing = 0
+    for t in range(i, i + max_hold):
+        g = intraday.get(ts[t])
+        if g is None:
+            missing += 1
+        else:
+            mi = g["mi"].to_numpy()
+            cl = g["close"].to_numpy(float)
+            op = g["open"].to_numpy(float)
+            vo = g["volume"].to_numpy(float)
+            cum_v = np.cumsum(np.where(np.isfinite(vo), vo, 0.0))
+            cum_tv = np.cumsum(np.where(np.isfinite(vo), cl * vo, 0.0))
+            with np.errstate(invalid="ignore", divide="ignore"):
+                vwap = cum_tv / np.where(cum_v > 0, cum_v, np.nan)
+            rb = same.get(ts[t]) if (vmult is not None and same is not None) else None
+            for j in range(len(cl)):
+                m_ = int(mi[j])
+                if m_ < min_mi or (t == i and m_ <= entry_mi):
+                    continue
+                if not (np.isfinite(vwap[j]) and cl[j] < vwap[j] * (1.0 - below)):
+                    continue
+                if vmult is not None:
+                    if rb is None:
+                        continue
+                    R, B = rb
+                    if m_ >= len(R) or not (np.isfinite(R[m_]) and np.isfinite(B[m_])
+                                            and R[m_] >= vmult * B[m_]):
+                        continue
+                px = float(op[j + 1]) if j + 1 < len(op) and op[j + 1] > 0 else float(cl[j])
+                return t, px, "close", True, missing
+        px = float(c[t])
+        if not (np.isfinite(px) and px > 0):
+            continue
+        hit = stop > 0 and px / entry_px - 1.0 <= -stop
+        if not hit:
+            b = burst[t]
+            hit = not (np.isfinite(b) and b >= vol_n)
+        if hit:
+            nxt = float(o[t + 1]) if (t + 1) < len(o) else px
+            if not (np.isfinite(nxt) and nxt > 0):
+                nxt = px
+            return t + 1, nxt, "open", False, missing
+    return i + max_hold, float(c[i + max_hold]), "close", False, missing
+
+
 def tp_exit_daily(entry_px: float, i: int, post_entry_high: float, max_hold: int,
                   stop: float, o: np.ndarray, h: np.ndarray, c: np.ndarray,
                   burst: np.ndarray, vol_n: float, tp: float
@@ -262,6 +319,11 @@ def main() -> int:
     ap.add_argument("--givebacks", default="0.05,0.1,0.15", help="고점 대비 하락폭")
     ap.add_argument("--presses", default="none,0.6,0.7,0.8", help="하락봉 거래대금 비중 하한")
     ap.add_argument("--press-rolls", default="10,30", help="매도 압력을 보는 창(분)")
+    ap.add_argument("--vwap", action="store_true",
+                    help="당일 VWAP 아래로 밀리면(+거래 몰림) 파는 격자만 잰다")
+    ap.add_argument("--belows", default="0,0.02,0.05", help="VWAP 대비 얼마나 아래(0=VWAP 아래면)")
+    ap.add_argument("--vmults", default="none,1,2", help="직전 W분 거래대금 / 평소 같은 시각 하한")
+    ap.add_argument("--vrolls", default="10,30", help="거래 몰림을 보는 창(분)")
     ap.add_argument("--daily-approx", action="store_true",
                     help="장중 분봉 없이 일봉 고가로 지정가 익절을 근사(494 확대분용, 꺾임 조건 없음)")
     ap.add_argument("--out", default="reports/takeprofit_study.json")
@@ -296,7 +358,18 @@ def main() -> int:
                     else:
                         variants += [(float(a), float(b), int(w), f"trail{pr.strip()}")
                                      for w in args.press_rolls.split(",")]
-    same_ws = sorted({v[2] for v in variants if v[3] == "same"})
+    if args.vwap:
+        # 변형 = (VWAP 아래 폭, 거래 몰림 배수, 창, "vwap")
+        variants = []
+        for bl in args.belows.split(","):
+            for vm in args.vmults.split(","):
+                if vm.strip() == "none":
+                    variants.append((float(bl), None, 0, "vwap"))
+                else:
+                    variants += [(float(bl), float(vm), int(w), "vwap")
+                                 for w in args.vrolls.split(",")]
+    same_ws = sorted({v[2] for v in variants
+                      if v[3] == "same" or (v[3] == "vwap" and v[1] is not None)})
     N, entry_mi = args.window, args.window + args.lag
 
     odir, fdir = Path(args.opening_dir), Path(args.fullday_dir)
@@ -401,6 +474,10 @@ def main() -> int:
                     ex_i, ex_px, when, hit, miss = tp_exit_daily(
                         entry_px, i, post_hi, args.max_hold, args.stop, o, hi, c, burst,
                         args.hold_vol, v[0])
+                elif v[3] == "vwap":
+                    ex_i, ex_px, when, hit, miss = vwap_exit(
+                        entry_px, i, entry_mi, args.max_hold, args.stop, o, c, burst,
+                        args.hold_vol, ts, intraday, v[0], v[1], same_maps.get(v[2]))
                 elif v[3].startswith("trail"):
                     pr = v[3][len("trail"):]
                     ex_i, ex_px, when, hit, miss = trail_exit(
