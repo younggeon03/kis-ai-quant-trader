@@ -376,6 +376,17 @@ class Settings(BaseSettings):
     VWAP_EXIT_POLL_SEC: float = Field(default=20.0, description="보유 종목 누적 거래대금 조회 간격(초)")
     VWAP_PROFILE_FILE: str = Field(default="data/cache/turnover_profile_w10.json",
                                    description="같은 시각 직전 W분 거래대금 기준선 표")
+    # 장중 추가 매수(2026-10-15, 사용자 결정) — 09:0N 장 시작 진입은 그대로 두고, 그 뒤 장중에 직전 W분
+    # 거래대금이 평소 같은 시각의 k배를 처음 넘은 종목을 빈자리에 산다(혼합). 복수시세 누적 거래대금의
+    # 차분으로 직전 W분을 만든다(감지 지연 약 20~40초). 측정(`sliding_study.py`, 289종목): 혼합 4.23~4.48%
+    # vs 장 시작만 3.98% — 기존 청산(vol_alive) 기준이며 VWAP 청산과 합친 효과는 재지 않았다.
+    SLIDE_ENTRY: bool = Field(default=False, description="장중 추가 매수 켜기")
+    SLIDE_WINDOW: int = Field(default=5, description="직전 W분 — 기준선 표와 같아야 한다")
+    SLIDE_MULT: float = Field(default=3.0, description="직전 W분 거래대금 ≥ k x 평소 같은 시각")
+    SLIDE_POLL_SEC: float = Field(default=20.0, description="유니버스 누적 거래대금 조회 간격(초)")
+    SLIDE_LAST_MIN: int = Field(default=379, description="09:00 부터 이 분 뒤에는 사지 않는다(15:19)")
+    SLIDE_PROFILE_FILE: str = Field(default="data/cache/turnover_profile_w5.json",
+                                    description="같은 시각 직전 W분 거래대금 기준선 표(장중 매수용)")
     INTRADAY_VOL_MULT: float = Field(
         default=12.0, description="돌파 분의 거래량 ÷ 전일 분당 평균 하한")
     # 왜 12배인가 (분봉 리플레이 250거래일 · 거래 약 500건)

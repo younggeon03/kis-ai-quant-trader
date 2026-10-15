@@ -2251,9 +2251,61 @@ async def test_server_reliability():
     finally:
         for k, v in saved.items():
             setattr(s, k, v)
+
+    # --- 장중 추가 매수: 첫 발동만 · 배수 순 · 빈자리만 · 오늘 판 종목 제외 ---
+    saved = {k: getattr(s, k) for k in ("SLIDE_ENTRY", "SLIDE_WINDOW", "SLIDE_MULT", "MAX_POSITIONS")}
+    try:
+        s.SLIDE_ENTRY, s.SLIDE_WINDOW, s.SLIDE_MULT, s.MAX_POSITIONS = True, 5, 3.0, 2
+        eng = TradingEngine(s, enable_dashboard=False)
+        A, B, C = list(s.UNIVERSE[:3])     # 실제 종목(대회 규정 관문을 통과해야 한다)
+        eng.universe = [A, B, C]
+        eng._slide_profile = {c: [1e6] * 380 for c in eng.universe}   # 평소 직전 5분 1백만
+        day = "20261015"
+        eng._opening_done_day = day
+        cum = {A: 1e8, B: 1e8, C: 1e8}
+
+        class _B2:
+            async def get_turnovers(self, symbols):
+                return {c: {"price": 10_000.0, "acml_vol": 1e4, "turnover": cum[c]} for c in symbols}
+
+            async def inquire_price(self, symbol):
+                return {"output": {"stck_prpr": "10000", "iscd_stat_cls_code": "55", "marg_rate": "40.00"}}
+        eng.broker = _B2()
+        bought = []
+
+        async def _submit2(symbol, side, qty, price, reason):
+            bought.append(symbol)
+            return True
+        eng._submit = _submit2
+        t1 = dt.datetime(2026, 10, 15, 10, 0)
+        assert eng._slide_ready(t1), "장 시작 진입 뒤인데 장중 추가 매수를 보지 않는다"
+        await eng._slide_poll(t1)
+        cum[A] += 5e6          # 5분 5백만 = 평소 x5 → 발동
+        cum[B] += 2e6          # x2 → 미발동
+        cum[C] += 8e6          # x8 → 발동(배수 1위)
+        await eng._slide_poll(t1 + dt.timedelta(minutes=5))
+        assert [sy for _, sy in eng._slide_queue] == [C, A], f"배수 순 아님: {eng._slide_queue}"
+        eng.portfolio.positions["ZZZ"] = Position(symbol="ZZZ", qty=1, avg_price=1.0, last_price=1.0)
+        await eng._slide_entries(t1 + dt.timedelta(minutes=5), {})
+        assert bought == [C], f"빈자리 1개를 배수 1위로 채우지 않았다: {bought}"
+        cum[C] += 9e6
+        await eng._slide_poll(t1 + dt.timedelta(minutes=10))
+        assert all(sy != C for _, sy in eng._slide_queue), "같은 종목을 하루에 두 번 발동시켰다"
+        eng._sold_today[A] = day
+        eng._slide_queue = [(5.0, A)]
+        eng.portfolio.positions.pop("ZZZ")
+        bought.clear()
+        await eng._slide_entries(t1 + dt.timedelta(minutes=10), {})
+        assert A not in bought, "오늘 판 종목을 다시 샀다"
+        eng._opening_done_day = ""
+        eng._opening_mode = lambda: True               # opening 모드에서는 장 시작 진입이 먼저다
+        assert not eng._slide_ready(t1), "장 시작 진입 전에 장중 추가 매수를 봤다"
+    finally:
+        for k, v in saved.items():
+            setattr(s, k, v)
     return ("주문 읽기 타임아웃·5xx 재시도 안 함(결과 불명) · 접속 실패 재시도 · 조회 재시도 · "
             "무손실 체결 채널 · 히스토그램 분위수·Prometheus · Date 헤더 시계 오차 · "
-            "장중 VWAP 청산(판정·배관) 모두 작동")
+            "장중 VWAP 청산(판정·배관) · 장중 추가 매수(첫 발동·배수 순·빈자리·당일 매도 제외) 모두 작동")
 
 
 # ============================================================ 실행

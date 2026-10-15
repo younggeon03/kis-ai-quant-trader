@@ -176,6 +176,15 @@ class TradingEngine:
         self._vwap_hist: Dict[str, deque] = {}           # 종목 → deque[(초, 누적 거래대금)]
         self._vwap_day: str = ""
         self._vwap_last_poll: float = 0.0
+        # --- 장중 추가 매수(SLIDE_ENTRY) — 유니버스 누적 거래대금 표본 · 오늘 처음 발동한 종목 ---
+        self._slide_profile: Dict[str, List[Optional[float]]] = {}
+        self._slide_hist: Dict[str, deque] = {}
+        self._slide_day: str = ""
+        self._slide_last_poll: float = 0.0
+        self._slide_task: Optional[asyncio.Task] = None
+        self._slide_fired: set = set()                  # 오늘 이미 한 번 발동한 종목(첫 발동만 쓴다)
+        self._slide_queue: List[tuple] = []             # [(배수, 종목)] 이번 조회에서 새로 발동
+        self._sold_today: Dict[str, str] = {}           # 오늘 판 종목(같은 날 다시 사지 않는다)
         # same_window 기준선 — 종목 → 지난 거래일들의 09:00~09:0N 거래대금(오래된 것부터, 최대 20)
         self._opening_hist: Dict[str, List[float]] = {}
         # 종목 → 분봉 파일의 마지막 날짜. 같은 날을 두 번 기록하지 않으려고 들고 있다.
@@ -394,6 +403,7 @@ class TradingEngine:
         self._refresh_alive(today)
         self._load_opening_history(today)
         self._load_vwap_profile()
+        self._load_slide_profile()
         self._flush_sliding_bars()
         self._load_sliding_history(today)
         self._ref_day = today
@@ -487,6 +497,154 @@ class TradingEngine:
             if ok:
                 self.ledger.write("exit", {"symbol": symbol, "qty": qty, "reason": "vwap",
                                            "detail": reason})
+
+    def _load_slide_profile(self) -> None:
+        """장중 추가 매수 기준선 표(같은 시각 직전 W분 거래대금, 지난 20일 중앙)를 읽는다."""
+        if not self.s.SLIDE_ENTRY:
+            return
+        path = Path(self.s.SLIDE_PROFILE_FILE)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            logger.warning(f"[장중·추가] 기준선 표 없음({path}) — 장중 추가 매수 안 함: {exc}")
+            self._slide_profile = {}
+            return
+        if int(data.get("window", 0)) != int(self.s.SLIDE_WINDOW):
+            logger.warning(f"[장중·추가] 기준선 창 {data.get('window')}분 ≠ 설정 {self.s.SLIDE_WINDOW}분 — 안 함")
+            self._slide_profile = {}
+            return
+        self._slide_profile = data.get("profile") or {}
+        logger.info(f"[장중·추가] 기준선 {len(self._slide_profile)}종목 · 최신 {data.get('as_of')} · "
+                    f"직전 {self.s.SLIDE_WINDOW}분 ≥ 평소 x{self.s.SLIDE_MULT:g} · "
+                    f"{self.s.SLIDE_POLL_SEC:g}초 간격")
+
+    def _slide_ready(self, now: dt.datetime) -> bool:
+        """장중 추가 매수를 볼 때인가 — 장 시작 진입을 처리한 뒤, 마지막 진입 분 전."""
+        if not self.s.SLIDE_ENTRY or not self._slide_profile:
+            return False
+        mins = (now.hour - 9) * 60 + now.minute
+        if mins > int(self.s.SLIDE_LAST_MIN):
+            return False
+        if self._opening_mode() and self._opening_done_day != now.strftime("%Y%m%d"):
+            return False
+        return True
+
+    def _slide_kick(self, now: dt.datetime) -> None:
+        """조회 간격이 됐으면 유니버스 누적 거래대금 조회를 태스크로 띄운다(루프를 막지 않는다).
+
+        유니버스 289종목이면 복수시세 10호출, 모의 유량(초당 1건)으로 약 10초다 — 루프 안에서 기다리면
+        그동안 VWAP 청산·체결 처리가 멈추므로 태스크로 떼어 내고 결과(`_slide_queue`)만 루프가 읽는다.
+        """
+        if not self._slide_ready(now):
+            return
+        if self._slide_task is not None and not self._slide_task.done():
+            return
+        t = now.timestamp()
+        if t - self._slide_last_poll < float(self.s.SLIDE_POLL_SEC):
+            return
+        self._slide_last_poll = t
+        self._slide_task = asyncio.create_task(self._slide_poll(now))
+
+    async def _slide_poll(self, now: dt.datetime) -> None:
+        """유니버스 누적 거래대금을 받아 직전 W분 거래대금(차분)이 평소 같은 시각의 k배를 **처음** 넘은 종목을 찾는다.
+
+        측정(`sliding_study.py`)처럼 종목마다 그날 **첫 발동**만 쓴다 — 자리가 없어 못 산 발동은 버린다.
+        """
+        day = now.strftime("%Y%m%d")
+        if day != self._slide_day:
+            self._slide_hist.clear()
+            self._slide_fired = set()
+            self._slide_queue = []
+            self._slide_day = day
+        syms = [x for x in self.universe if x in self._slide_profile]
+        if not syms:
+            return
+        try:
+            snap = await self.broker.get_turnovers(syms)
+        except Exception as exc:
+            logger.debug(f"[장중·추가] 복수시세 실패: {exc}")
+            return
+        t = now.timestamp()                      # 조회를 시작한 시각(10초 안팎 차이는 무시한다)
+        mins = (now.hour - 9) * 60 + now.minute
+        W = int(self.s.SLIDE_WINDOW) * 60
+        k = float(self.s.SLIDE_MULT)
+        fired = []
+        for symbol in syms:
+            row = snap.get(symbol)
+            if not row:
+                continue
+            tov = float(row.get("turnover", 0.0))
+            hist = self._slide_hist.setdefault(symbol, deque())
+            hist.append((t, tov))
+            while hist and t - hist[0][0] > W + 300:
+                hist.popleft()
+            if symbol in self._slide_fired:
+                continue
+            old = [h for h in hist if t - h[0] >= W]
+            if not old:
+                continue
+            t0, tov0 = old[-1]
+            recent = (tov - tov0) * W / max(1.0, t - t0)
+            prof = self._slide_profile.get(symbol) or []
+            m = mins - 1
+            base = prof[m] if 0 <= m < len(prof) else None
+            if base and base > 0 and recent >= k * base:
+                self._slide_fired.add(symbol)
+                fired.append((recent / base, symbol))
+        if fired:
+            fired.sort(reverse=True)
+            self._slide_queue = fired
+            logger.info(f"[장중·추가] 발동 {len(fired)}건 · 상위 " +
+                        ", ".join(f"{sy} x{r:.1f}" for r, sy in fired[:5]))
+
+    async def _slide_entries(self, now: dt.datetime, prices: Dict[str, float]) -> None:
+        """이번 조회에서 새로 발동한 종목으로 빈자리를 채운다(배수 큰 순, 오늘 판 종목·보유·매매불가 제외)."""
+        if not self._slide_queue:
+            return
+        queue, self._slide_queue = self._slide_queue, []
+        day = now.strftime("%Y%m%d")
+        inflight = self.open_orders_symbols() - self._compliance_exempt()
+        held = self._strategy_held()
+        free = max(0, int(self.s.MAX_POSITIONS) - len(held | set(inflight)))
+        for ratio, symbol in queue:
+            if free <= 0:
+                break
+            if (symbol in held or symbol in inflight or self._sold_today.get(symbol) == day
+                    or self._reject_today.get(symbol) == day):
+                continue
+            status: Dict[str, Any] = {}
+            try:
+                raw = await self.broker.inquire_price(symbol)
+                status = raw.get("output") or {}
+                px = to_float(status.get("stck_prpr")) or prices.get(symbol, 0.0)
+            except Exception:
+                px = prices.get(symbol, 0.0)
+            if self._vts_live() and not vts_tradable(status):
+                logger.info(f"[장중·추가] {symbol} 건너뜀 — 모의투자 매매불가 "
+                            f"(상태 {status.get('iscd_stat_cls_code')} · 증거금 {status.get('marg_rate')}%)")
+                self._reject_today[symbol] = day
+                continue
+            if px <= 0:
+                continue
+            self.latest_prices[symbol] = px
+            sig = Signal(symbol=symbol, score=RULE_TRIGGER_SCORE, price=px, ts=now,
+                         atr=self.atr_map.get(symbol, 0.0),
+                         volatility=self.vol_map.get(symbol, 0.0),
+                         bet=-1.0, reason="slide_turnover")
+            decision = self.risk.evaluate_entry(sig, self.portfolio, now,
+                                                pending=self._pending_notional(),
+                                                slot_exempt=self._compliance_exempt())
+            self.ledger.write("risk_decision", {
+                "symbol": symbol, "score": round(sig.score, 4), "ratio": round(ratio, 3),
+                "approved": decision.approved, "qty": decision.qty,
+                "reason": decision.reason, "path": "slide", **decision.detail})
+            if not decision.approved:
+                logger.info(f"[장중·추가] {symbol} 진입 거부 — {decision.reason}")
+                continue
+            ok = await self._submit(symbol, Side.BUY, decision.qty, px,
+                                    f"SLIDE|직전 {self.s.SLIDE_WINDOW}분 거래대금 x{ratio:.1f}")
+            if ok:
+                free -= 1
 
     def _vts_live(self) -> bool:
         """모의투자 실서버에 붙어 있는가(매매불가 종목 거름이 필요한 곳)."""
@@ -1110,6 +1268,7 @@ class TradingEngine:
         self._refresh_alive(today)
         self._load_opening_history(today)
         self._load_vwap_profile()
+        self._load_slide_profile()
         self._load_sliding_history(today)
         self._ref_day = today
         # 장중 전략은 일봉 신호를 **하루에 한 번도 다시 계산하지 않으므로**
@@ -1509,6 +1668,8 @@ class TradingEngine:
                                                "qty": qty, "msg": ack.msg, "code": ack.msg_cd})
             return False
 
+        if side is Side.SELL:
+            self._sold_today[symbol] = self._now().strftime("%Y%m%d")
         self.open_orders[ack.order_no] = {
             "symbol": symbol, "side": side.value, "qty": qty, "price": limit_price,
             "org_no": ack.org_no, "ts": self._now().isoformat(), "reason": reason,
@@ -1785,6 +1946,11 @@ class TradingEngine:
         # --- 장중 진입: opening 모드 (09:0N 판정 → 09:(N+지연) 한 번) ---
         if self._opening_mode() and self.risk.state == RiskState.NORMAL:
             await self._opening_entries(now, prices)
+
+        # --- 장중 추가 매수 (SLIDE_ENTRY) — 장 시작 진입이 끝난 뒤 빈자리를 장중 발동으로 ---
+        if self.s.SLIDE_ENTRY and self.risk.state == RiskState.NORMAL:
+            self._slide_kick(now)
+            await self._slide_entries(now, prices)
 
         # --- 장중 진입: sliding 모드 (감시 루프가 쌓은 발동) ---
         if self._sliding_mode() and self.risk.state == RiskState.NORMAL:
@@ -2173,6 +2339,8 @@ class TradingEngine:
             self._opening_task.cancel()        # 같은 이유 — 284종목 분봉 조회
         if self._opening_record_task is not None and not self._opening_record_task.done():
             self._opening_record_task.cancel()
+        if self._slide_task is not None and not self._slide_task.done():
+            self._slide_task.cancel()          # 장중 추가 매수 조회 — 종료 중에는 주문을 내지 않는다
         if self._sl_task is not None and not self._sl_task.done():
             self._sl_task.cancel()
         self._flush_sliding_bars()             # 오늘 받은 분봉을 남긴다(내일 기준선)
