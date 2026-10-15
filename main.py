@@ -57,7 +57,7 @@ from core.events import (
 )
 from monitor.app import DashboardServer
 from strategy.ai_model import EnsembleAlphaStrategy
-from strategy.exit_rules import daily_alive_burst
+from strategy.exit_rules import daily_alive_burst, vwap_fade
 from strategy.sliding import (LAST_ENTRY_MIN, SlidingWatcher, minute_turnover, rolling_sum,
                               same_time_base)
 from strategy.opening import (minute_index, opening_ratio, rank_triggers, same_window_ratio,
@@ -171,6 +171,11 @@ class TradingEngine:
         self._opening_done_day: str = ""                 # 진입을 처리한 날
         # 오늘 '매매불가'로 거부된 종목(종목 → 날짜). 같은 날 다시 주문하지 않는다
         self._reject_today: Dict[str, str] = {}
+        # --- 장중 VWAP 청산 — 보유 종목 누적 거래대금 표본(직전 W분 거래대금을 차분으로 만든다) ---
+        self._vwap_profile: Dict[str, List[Optional[float]]] = {}
+        self._vwap_hist: Dict[str, deque] = {}           # 종목 → deque[(초, 누적 거래대금)]
+        self._vwap_day: str = ""
+        self._vwap_last_poll: float = 0.0
         # same_window 기준선 — 종목 → 지난 거래일들의 09:00~09:0N 거래대금(오래된 것부터, 최대 20)
         self._opening_hist: Dict[str, List[float]] = {}
         # 종목 → 분봉 파일의 마지막 날짜. 같은 날을 두 번 기록하지 않으려고 들고 있다.
@@ -388,6 +393,7 @@ class TradingEngine:
         self._prime_intraday()
         self._refresh_alive(today)
         self._load_opening_history(today)
+        self._load_vwap_profile()
         self._flush_sliding_bars()
         self._load_sliding_history(today)
         self._ref_day = today
@@ -396,6 +402,91 @@ class TradingEngine:
             last = df[df["ts"].astype(str) < today]
             if not last.empty:
                 logger.info(f"[기준] 마지막 확정 봉 {last['ts'].iloc[-1]} (기준 종목 {self.universe[0]})")
+
+    def _load_vwap_profile(self) -> None:
+        """장중 VWAP 청산 기준선 표를 읽는다(없으면 청산 판정을 하지 않는다)."""
+        if not self.s.VWAP_EXIT:
+            return
+        path = Path(self.s.VWAP_PROFILE_FILE)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            logger.warning(f"[장중·VWAP] 기준선 표 없음({path}) — VWAP 청산 판정 안 함: {exc}")
+            self._vwap_profile = {}
+            return
+        if int(data.get("window", 0)) != int(self.s.VWAP_EXIT_WINDOW):
+            logger.warning(f"[장중·VWAP] 기준선 창 {data.get('window')}분 ≠ 설정 "
+                           f"{self.s.VWAP_EXIT_WINDOW}분 — 판정 안 함")
+            self._vwap_profile = {}
+            return
+        self._vwap_profile = data.get("profile") or {}
+        logger.info(f"[장중·VWAP] 기준선 {len(self._vwap_profile)}종목 · 최신 {data.get('as_of')} · "
+                    f"VWAP {self.s.VWAP_EXIT_BELOW:.0%} 아래 + 직전 {self.s.VWAP_EXIT_WINDOW}분 "
+                    f"< 평소 x{self.s.VWAP_EXIT_MULT:g}")
+
+    async def _vwap_exits(self, now: dt.datetime) -> None:
+        """보유 종목을 장중 VWAP 청산 규칙으로 본다(`vwap_fade`). 복수시세 한 번으로 보유 종목을 다 본다.
+
+        직전 W분 거래대금은 누적 거래대금(`acml_tr_pbmn`)의 차분이다 — W분 전 표본이 쌓여야 판정한다
+        (재시작 직후 W분은 판정하지 않는다). 기준선은 '분 m 에서 끝나는 직전 W분'이므로 지금 막 끝난
+        분(경과 분 - 1)의 값을 쓴다. 요건 전용 소액 매매 포지션은 보지 않는다.
+        """
+        if not self.s.VWAP_EXIT or not self._vwap_profile:
+            return
+        mins = (now.hour - 9) * 60 + now.minute
+        if mins < int(self.s.VWAP_EXIT_START_MIN):
+            return
+        t = now.timestamp()
+        if t - self._vwap_last_poll < float(self.s.VWAP_EXIT_POLL_SEC):
+            return
+        self._vwap_last_poll = t
+        day = now.strftime("%Y%m%d")
+        if day != self._vwap_day:
+            self._vwap_hist.clear()
+            self._vwap_day = day
+        held = sorted(self._strategy_held())
+        if not held:
+            return
+        try:
+            snap = await self.broker.get_turnovers(held)
+        except Exception as exc:
+            logger.debug(f"[장중·VWAP] 복수시세 실패: {exc}")
+            return
+        W = int(self.s.VWAP_EXIT_WINDOW) * 60
+        for symbol in held:
+            row = snap.get(symbol)
+            if not row:
+                continue
+            price = float(row.get("price", 0.0))
+            vol = float(row.get("acml_vol", 0.0))
+            tov = float(row.get("turnover", 0.0))
+            hist = self._vwap_hist.setdefault(symbol, deque())
+            hist.append((t, tov))
+            while hist and t - hist[0][0] > W + 300:
+                hist.popleft()
+            old = [h for h in hist if t - h[0] >= W]
+            if not old:
+                continue                            # W분 전 표본이 아직 없다
+            t0, tov0 = old[-1]
+            recent = (tov - tov0) * W / max(1.0, t - t0)
+            prof = self._vwap_profile.get(symbol) or []
+            m = mins - 1
+            base = prof[m] if 0 <= m < len(prof) else None
+            reason = vwap_fade(price, tov, vol, recent, base,
+                               below=float(self.s.VWAP_EXIT_BELOW), mult=float(self.s.VWAP_EXIT_MULT))
+            if reason is None:
+                continue
+            pos = self.portfolio.positions.get(symbol)
+            if pos is None or pos.qty <= 0:
+                continue
+            qty = self._sellable_qty(symbol, pos.qty)
+            if qty <= 0:
+                continue                            # 이미 낸 매도가 체결 대기 중이다
+            logger.info(f"[장중·VWAP] {symbol} 매도 — {reason}")
+            ok = await self._submit(symbol, Side.SELL, qty, price or pos.last_price, f"VWAP|{reason}")
+            if ok:
+                self.ledger.write("exit", {"symbol": symbol, "qty": qty, "reason": "vwap",
+                                           "detail": reason})
 
     def _vts_live(self) -> bool:
         """모의투자 실서버에 붙어 있는가(매매불가 종목 거름이 필요한 곳)."""
@@ -1018,6 +1109,7 @@ class TradingEngine:
         await self._load_held_bars()
         self._refresh_alive(today)
         self._load_opening_history(today)
+        self._load_vwap_profile()
         self._load_sliding_history(today)
         self._ref_day = today
         # 장중 전략은 일봉 신호를 **하루에 한 번도 다시 계산하지 않으므로**
@@ -1664,6 +1756,9 @@ class TradingEngine:
             if ok:
                 self.ledger.write("exit", {"symbol": order.symbol, "qty": qty,
                                            "reason": order.reason.value, "detail": order.detail})
+
+        # --- 장중 VWAP 청산 (설정 VWAP_EXIT) ---
+        await self._vwap_exits(now)
 
         # --- 장중 청산 (분봉 전략) ---
         # 리스크 청산 뒤에 본다. 킬스위치·급락은 장중 규칙보다 우선해야 한다.

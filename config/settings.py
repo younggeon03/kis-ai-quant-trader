@@ -365,6 +365,17 @@ class Settings(BaseSettings):
     INTRADAY_FLATTEN: bool = Field(
         default=True,
         description="15:15 전량 청산. false 면 일봉 청산 경로로 넘겨 다일 보유한다")
+    # 장중 VWAP 청산(2026-10-15, 사용자 결정) — 가격 < 당일 VWAP x (1-below) 이고 직전 W분 거래대금 <
+    # mult x 지난 20일 같은 시각 중앙이면 판다(`strategy/exit_rules.py::vwap_fade`). 기준선 표는
+    # `scripts/build_turnover_profile.py` 가 노트북 분봉으로 만들어 보낸다.
+    VWAP_EXIT: bool = Field(default=False, description="장중 VWAP 청산 켜기")
+    VWAP_EXIT_BELOW: float = Field(default=0.0, description="VWAP 대비 얼마나 아래여야 하나")
+    VWAP_EXIT_MULT: float = Field(default=1.0, description="직전 W분 거래대금 < mult x 평소면 판다")
+    VWAP_EXIT_WINDOW: int = Field(default=10, description="거래대금 창 W(분) — 기준선 표와 같아야 한다")
+    VWAP_EXIT_START_MIN: int = Field(default=10, description="09:00 부터 이 분 전에는 판정하지 않는다")
+    VWAP_EXIT_POLL_SEC: float = Field(default=20.0, description="보유 종목 누적 거래대금 조회 간격(초)")
+    VWAP_PROFILE_FILE: str = Field(default="data/cache/turnover_profile_w10.json",
+                                   description="같은 시각 직전 W분 거래대금 기준선 표")
     INTRADAY_VOL_MULT: float = Field(
         default=12.0, description="돌파 분의 거래량 ÷ 전일 분당 평균 하한")
     # 왜 12배인가 (분봉 리플레이 250거래일 · 거래 약 500건)

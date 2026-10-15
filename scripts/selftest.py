@@ -2198,8 +2198,62 @@ async def test_server_reliability():
     finally:
         for k, v in saved.items():
             setattr(s, k, v)
+
+    # --- 장중 VWAP 청산: 순수 판정 + 엔진 배관(누적 거래대금 차분 · W분 전 표본 · 기준선 분 인덱스) ---
+    import datetime as dt
+    import types
+    from collections import deque
+    from core.events import Position
+    from main import TradingEngine
+    from strategy.exit_rules import vwap_fade
+    # VWAP = 10억/10만주 = 10,000원
+    assert vwap_fade(9_900, 1e9, 1e5, 4e6, 5e6) is not None, "VWAP 아래 + 거래 감소인데 안 팔았다"
+    assert vwap_fade(10_100, 1e9, 1e5, 4e6, 5e6) is None, "VWAP 위인데 팔았다"
+    assert vwap_fade(9_900, 1e9, 1e5, 6e6, 5e6) is None, "거래가 평소 이상인데 팔았다"
+    assert vwap_fade(9_900, 1e9, 1e5, 4e6, None) is None, "기준선을 모르는데 팔았다"
+    assert vwap_fade(9_950, 1e9, 1e5, 4e6, 5e6, below=0.01) is None, "VWAP 1% 아래 조건 무시"
+
+    saved = {k: getattr(s, k) for k in ("VWAP_EXIT", "VWAP_EXIT_WINDOW", "VWAP_EXIT_START_MIN",
+                                        "VWAP_EXIT_POLL_SEC")}
+    try:
+        s.VWAP_EXIT, s.VWAP_EXIT_WINDOW, s.VWAP_EXIT_START_MIN, s.VWAP_EXIT_POLL_SEC = True, 10, 10, 0.0
+        eng = TradingEngine(s, enable_dashboard=False)
+        eng._vwap_profile = {"AAA": [5e6] * 380}     # 평소 직전 10분 5백만
+        cum = {"v": 9.0e8}
+
+        class _B:
+            async def get_turnovers(self, symbols):
+                # VWAP = 누적 9억 / 9만주 = 1만원 → 9,900원은 VWAP 아래
+                return {"AAA": {"price": 9_900.0, "acml_vol": 9e4, "turnover": cum["v"]}}
+        eng.broker = _B()
+        eng.portfolio.positions["AAA"] = Position(symbol="AAA", qty=10, avg_price=10_000.0,
+                                                  last_price=10_000.0)
+        sold = []
+
+        async def _submit(symbol, side, qty, price, reason):
+            sold.append((symbol, qty, reason))
+            return True
+        eng._submit = _submit
+        t0 = dt.datetime(2026, 10, 15, 10, 0)
+        await eng._vwap_exits(t0)
+        assert not sold, "W분 전 표본도 없이 팔았다"
+        cum["v"] += 3e6                                # 10분 동안 3백만(평소 5백만보다 적다)
+        await eng._vwap_exits(t0 + dt.timedelta(minutes=10))
+        assert sold and sold[0][0] == "AAA", f"VWAP 아래 + 거래 감소인데 안 팔았다: {sold}"
+        sold.clear()
+        eng._vwap_hist.clear()
+        eng._vwap_hist["AAA"] = deque([(t0.timestamp(), 9.0e8)])
+        cum["v"] = 9.0e8 + 8e6                         # 10분 8백만(평소 이상) → 팔지 않는다
+        await eng._vwap_exits(t0 + dt.timedelta(minutes=10))
+        assert not sold, "거래가 평소 이상인데 팔았다"
+        await eng._vwap_exits(dt.datetime(2026, 10, 15, 9, 5))
+        assert not sold, "09:10 전에 판정했다"
+    finally:
+        for k, v in saved.items():
+            setattr(s, k, v)
     return ("주문 읽기 타임아웃·5xx 재시도 안 함(결과 불명) · 접속 실패 재시도 · 조회 재시도 · "
-            "무손실 체결 채널 · 히스토그램 분위수·Prometheus · Date 헤더 시계 오차 모두 작동")
+            "무손실 체결 채널 · 히스토그램 분위수·Prometheus · Date 헤더 시계 오차 · "
+            "장중 VWAP 청산(판정·배관) 모두 작동")
 
 
 # ============================================================ 실행

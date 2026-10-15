@@ -318,3 +318,30 @@ def daily_alive_burst(hist) -> float:
     if not (med > 0 and np.isfinite(last)):
         return 0.0
     return last / med
+
+
+def vwap_fade(price: float, cum_turnover: float, cum_volume: float,
+              recent_turnover: Optional[float], base_turnover: Optional[float],
+              below: float = 0.0, mult: float = 1.0) -> Optional[str]:
+    """장중 VWAP 청산 — 가격이 당일 VWAP 아래로 밀렸고 직전 W분 거래대금이 평소보다 적으면 사유를 돌려준다.
+
+    "오늘 산 사람 대부분이 손실인데 받아 줄 거래도 식고 있다"는 뜻이다. 측정
+    (`scripts/takeprofit_study.py --vwap`, 289종목, 2026-10-15): VWAP 아래 + 직전 10분 < 평소 x1 →
+    P(+100%) 6.47% vs 장중 매도 없음 3.98%. 단, 이웃 칸(15·20·30분, VWAP 1~3% 아래)은 0~6%로 흩어져
+    확인 측정을 통과하지 못했다 — 사용자 결정으로 넣었다(2026-10-15).
+
+    - VWAP = 누적 거래대금 / 누적 거래량(KIS `acml_tr_pbmn`/`acml_vol`, 측정은 분봉 종가 x 거래량 합)
+    - `recent_turnover` = 직전 W분 거래대금, `base_turnover` = 지난 20일 같은 시각 직전 W분 중앙
+      (`scripts/build_turnover_profile.py`). 둘 중 하나라도 모르면 판정하지 않는다(None).
+    """
+    if not (price > 0 and cum_volume > 0 and cum_turnover > 0):
+        return None
+    vwap = cum_turnover / cum_volume
+    if not price < vwap * (1.0 - below):
+        return None
+    if recent_turnover is None or base_turnover is None or not base_turnover > 0:
+        return None
+    if not recent_turnover < mult * base_turnover:
+        return None
+    return (f"VWAP {vwap:,.0f} 아래({price / vwap - 1:+.2%}) · "
+            f"직전 거래대금 평소 x{recent_turnover / base_turnover:.2f}")
