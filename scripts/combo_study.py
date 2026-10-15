@@ -59,7 +59,7 @@ def _px_at(op_row: np.ndarray, e: int) -> float:
 
 def run_window_intraday(events: List[Dict[str, Any]], arm: str, d0: int, d1: int,
                         closes: Dict[str, Dict[int, float]], cost: float, slots: int,
-                        weight: float) -> float:
+                        weight: float, slide_cap: Optional[int] = None) -> float:
     """하루 안의 진입·장중 청산을 분 순서로 처리하는 30일 창 수익률.
 
     청산 `when`: 'open'(그날 장 시작 전), 'intra'(그날 `exit_min` 분), 'close'(장 마감 뒤).
@@ -86,9 +86,12 @@ def run_window_intraday(events: List[Dict[str, Any]], arm: str, d0: int, d1: int
 
     for d in range(d0, d1 + 1):
         sold_today = release(d, EOD_MIN, ("open",))
+        slide_n = 0
         for ev in sorted(by_day.get(d, []), key=lambda e: e["detect_min"]):
             sold_today |= release(d, ev["detect_min"], ("intra",))
             if len(held) >= slots or ev["sym"] in sold_today:
+                continue
+            if slide_cap is not None and ev.get("src") == "slide" and slide_n >= slide_cap:
                 continue
             if any(h["sym"] == ev["sym"] for h in held):
                 continue
@@ -101,6 +104,8 @@ def run_window_intraday(events: List[Dict[str, Any]], arm: str, d0: int, d1: int
             held.append({"alloc": alloc, "exit_d": x["exit_d"], "when": x["when"],
                          "exit_min": x["exit_min"], "ret": x["ret"], "sym": ev["sym"],
                          "entry_px": ev["entry_px"]})
+            if ev.get("src") == "slide":
+                slide_n += 1
         release(d, EOD_MIN, ("intra", "close"))
     for h in held:
         px = closes[h["sym"]].get(d1)
@@ -125,6 +130,9 @@ def main() -> int:
     ap.add_argument("--stop", type=float, default=0.25)
     ap.add_argument("--slots", type=int, default=2)
     ap.add_argument("--out", default="reports/combo_study.json")
+    ap.add_argument("--slide-grid", default="",
+                    help="질 좋은 장중 매수 격자 — 'W:k,W:k' (예 1:20,3:10,5:10). 주면 각 설정마다 "
+                         "하루 상한(없음·1) x 오전만(없음·10시 전) x 전일比(없음·+3% 이상) 칸을 VWAP 청산으로 잰다")
     ap.add_argument("--diag", action="store_true", help="원인 진단(출처·청산별 통계 · 회전 수 · 비용 0)")
     args = ap.parse_args()
 
@@ -144,7 +152,15 @@ def main() -> int:
     ow, sw, vw = args.open_window, args.slide_window, args.vwap_roll
 
     open_evs: List[Dict[str, Any]] = []
-    slide_evs: List[Dict[str, Any]] = []
+    if args.slide_grid:
+        cfgs = []
+        for tok in args.slide_grid.split(","):
+            W_, k_m = tok.split(":")
+            cfgs.append((int(W_), float(k_m), 5 + int(W_) - 1))
+    else:
+        cfgs = [(args.slide_window, args.slide_mult, args.slide_start)]
+    slide_by_cfg: Dict[tuple, List[Dict[str, Any]]] = {cfg: [] for cfg in cfgs}
+    slide_evs = slide_by_cfg[cfgs[0]]
     closes: Dict[str, Dict[int, float]] = {}
     fp_src: Dict[str, np.ndarray] = {}
     for k_, (sym, df) in enumerate(sorted(panel.items()), 1):
@@ -177,7 +193,14 @@ def main() -> int:
             TV[j] = minute_turnover(mi, g["close"].to_numpy(float), g["volume"].to_numpy(float), N_MIN)
             ok = (mi >= 0) & (mi < N_MIN)
             OP[j, mi[ok]] = g["open"].to_numpy(float)[ok]
-        S_sw = np.vstack([rolling_sum(TV[j], sw) for j in range(len(days))])
+        S_by_w = {}
+        base_by_w = {}
+        for (W_, _k, _st) in cfgs:
+            if W_ not in S_by_w:
+                S_by_w[W_] = np.vstack([rolling_sum(TV[j], W_) for j in range(len(days))])
+                b_ = pd.DataFrame(S_by_w[W_]).rolling(20, min_periods=10).median().shift(1).to_numpy()
+                b_[~(b_ > 0)] = np.nan
+                base_by_w[W_] = b_
         S_vw = np.vstack([rolling_sum(TV[j], vw) for j in range(len(days))])
         base_vw = pd.DataFrame(S_vw).rolling(20, min_periods=10).median().shift(1).to_numpy()
         base_vw[~(base_vw > 0)] = np.nan
@@ -216,33 +239,38 @@ def main() -> int:
                     open_evs.append({"sym": sym, "d": dc, "entry_px": px, "detect_min": ow + 1 / (1 + r),
                                      "src": "open", "chase": px / c[i - 1] - 1.0, "ratio": r,
                                      **exits(px, i, ow)})
-            # 장중 추가 — 그날 첫 발동(창 끝 분 ≥ slide_start)
+            # 장중 추가 — 설정마다 그날 첫 발동(창 끝 분 ≥ 시작 분)
             if j >= 10:
-                base_t = same_time_base(S_sw[:j])
-                row = S_sw[j].copy()
-                row[: args.slide_start] = np.nan
-                trig = first_trigger(row, base_t, args.slide_mult)
-                if trig is not None:
+                for cfg in cfgs:
+                    W_, k_m, st_ = cfg
+                    row = S_by_w[W_][j].copy()
+                    row[:st_] = np.nan
+                    trig = first_trigger(row, base_by_w[W_][j], k_m)
+                    if trig is None:
+                        continue
                     mm, r = trig
                     e = mm + 1
-                    if e <= LAST_ENTRY_MIN:
-                        px = _px_at(OP[j], e)
-                        if np.isfinite(px):
-                            slide_evs.append({"sym": sym, "d": dc, "entry_px": px,
+                    if e > LAST_ENTRY_MIN:
+                        continue
+                    px = _px_at(OP[j], e)
+                    if not np.isfinite(px):
+                        continue
+                    slide_by_cfg[cfg].append({"sym": sym, "d": dc, "entry_px": px,
                                               "detect_min": e + 1 / (1 + r), "src": "slide",
                                               "chase": px / c[i - 1] - 1.0, "ratio": r, "entry_min": e,
                                               **exits(px, i, e)})
         if k_ % 50 == 0:
-            logger.info(f"[Combo] {k_}/{len(panel)}종목 · 장 시작 {len(open_evs):,} · 장중 {len(slide_evs):,}")
+            logger.info(f"[Combo] {k_}/{len(panel)}종목 · 장 시작 {len(open_evs):,} · 장중 "
+                        + " · ".join(f"{c_[0]}분x{c_[1]:g} {len(v):,}" for c_, v in slide_by_cfg.items()))
 
     fp = _fingerprint(fp_src)
     first = cal[min(t for t in all_days if t >= args.since)]
     last = max(max(v) for v in closes.values())
     starts = list(range(first, last - COMP_BARS + 2))
 
-    def evaluate(evs: List[Dict[str, Any]], arm: str) -> np.ndarray:
+    def evaluate(evs: List[Dict[str, Any]], arm: str, cap: Optional[int] = None) -> np.ndarray:
         return np.array([run_window_intraday(evs, arm, d0, d0 + COMP_BARS - 1, closes, cost,
-                                             args.slots, weight) for d0 in starts])
+                                             args.slots, weight, cap) for d0 in starts])
 
     cells = {
         "장 시작 + vol_alive (10/14 규칙)": (open_evs, "alive"),
@@ -250,7 +278,23 @@ def main() -> int:
         "장 시작·장중 추가 + vol_alive": (open_evs + slide_evs, "alive"),
         "장 시작·장중 추가 + VWAP 청산 (지금 서버)": (open_evs + slide_evs, "vwap"),
     }
-    res = {name: evaluate(evs, arm) for name, (evs, arm) in cells.items()}
+    caps = {}
+    if args.slide_grid:
+        cells = {"장 시작 + vol_alive (10/14 규칙)": (open_evs, "alive"),
+                 "장 시작 + VWAP 청산": (open_evs, "vwap")}
+        for cfg, evs_c in slide_by_cfg.items():
+            W_, k_m, _ = cfg
+            cells[f"{W_}분x{k_m:g} · vol_alive"] = (open_evs + evs_c, "alive")
+            for cap in (None, 1):
+                for before in (None, 60):
+                    for chase in (None, 0.03):
+                        f = [e for e in evs_c if (before is None or e["entry_min"] < before)
+                             and (chase is None or e["chase"] >= chase)]
+                        name = (f"{W_}분x{k_m:g} · VWAP" + (" · 하루1회" if cap else "")
+                                + (" · 10시전" if before else "") + (" · 전일+3%↑" if chase else ""))
+                        cells[name] = (open_evs + f, "vwap")
+                        caps[name] = cap
+    res = {name: evaluate(evs, arm, caps.get(name)) for name, (evs, arm) in cells.items()}
     if args.diag:
         _diagnose(open_evs, slide_evs, closes, cost, args, weight, starts, cal)
     ref = res["장 시작 + vol_alive (10/14 규칙)"]
@@ -260,7 +304,9 @@ def main() -> int:
                      "p50up": float((r >= 0.5).mean()), "p100up": float((r >= 1.0).mean()),
                      "loss20": float((r <= -0.2).mean()), "beats_ref": float((r > ref).mean())})
     out = {"data_fingerprint": {"hash": fp, "symbols": len(fp_src)}, "config": vars(args),
-           "events": {"opening": len(open_evs), "slide": len(slide_evs)}, "windows": len(starts),
+           "events": {"opening": len(open_evs),
+                      **{f"slide_{c_[0]}x{c_[1]:g}": len(v) for c_, v in slide_by_cfg.items()}},
+           "windows": len(starts),
            "rows": rows}
     op_ = Path(args.out)
     op_.parent.mkdir(parents=True, exist_ok=True)
@@ -270,9 +316,9 @@ def main() -> int:
     print(f" 조합 측정 — 데이터 지문 {fp} ({len(fp_src)}종목) · 장 시작 {len(open_evs):,} · 장중 첫 발동 "
           f"{len(slide_evs):,} · 30거래일 창 {len(starts)}개")
     print("=" * 104)
-    print(f" {'규칙':<34}{'중앙':>9}{'p90':>9}{'P(+50%)':>10}{'P(+100%)':>10}{'P(-20%)':>9}{'10/14대비':>10}")
+    print(f" {'규칙':<44}{'중앙':>9}{'p90':>9}{'P(+50%)':>10}{'P(+100%)':>10}{'P(-20%)':>9}{'10/14대비':>10}")
     for x in rows:
-        print(f" {x['rule']:<34}{x['median'] * 100:+8.1f}%{x['p90'] * 100:+8.1f}%{x['p50up'] * 100:9.2f}%"
+        print(f" {x['rule']:<44}{x['median'] * 100:+8.1f}%{x['p90'] * 100:+8.1f}%{x['p50up'] * 100:9.2f}%"
               f"{x['p100up'] * 100:9.2f}%{x['loss20'] * 100:8.2f}%{x['beats_ref'] * 100:9.1f}%")
     print("=" * 104)
     print(f" 저장 → {op_}")

@@ -626,6 +626,14 @@ class TradingEngine:
                 continue
             if px <= 0:
                 continue
+            min_chase = float(self.s.SLIDE_MIN_CHASE)
+            if min_chase > 0:
+                prev_close = float((self._prev_daily.get(symbol) or (0.0,))[0])
+                if not (prev_close > 0 and px / prev_close - 1.0 >= min_chase):
+                    logger.info(f"[장중·추가] {symbol} 건너뜀 — 전일 대비 "
+                                f"{(px / prev_close - 1.0) if prev_close > 0 else float('nan'):+.2%} "
+                                f"< {min_chase:+.0%}")
+                    continue
             self.latest_prices[symbol] = px
             sig = Signal(symbol=symbol, score=RULE_TRIGGER_SCORE, price=px, ts=now,
                          atr=self.atr_map.get(symbol, 0.0),

@@ -385,6 +385,9 @@ class Settings(BaseSettings):
     SLIDE_MULT: float = Field(default=3.0, description="직전 W분 거래대금 ≥ k x 평소 같은 시각")
     SLIDE_POLL_SEC: float = Field(default=20.0, description="유니버스 누적 거래대금 조회 간격(초)")
     SLIDE_LAST_MIN: int = Field(default=379, description="09:00 부터 이 분 뒤에는 사지 않는다(15:19)")
+    # 질 거르기(2026-10-16 측정 `combo_study.py --slide-grid`, VWAP 청산과 함께): 5분 x10 · 전일 대비 +3% 이상
+    # → P(+100%) 7.21% · 30일 -20% 이하 19.9% (5분 x3 제한 없음은 3.48% · 32.8%). 진입가 / 전일 종가 - 1 하한
+    SLIDE_MIN_CHASE: float = Field(default=0.0, description="장중 추가 매수 — 전일 종가 대비 이만큼 이상 오른 종목만")
     SLIDE_PROFILE_FILE: str = Field(default="data/cache/turnover_profile_w5.json",
                                     description="같은 시각 직전 W분 거래대금 기준선 표(장중 매수용)")
     INTRADAY_VOL_MULT: float = Field(

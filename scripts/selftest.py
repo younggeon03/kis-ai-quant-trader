@@ -2253,7 +2253,8 @@ async def test_server_reliability():
             setattr(s, k, v)
 
     # --- 장중 추가 매수: 첫 발동만 · 배수 순 · 빈자리만 · 오늘 판 종목 제외 ---
-    saved = {k: getattr(s, k) for k in ("SLIDE_ENTRY", "SLIDE_WINDOW", "SLIDE_MULT", "MAX_POSITIONS")}
+    saved = {k: getattr(s, k) for k in ("SLIDE_ENTRY", "SLIDE_WINDOW", "SLIDE_MULT", "MAX_POSITIONS",
+                                        "SLIDE_MIN_CHASE")}
     try:
         s.SLIDE_ENTRY, s.SLIDE_WINDOW, s.SLIDE_MULT, s.MAX_POSITIONS = True, 5, 3.0, 2
         eng = TradingEngine(s, enable_dashboard=False)
@@ -2297,6 +2298,15 @@ async def test_server_reliability():
         bought.clear()
         await eng._slide_entries(t1 + dt.timedelta(minutes=10), {})
         assert A not in bought, "오늘 판 종목을 다시 샀다"
+        # 전일 대비 하한(SLIDE_MIN_CHASE) — 전일 종가 1만원, 지금 1만원(+0%)이면 +3% 하한에 막힌다
+        s.SLIDE_MIN_CHASE = 0.03
+        eng._prev_daily = {A: (10_000.0, 1e5, 1e9), B: (9_500.0, 1e5, 1e9)}
+        eng._sold_today = {}
+        bought.clear()
+        eng._slide_queue = [(5.0, A), (4.0, B)]
+        await eng._slide_entries(t1 + dt.timedelta(minutes=11), {})
+        assert bought == [B], f"전일 대비 +3% 하한이 안 걸렸다(A +0% 는 막고 B +5.3% 는 사야 한다): {bought}"
+        s.SLIDE_MIN_CHASE = 0.0
         eng._opening_done_day = ""
         eng._opening_mode = lambda: True               # opening 모드에서는 장 시작 진입이 먼저다
         assert not eng._slide_ready(t1), "장 시작 진입 전에 장중 추가 매수를 봤다"
@@ -2305,7 +2315,7 @@ async def test_server_reliability():
             setattr(s, k, v)
     return ("주문 읽기 타임아웃·5xx 재시도 안 함(결과 불명) · 접속 실패 재시도 · 조회 재시도 · "
             "무손실 체결 채널 · 히스토그램 분위수·Prometheus · Date 헤더 시계 오차 · "
-            "장중 VWAP 청산(판정·배관) · 장중 추가 매수(첫 발동·배수 순·빈자리·당일 매도 제외) 모두 작동")
+            "장중 VWAP 청산(판정·배관) · 장중 추가 매수(첫 발동·배수 순·빈자리·당일 매도 제외·전일 대비 하한) 모두 작동")
 
 
 # ============================================================ 실행
