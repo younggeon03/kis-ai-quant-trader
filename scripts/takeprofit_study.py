@@ -302,6 +302,7 @@ def main() -> int:
     ap.add_argument("--opening-dir", default="data/cache/opening")
     ap.add_argument("--fullday-dir", default="data/cache/fullday")
     ap.add_argument("--since", default="20250102")
+    ap.add_argument("--until", default="99999999", help="이 날까지의 진입·30일 창만(기간 나눠 확인용)")
     ap.add_argument("--window", type=int, default=10)
     ap.add_argument("--mult", type=float, default=3.0)
     ap.add_argument("--lag", type=int, default=0)
@@ -416,7 +417,7 @@ def main() -> int:
         pos = {t: i for i, t in enumerate(ts)}
 
         m = pd.read_csv(odir / f"{sym}.csv", dtype={"ts": str})
-        m = m[m["ts"].str[:8] >= args.since]
+        m = m[(m["ts"].str[:8] >= args.since) & (m["ts"].str[:8] <= args.until)]
         if m.empty:
             continue
         m = m.assign(mi=minute_index(m["ts"]), day=m["ts"].str[:8])
@@ -515,6 +516,9 @@ def main() -> int:
     fp = _fingerprint(fp_src)
     first = cal[min(t for t in all_days if t >= args.since)]
     last = max(max(v) for v in closes.values())
+    in_range = [t for t in all_days if t <= args.until]
+    if in_range:
+        last = min(last, cal[in_range[-1]])
     ref = evaluate(base_events, closes, cost, args.slots, weight, first, last)
     rr = np.array([e["rule"]["ret"] for e in base_events])
 
