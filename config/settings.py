@@ -812,6 +812,10 @@ class Settings(BaseSettings):
         syms = [str(x) for x in (blob.get("tradable") or []) if str(x).strip()]
         return syms or list(self.UNIVERSE)
 
+    def name_of(self, symbol: str) -> str:
+        """종목명. 유니버스 파일에 없으면 빈 문자열(화면은 코드로 대신 보인다)."""
+        return str(self._universe_blob().get("names", {}).get(symbol, "") or "")
+
     def market_cap_of(self, symbol: str) -> float:
         """상장 시가총액(**원**). 유니버스 파일에 없으면 0.
 

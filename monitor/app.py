@@ -452,12 +452,12 @@ async function refresh() {
   const pos = p.positions||[];
   $('posCount').textContent = pos.length ? `${pos.length}종목 · 평가손익 ${signed(pos.reduce((a,x)=>a+(x.unrealized||0),0),0)}원` : '';
   $('positions').innerHTML = rows(
-    ['종목','수량','평단','현재가','수익률','손절가'],
+    ['종목','수량','평단','현재가','평가금액','수익률','손절가'],
     pos.map(x => {
       const w = Math.min(100, Math.abs(x.pnl_pct||0) / 6 * 50);
       return [
-        esc(x.symbol) + `<span class="sub">${esc(x.sector||'')}</span>`,
-        num(x.qty), num(x.avg_price), num(x.last_price),
+        esc(x.name || x.symbol) + `<span class="sub">${esc(x.name ? x.symbol : (x.sector||''))}</span>`,
+        num(x.qty), num(x.avg_price), num(x.last_price), num((x.qty||0) * (x.last_price||0)),
         `<span class="${tone(x.pnl_pct)}">${signed(x.pnl_pct)}%</span>
          <div class="pnlbar"><span class="axis"></span>
            <i class="" style="${(x.pnl_pct>=0
@@ -564,6 +564,8 @@ def create_app(state_provider: StateProvider, settings=None):
             state.setdefault("system", {})
             state["system"]["mdd_soft"] = settings.MDD_SOFT_LIMIT * 100
             state["system"]["mdd_hard"] = settings.MDD_HARD_LIMIT * 100
+            for pos in (state.get("portfolio") or {}).get("positions") or []:
+                pos.setdefault("name", settings.name_of(str(pos.get("symbol", ""))))
         return state
 
     @app.get("/metrics", response_class=PlainTextResponse)
