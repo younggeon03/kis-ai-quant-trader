@@ -2257,6 +2257,7 @@ async def test_server_reliability():
                                         "SLIDE_MIN_CHASE")}
     try:
         s.SLIDE_ENTRY, s.SLIDE_WINDOW, s.SLIDE_MULT, s.MAX_POSITIONS = True, 5, 3.0, 2
+        s.SLIDE_MIN_CHASE = 0.0        # `.env`(0.03)가 새면 전일 종가가 없어 전부 막힌다 — 하한은 아래에서 따로 본다
         eng = TradingEngine(s, enable_dashboard=False)
         A, B, C = list(s.UNIVERSE[:3])     # 실제 종목(대회 규정 관문을 통과해야 한다)
         eng.universe = [A, B, C]
