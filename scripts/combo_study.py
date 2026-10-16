@@ -133,6 +133,9 @@ def main() -> int:
     ap.add_argument("--slide-grid", default="",
                     help="질 좋은 장중 매수 격자 — 'W:k,W:k' (예 1:20,3:10,5:10). 주면 각 설정마다 "
                          "하루 상한(없음·1) x 오전만(없음·10시 전) x 전일比(없음·+3% 이상) 칸을 VWAP 청산으로 잰다")
+    ap.add_argument("--vwap-variants", action="store_true",
+                    help="지금 서버 칸(--slide-grid 의 장중 설정 · 전일+3%%↑)을 VWAP 청산 조건만 바꿔 잰다: "
+                         "AND(지금) · OR · VWAP 만 · 거래만")
     ap.add_argument("--diag", action="store_true", help="원인 진단(출처·청산별 통계 · 회전 수 · 비용 0)")
     args = ap.parse_args()
 
@@ -223,7 +226,20 @@ def main() -> int:
                 vwap_arm = {"exit_d": cal[ts[min(vx_i, len(ts) - 1)]], "when": vwhen,
                             "exit_min": -1 if vwhen == "open" else EOD_MIN,
                             "ret": vx_px / entry_px - 1.0 - cost}
-            return {"alive": base, "vwap": vwap_arm}
+            arms = {"alive": base, "vwap": vwap_arm}
+            if args.vwap_variants:
+                for key, (bl, vm, cb) in VWAP_VARIANTS.items():
+                    xi, xpx, xw, xh, _ = vwap_exit(entry_px, i, entry_mi, args.max_hold, args.stop, o, c, burst,
+                                                   args.hold_vol, ts, intraday, bl, vm, same_vw, combine=cb)
+                    if xh:
+                        arms[key] = {"exit_d": cal[ts[xi]], "when": "intra",
+                                     "exit_min": _vwap_min(intraday.get(ts[xi]), entry_mi if xi == i else -1, xpx),
+                                     "ret": xpx / entry_px - 1.0 - cost}
+                    else:
+                        arms[key] = {"exit_d": cal[ts[min(xi, len(ts) - 1)]], "when": xw,
+                                     "exit_min": -1 if xw == "open" else EOD_MIN,
+                                     "ret": xpx / entry_px - 1.0 - cost}
+            return arms
 
         for j, dy in enumerate(days):
             i = pos.get(dy)
@@ -294,6 +310,9 @@ def main() -> int:
                                 + (" · 10시전" if before else "") + (" · 전일+3%↑" if chase else ""))
                         cells[name] = (open_evs + f, "vwap")
                         caps[name] = cap
+                        if args.vwap_variants and cap is None and before is None and chase is not None:
+                            for key, label in VWAP_VARIANT_LABELS.items():
+                                cells[f"{W_}분x{k_m:g} · 전일+3%↑ · 청산 {label}"] = (open_evs + f, key)
     res = {name: evaluate(evs, arm, caps.get(name)) for name, (evs, arm) in cells.items()}
     if args.diag:
         _diagnose(open_evs, slide_evs, closes, cost, args, weight, starts, cal)
@@ -392,6 +411,13 @@ def _simulate_trades(events, arm, d0, d1, slots):
             took.append(ev)
         held = [h for h in held if not (h["x"]["exit_d"] == d and h["x"]["when"] in ("intra", "close"))]
     return took
+
+
+# VWAP 청산 변형 — (VWAP 대비 below, 거래 배수 vmult, 결합). 지금 서버는 (0, -1, and) = "vwap" 팔.
+# vmult -1 = 직전 10분 거래대금 < 1 x 평소 같은 시각.
+VWAP_VARIANTS = {"vwap_or": (0.0, -1.0, "or"), "vwap_px": (0.0, None, "and"), "vwap_vol": (None, -1.0, "and")}
+VWAP_VARIANT_LABELS = {"vwap_or": "OR(VWAP 아래 또는 거래 식음)", "vwap_px": "VWAP 아래만",
+                       "vwap_vol": "거래 식음만"}
 
 
 def _vwap_min(g: Optional[pd.DataFrame], after_mi: int, sell_px: float) -> float:

@@ -201,7 +201,7 @@ def vwap_exit(entry_px: float, i: int, entry_mi: int, max_hold: int, stop: float
               o: np.ndarray, c: np.ndarray, burst: np.ndarray, vol_n: float,
               ts: np.ndarray, intraday: Dict[str, pd.DataFrame], below: Optional[float],
               vmult: Optional[float], same: Optional[Dict[str, Tuple[np.ndarray, np.ndarray]]],
-              min_mi: int = 10) -> Tuple[int, float, str, bool, int]:
+              min_mi: int = 10, combine: str = "and") -> Tuple[int, float, str, bool, int]:
     """당일 VWAP 아래로 밀리면(+ 거래가 몰리면) 판다 — '거래대금은 큰데 매도세가 이기는' 날을 장중에 잡는다.
 
     VWAP = 그날 09:00 부터의 누적 거래대금 / 누적 거래량(그날 산 사람들의 평균 단가).
@@ -209,6 +209,7 @@ def vwap_exit(entry_px: float, i: int, entry_mi: int, max_hold: int, stop: float
     거래대금 ≥ vmult x 지난 20일 같은 시각 중앙(`same`)일 때(음수면 '|vmult| 배 미만', 즉 거래가 줄어드는
     중일 때) 다음 분 시가에 판다.
     장 시작 직후는 VWAP 가 몇 분치뿐이라 잡음이 커서 09:{min_mi} 전에는 보지 않는다.
+    `combine="or"` 면 가격·거래 조건 중 **하나만** 맞아도 판다(None 인 조건은 빼고 본다).
     """
     missing = 0
     for t in range(i, i + max_hold):
@@ -229,20 +230,19 @@ def vwap_exit(entry_px: float, i: int, entry_mi: int, max_hold: int, stop: float
                 m_ = int(mi[j])
                 if m_ < min_mi or (t == i and m_ <= entry_mi):
                     continue
-                if below is not None and not (np.isfinite(vwap[j])
-                                              and cl[j] < vwap[j] * (1.0 - below)):
-                    continue
+                conds = []
+                if below is not None:
+                    conds.append(bool(np.isfinite(vwap[j]) and cl[j] < vwap[j] * (1.0 - below)))
                 if vmult is not None:
-                    if rb is None:
-                        continue
-                    R, B = rb
-                    if m_ >= len(R) or not (np.isfinite(R[m_]) and np.isfinite(B[m_])):
-                        continue
-                    # 양수 = 거래 몰림(직전 W분 ≥ k x 평소), 음수 = 거래 감소(직전 W분 < |k| x 평소)
-                    if vmult >= 0 and not (R[m_] >= vmult * B[m_]):
-                        continue
-                    if vmult < 0 and not (R[m_] < -vmult * B[m_]):
-                        continue
+                    ok = False
+                    if rb is not None:
+                        R, B = rb
+                        if m_ < len(R) and np.isfinite(R[m_]) and np.isfinite(B[m_]):
+                            # 양수 = 거래 몰림(직전 W분 ≥ k x 평소), 음수 = 거래 감소(직전 W분 < |k| x 평소)
+                            ok = bool(R[m_] >= vmult * B[m_]) if vmult >= 0 else bool(R[m_] < -vmult * B[m_])
+                    conds.append(ok)
+                if conds and not (any(conds) if combine == "or" else all(conds)):
+                    continue
                 px = float(op[j + 1]) if j + 1 < len(op) and op[j + 1] > 0 else float(cl[j])
                 return t, px, "close", True, missing
         px = float(c[t])
