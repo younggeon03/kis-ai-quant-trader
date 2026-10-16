@@ -154,6 +154,7 @@ _HTML = r"""<!DOCTYPE html>
   tbody tr:hover td{background:rgba(255,255,255,.017);}
   .up{color:var(--rise);} .down{color:var(--fall);} .flat{color:var(--dim);}
   .nil{color:var(--faint);font-size:12.5px;padding:18px 0;text-align:left;}
+  .buy{color:var(--live);font-weight:600;}
   .sub{color:var(--faint);font-size:11.5px;font-weight:400;margin-left:5px;}
 
   /* 막대 시각화 */
@@ -241,7 +242,8 @@ _HTML = r"""<!DOCTYPE html>
 
   <div class="cols">
     <section><h2>보유 포지션 <em id="posCount"></em></h2><table id="positions"></table></section>
-    <section><h2>신호 랭킹 <em id="regime"></em></h2><table id="signals"></table></section>
+    <section><h2>장 시작 판정 <em id="openNote"></em></h2><table id="openTbl"></table>
+      <h2 style="margin-top:18px">장중 발동 <em id="slideNote"></em></h2><table id="slideTbl"></table></section>
   </div>
 
   <div class="cols thirds">
@@ -467,18 +469,20 @@ async function refresh() {
       ];
     }), '보유 종목이 없습니다');
 
-  const sig = st.top_signals||[];
-  const rg = st.regime||{};
-  $('regime').textContent = rg.label ? `레짐 ${rg.label} · 신호 ${num(rg.scale,2)}배` : '';
-  $('signals').innerHTML = rows(
-    ['종목','점수','AI 상승확률','기술적','횡단면'],
-    sig.slice(0,8).map(x => [
-      esc(x.symbol),
-      `<span class="${tone(x.score)}">${signed(x.score,3)}</span>
-       <div class="bar"><i style="width:${Math.min(100,Math.abs(x.score)*140)}%;
-         background:${x.score>=0?'var(--rise)':'var(--fall)'};${x.score>=0?'left:0':'right:0'}"></i></div>`,
-      num(x.proba,3), signed(x.tech,3), signed(x.cs,3),
-    ]), '신호 대기 중');
+  // 오늘의 진입 판정 — 장 시작 판정(09:0N 한 번)과 장중 발동, 각각 어떻게 됐는지
+  const tg = s.triggers||{}, op = tg.opening, sl = (tg.slide||[]).slice().reverse();
+  const nm = x => esc(x.name || x.symbol) + (x.name ? `<span class="sub">${esc(x.symbol)}</span>` : '');
+  const oc = o => `<span class="${o==='매수 주문' ? 'buy' : 'flat'}">${esc(o||'')}</span>`;
+  $('openNote').textContent = !op ? '' : op.skipped ? op.skipped
+    : `${op.time} · ${op.checked}종목 · ${op.window}분 x${op.mult} 이상 ${op.rows.length}건`;
+  $('openTbl').innerHTML = rows(['종목','배수','결과'],
+    (op && op.rows || []).slice(0,10).map(x => [nm(x), 'x' + num(x.ratio,1), oc(x.outcome)]),
+    !op ? '09:05 판정 전' : op.skipped ? '오늘은 판정하지 않았습니다' : '발동 없음');
+  const nbuy = sl.filter(x => x.outcome === '매수 주문').length;
+  $('slideNote').textContent = sl.length ? `${sl.length}건 · 매수 ${nbuy}건` : '';
+  $('slideTbl').innerHTML = rows(['종목','시각','배수','결과'],
+    sl.slice(0,12).map(x => [nm(x), esc(String(x.time||'').slice(0,5)), 'x' + num(x.ratio,1), oc(x.outcome)]),
+    '발동 없음');
 
   drawRps(s.rps_history||[], rl);
 

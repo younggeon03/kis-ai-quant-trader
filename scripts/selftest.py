@@ -2290,6 +2290,8 @@ async def test_server_reliability():
         eng.portfolio.positions["ZZZ"] = Position(symbol="ZZZ", qty=1, avg_price=1.0, last_price=1.0)
         await eng._slide_entries(t1 + dt.timedelta(minutes=5), {})
         assert bought == [C], f"빈자리 1개를 배수 1위로 채우지 않았다: {bought}"
+        board = {r["symbol"]: r["outcome"] for r in eng._board["slide"]}
+        assert board == {C: "매수 주문", A: "자리 없음"}, f"관제 화면 장중 발동 결과가 다르다: {board}"
         cum[C] += 9e6
         await eng._slide_poll(t1 + dt.timedelta(minutes=10))
         assert all(sy != C for _, sy in eng._slide_queue), "같은 종목을 하루에 두 번 발동시켰다"

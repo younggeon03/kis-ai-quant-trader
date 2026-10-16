@@ -186,6 +186,8 @@ class TradingEngine:
         self._slide_fired: set = set()                  # 오늘 이미 한 번 발동한 종목(첫 발동만 쓴다)
         self._slide_queue: List[tuple] = []             # [(배수, 종목)] 이번 조회에서 새로 발동
         self._sold_today: Dict[str, str] = {}           # 오늘 판 종목(같은 날 다시 사지 않는다)
+        # 관제 화면용 오늘의 진입 판정 — 장 시작 판정 결과와 장중 발동, 각각 무엇이 됐는지(매매에는 안 쓴다)
+        self._board: Dict[str, Any] = {"day": "", "opening": None, "slide": []}
         # same_window 기준선 — 종목 → 지난 거래일들의 09:00~09:0N 거래대금(오래된 것부터, 최대 20)
         self._opening_hist: Dict[str, List[float]] = {}
         # 종목 → 분봉 파일의 마지막 날짜. 같은 날을 두 번 기록하지 않으려고 들고 있다.
@@ -595,6 +597,9 @@ class TradingEngine:
         if fired:
             fired.sort(reverse=True)
             self._slide_queue = fired
+            rows = self._board_day(day)["slide"]
+            rows.extend(self._board_row(sy, r, now, "대기") for r, sy in fired)
+            del rows[:-80]
             logger.info(f"[장중·추가] 발동 {len(fired)}건 · 상위 " +
                         ", ".join(f"{sy} x{r:.1f}" for r, sy in fired[:5]))
 
@@ -607,11 +612,20 @@ class TradingEngine:
         inflight = self.open_orders_symbols() - self._compliance_exempt()
         held = self._strategy_held()
         free = max(0, int(self.s.MAX_POSITIONS) - len(held | set(inflight)))
+        board = self._board_day(day)["slide"]
+        mark = lambda sym, out: self._board_mark(board, sym, out)
         for ratio, symbol in queue:
             if free <= 0:
-                break
-            if (symbol in held or symbol in inflight or self._sold_today.get(symbol) == day
-                    or self._reject_today.get(symbol) == day):
+                mark(symbol, "자리 없음")
+                continue
+            if symbol in held or symbol in inflight:
+                mark(symbol, "보유 중")
+                continue
+            if self._sold_today.get(symbol) == day:
+                mark(symbol, "오늘 매도")
+                continue
+            if self._reject_today.get(symbol) == day:
+                mark(symbol, "매매불가")
                 continue
             status: Dict[str, Any] = {}
             try:
@@ -624,8 +638,10 @@ class TradingEngine:
                 logger.info(f"[장중·추가] {symbol} 건너뜀 — 모의투자 매매불가 "
                             f"(상태 {status.get('iscd_stat_cls_code')} · 증거금 {status.get('marg_rate')}%)")
                 self._reject_today[symbol] = day
+                mark(symbol, "매매불가")
                 continue
             if px <= 0:
+                mark(symbol, "시세 없음")
                 continue
             min_chase = float(self.s.SLIDE_MIN_CHASE)
             if min_chase > 0:
@@ -634,6 +650,8 @@ class TradingEngine:
                     logger.info(f"[장중·추가] {symbol} 건너뜀 — 전일 대비 "
                                 f"{(px / prev_close - 1.0) if prev_close > 0 else float('nan'):+.2%} "
                                 f"< {min_chase:+.0%}")
+                    chase = (px / prev_close - 1.0) if prev_close > 0 else 0.0
+                    mark(symbol, f"전일 대비 {chase:+.1%} < {min_chase:+.0%}")
                     continue
             self.latest_prices[symbol] = px
             sig = Signal(symbol=symbol, score=RULE_TRIGGER_SCORE, price=px, ts=now,
@@ -649,9 +667,11 @@ class TradingEngine:
                 "reason": decision.reason, "path": "slide", **decision.detail})
             if not decision.approved:
                 logger.info(f"[장중·추가] {symbol} 진입 거부 — {decision.reason}")
+                mark(symbol, f"거부 · {decision.reason}")
                 continue
             ok = await self._submit(symbol, Side.BUY, decision.qty, px,
                                     f"SLIDE|직전 {self.s.SLIDE_WINDOW}분 거래대금 x{ratio:.1f}")
+            mark(symbol, "매수 주문" if ok else "주문 실패")
             if ok:
                 free -= 1
 
@@ -1015,6 +1035,10 @@ class TradingEngine:
                 ratios[symbol] = r
         picks = rank_triggers(ratios, float(self.s.OPENING_MULT))
         self._opening_picks = picks
+        self._board_day(day)["opening"] = {
+            "time": self._now().strftime("%H:%M:%S"), "window": n,
+            "mult": float(self.s.OPENING_MULT), "checked": len(quotes), "skipped": None,
+            "rows": [self._board_row(s_, r, self._now(), "진입 대기") for s_, r in picks[:30]]}
         top = ", ".join(f"{s_} x{r:.1f}" for s_, r in picks[:5]) or "없음"
         logger.info(f"[장중·개장] 09:00~{hour[:2]}:{hour[2:4]} 판정 {len(quotes)}종목 "
                     f"({self.s.OPENING_BASELINE} · 복수시세 {self._now().strftime('%H:%M:%S')}) → "
@@ -1075,12 +1099,17 @@ class TradingEngine:
         inflight = self.open_orders_symbols() - self._compliance_exempt()
         held = self._strategy_held()
         free = max(0, int(self.s.MAX_POSITIONS) - len(held | set(inflight)))
+        board = (self._board_day(day).get("opening") or {}).get("rows") or []
+        mark = lambda sym, out: self._board_mark(board, sym, out)
         for symbol, ratio in self._opening_picks:
             if free <= 0:
-                break
+                mark(symbol, "자리 없음")
+                continue
             if symbol in held or symbol in inflight:
+                mark(symbol, "보유 중")
                 continue
             if self._reject_today.get(symbol) == day:
+                mark(symbol, "매매불가")
                 continue
             # 현재가와 종목 상태를 한 호출로 받는다. 관심목록 밖 종목은 현재가가 묵어 있을 수 있고,
             # 모의투자는 증거금 100%·경보 종목 주문을 거부한다(`vts_tradable`) — 거부 주문 한 건이
@@ -1096,8 +1125,10 @@ class TradingEngine:
                 logger.info(f"[장중·개장] {symbol} 건너뜀 — 모의투자 매매불가 "
                             f"(상태 {status.get('iscd_stat_cls_code')} · 증거금 {status.get('marg_rate')}%)")
                 self._reject_today[symbol] = day
+                mark(symbol, "매매불가")
                 continue
             if px <= 0:
+                mark(symbol, "시세 없음")
                 continue
             self.latest_prices[symbol] = px
             sig = Signal(symbol=symbol, score=RULE_TRIGGER_SCORE, price=px, ts=now,
@@ -1113,9 +1144,11 @@ class TradingEngine:
                 "reason": decision.reason, "path": "opening", **decision.detail})
             if not decision.approved:
                 logger.info(f"[장중·개장] {symbol} 진입 거부 — {decision.reason}")
+                mark(symbol, f"거부 · {decision.reason}")
                 continue
             ok = await self._submit(symbol, Side.BUY, decision.qty, px,
                                     f"OPENING|09:00~{n}분 거래대금 x{ratio:.1f}")
+            mark(symbol, "매수 주문" if ok else "주문 실패")
             if ok:
                 free -= 1
         self._opening_picks = None
@@ -1865,6 +1898,10 @@ class TradingEngine:
                 # 지금까지라, 11시에 재면 5분 기준선 대비 거의 전 종목이 발동한다(측정에 없는 진입).
                 # 빈 결과로 두면 `_opening_entries`가 오늘 처리를 끝내고 장중 추가 매수가 열린다.
                 self._opening_picks = []
+                self._board_day(self._opening_day)["opening"] = {
+                    "time": now.strftime("%H:%M:%S"), "window": n_open,
+                    "mult": float(self.s.OPENING_MULT), "checked": 0, "rows": [],
+                    "skipped": f"{now:%H:%M} 기동 — 판정 시각이 {late}분 지나 건너뜀"}
                 logger.warning(f"[장중·개장] {now:%H:%M} 기동 — 09:0{n_open} 판정이 {late}분 지나 건너뜀 "
                                f"(장중 추가 매수만 본다)")
             else:
@@ -2566,6 +2603,24 @@ class TradingEngine:
             "requirements": comp.to_dict() if comp is not None else None,
         }
 
+    def _board_day(self, day: str) -> Dict[str, Any]:
+        """오늘 판정판. 날짜가 바뀌면 비운다."""
+        if self._board["day"] != day:
+            self._board = {"day": day, "opening": None, "slide": []}
+        return self._board
+
+    def _board_row(self, symbol: str, ratio: float, now: dt.datetime, outcome: str) -> Dict[str, Any]:
+        return {"symbol": symbol, "name": self.s.name_of(symbol), "ratio": round(float(ratio), 2),
+                "time": now.strftime("%H:%M:%S"), "outcome": outcome}
+
+    @staticmethod
+    def _board_mark(rows: List[Dict[str, Any]], symbol: str, outcome: str) -> None:
+        """그 종목의 가장 최근 행에 결과를 적는다."""
+        for row in reversed(rows):
+            if row["symbol"] == symbol:
+                row["outcome"] = outcome
+                return
+
     def state_snapshot(self) -> Dict[str, Any]:
         """대시보드/헬스체크용 통합 스냅샷."""
         limiter = getattr(self.broker, "limiter", None)
@@ -2575,6 +2630,8 @@ class TradingEngine:
             "portfolio": self.portfolio.snapshot(),
             "risk": self.risk.snapshot(self.portfolio),
             "strategy": self.strategy.snapshot(),
+            "triggers": (self._board if self._board["day"] == self._now().strftime("%Y%m%d")
+                         else {"day": "", "opening": None, "slide": []}),
             "recent_fills": self.recent_fills[-20:],
             "history": list(self.equity_history),
             "rps_history": list(self.rps_history),
