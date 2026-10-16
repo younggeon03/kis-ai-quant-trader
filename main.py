@@ -1407,6 +1407,7 @@ class TradingEngine:
                 side=side, qty=qty, price=price, fee=fee, tax=tax,
                 order_no=str(notice.get("oder_no", "")), reason="ws_notice",
             )
+            self._settle_open_order(fill)
             await self.bus.publish(TOPIC_FILL, fill)
         except Exception as exc:
             logger.warning(f"[WS] 체결통보 처리 실패: {exc}")
@@ -1696,14 +1697,26 @@ class TradingEngine:
             # 부분체결이면 잔량이 남아 있으므로 추적을 유지한다.
             # (여기서 바로 제거하면 같은 종목에 중복 진입 주문이 나간다)
             tracked = self.open_orders.get(fill.order_no)
-            if tracked is not None:
+            if tracked is not None and (not fill.reason or fill.reason == "poll"):
                 # 체결 사유는 주문 시점에만 알 수 있으므로 추적 정보에서 복원한다
-                if not fill.reason or fill.reason == "poll":
-                    fill.reason = tracked.get("reason", "")
-                tracked["qty"] = max(0, int(tracked.get("qty", 0)) - fill.qty)
-                if tracked["qty"] <= 0:
-                    self.open_orders.pop(fill.order_no, None)
+                fill.reason = tracked.get("reason", "")
+            self._settle_open_order(fill)
             await self.bus.publish(TOPIC_FILL, fill)
+
+    def _settle_open_order(self, fill: Fill) -> None:
+        """체결 수량만큼 미체결 추적 잔량을 줄이고, 0이 되면 지운다.
+
+        **체결통보(WS)와 폴링 양쪽에서 부른다.** 모의투자는 미체결 조회
+        (`inquire-psbl-rvsecncl`)가 `90000000 해당업무가 제공되지 않습니다`이고 당일
+        체결조회도 비어 와서, 대조·폴링으로는 추적이 영영 안 지워진다. 그러면 판
+        종목이 재시작 전까지 자리 하나를 차지해 장중 추가 매수가 멈춘다(10/16 실측).
+        """
+        tracked = self.open_orders.get(fill.order_no)
+        if tracked is None:
+            return
+        tracked["qty"] = max(0, int(tracked.get("qty", 0)) - fill.qty)
+        if tracked["qty"] <= 0:
+            self.open_orders.pop(fill.order_no, None)
 
     def _check_disk(self, now: dt.datetime) -> None:
         """남은 디스크를 재고 모자라면 경고한다(한 시간에 한 번). 디스크가 차면 원장·상태를 못 쓴다."""

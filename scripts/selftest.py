@@ -2308,6 +2308,22 @@ async def test_server_reliability():
         await eng._slide_entries(t1 + dt.timedelta(minutes=11), {})
         assert bought == [B], f"전일 대비 +3% 하한이 안 걸렸다(A +0% 는 막고 B +5.3% 는 사야 한다): {bought}"
         s.SLIDE_MIN_CHASE = 0.0
+        # 체결통보(WS)가 미체결 추적을 지운다 — 모의투자는 미체결 조회가 없어 이것뿐이다.
+        # 안 지우면 판 종목이 자리를 차지해 빈자리가 0이 된다(10/16 실측)
+        eng.portfolio.positions.clear()
+        eng.portfolio.positions["ZZZ"] = Position(symbol="ZZZ", qty=1, avg_price=1.0, last_price=1.0)
+        eng.open_orders = {"0000016101": {"symbol": "YYY", "side": "SELL", "qty": 10, "reason": "VWAP"}}
+        eng.bus.publish = (lambda *_a, **_k: asyncio.sleep(0))
+        notice = {"cntg_yn": "2", "seln_byov_cls": "01", "stck_shrn_iscd": "YYY", "oder_no": "0000016101"}
+        await eng._on_ws_notice({**notice, "cntg_qty": "4", "cntg_unpr": "100"})
+        assert eng.open_orders.get("0000016101", {}).get("qty") == 6, f"부분체결 잔량: {eng.open_orders}"
+        await eng._on_ws_notice({**notice, "cntg_qty": "6", "cntg_unpr": "100"})
+        assert not eng.open_orders, f"전량 체결통보 뒤에도 미체결 추적이 남았다: {eng.open_orders}"
+        bought.clear()
+        eng._sold_today = {}
+        eng._slide_queue = [(5.0, A)]
+        await eng._slide_entries(t1 + dt.timedelta(minutes=12), {})
+        assert bought == [A], f"체결된 매도가 자리를 막았다: {bought}"
         eng._opening_done_day = ""
         eng._opening_mode = lambda: True               # opening 모드에서는 장 시작 진입이 먼저다
         assert not eng._slide_ready(t1), "장 시작 진입 전에 장중 추가 매수를 봤다"
@@ -2316,7 +2332,7 @@ async def test_server_reliability():
             setattr(s, k, v)
     return ("주문 읽기 타임아웃·5xx 재시도 안 함(결과 불명) · 접속 실패 재시도 · 조회 재시도 · "
             "무손실 체결 채널 · 히스토그램 분위수·Prometheus · Date 헤더 시계 오차 · "
-            "장중 VWAP 청산(판정·배관) · 장중 추가 매수(첫 발동·배수 순·빈자리·당일 매도 제외·전일 대비 하한) 모두 작동")
+            "장중 VWAP 청산(판정·배관) · 장중 추가 매수(첫 발동·배수 순·빈자리·당일 매도 제외·전일 대비 하한) · 체결통보로 미체결 추적 정리 모두 작동")
 
 
 # ============================================================ 실행
