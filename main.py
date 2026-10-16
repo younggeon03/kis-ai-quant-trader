@@ -77,6 +77,7 @@ QUOTE_CHUNK = 4             # 루프당 현재가 갱신 종목 수(유량 보�
 RECONCILE_LOOPS = 30        # 브로커 잔고 대조 주기
 DISK_WARN_GB = 1.0          # 남은 디스크가 이 아래면 경고(서버 디스크 10GB — 원장·상태 저장 실패 방지)
 FLATTEN_ORDER_TTL = 30.0    # 마감 정리 구간의 미체결 매도 취소 기준(초)
+OPENING_LATE_MAX_MIN = 2    # 장 시작 판정을 이만큼(분) 넘겨 기동했으면 건너뛴다(누적이 창보다 길어진다)
 FILL_POLL_LOOPS = 5         # 체결 폴링 주기(실서버)
 # 규칙 기반 진입(burst·opening)의 신호 점수. 진입 결정은 규칙이 이미 내렸으므로 리스크
 # 관문의 일봉 모델용 문턱(SIGNAL_BUY_THRESHOLD)에 걸리지 않게 둔다. 고정 사이징에서는
@@ -1858,7 +1859,16 @@ class TradingEngine:
                 and now.strftime("%H%M") >= f"{9 + n_open // 60:02d}{n_open % 60:02d}"):
             self._opening_day = now.strftime("%Y%m%d")
             self._opening_picks = None
-            self._opening_task = asyncio.create_task(self._opening_scan(now))
+            late = (now.hour - 9) * 60 + now.minute - n_open
+            if late > OPENING_LATE_MAX_MIN:
+                # **늦게 기동했으면 판정하지 않는다.** 복수시세의 누적 거래대금은 09:00부터
+                # 지금까지라, 11시에 재면 5분 기준선 대비 거의 전 종목이 발동한다(측정에 없는 진입).
+                # 빈 결과로 두면 `_opening_entries`가 오늘 처리를 끝내고 장중 추가 매수가 열린다.
+                self._opening_picks = []
+                logger.warning(f"[장중·개장] {now:%H:%M} 기동 — 09:0{n_open} 판정이 {late}분 지나 건너뜀 "
+                               f"(장중 추가 매수만 본다)")
+            else:
+                self._opening_task = asyncio.create_task(self._opening_scan(now))
 
         # --- 평가 및 리스크 상태 ---
         prices = {s: p for s, p in self.latest_prices.items() if p > 0}
@@ -2434,6 +2444,7 @@ class TradingEngine:
                 "peak_equity": self.portfolio.peak_equity,
                 "entry_dates": self._entry_dates,
                 "compliance_syms": self._compliance_syms,
+                "sold_today": self._sold_today,
             }
             self._state_path().write_text(
                 json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
@@ -2462,6 +2473,9 @@ class TradingEngine:
             self._entry_dates = {str(k): str(v) for k, v in saved.items()}
             comp = data.get("compliance_syms") or {}
             self._compliance_syms = {str(k): str(v) for k, v in comp.items()}
+            # 오늘 판 종목 — 장중 재시작 뒤 같은 날 다시 사지 않게(날짜를 같이 저장하므로 어제 것은 무해)
+            sold = data.get("sold_today") or {}
+            self._sold_today = {str(k): str(v) for k, v in sold.items()}
         except Exception as exc:
             logger.debug(f"[State] 복구 실패: {exc}")
 
