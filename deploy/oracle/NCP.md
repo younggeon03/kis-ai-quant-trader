@@ -38,6 +38,26 @@ BANKIS_SSH_USER=root bash deploy/oracle/deploy.sh <IP> status
 ```
 setup 이 끝나면 SSH 비밀번호 로그인을 끈다(키로만 접속 — 22번이 전체에 열려 있으므로).
 
+## 운영 중 (2026-10-13 전환 후)
+
+서버가 실거래 원본이다. 이제 쓰는 것은 `code`·`status` 와 파일 단위 교체뿐이다.
+
+```bash
+BANKIS_SSH_USER=root bash deploy/oracle/deploy.sh <IP> code     # 커밋된 코드 반영 + 엔진 재시작(상태는 파일에서 복구)
+BANKIS_SSH_USER=root bash deploy/oracle/deploy.sh <IP> status
+scripts/open_dashboard.cmd                                      # 관제 화면(SSH 터널 8500)
+```
+
+- **`switch` 는 다시 쓰지 않는다** — 노트북의 원장·상태 파일을 서버에 덮어써 서버가 쌓은 기록이 사라진다.
+- **기준선 표 교체**(`data/cache/turnover_profile_w5.json`·`_w10.json`, 노트북에서 `build_turnover_profile.py` 로 만든다):
+  서버 파일을 `*.YYYYMMDD.bak` 으로 복사해 두고 `scp` 로 `.new` 를 올린 뒤 `mv` 로 바꾼다. 엔진이 자정 날짜 변경 때
+  다시 읽으므로 재시작하지 않는다. 다음 날 00:05 로그 `[장중·VWAP] 기준선 289종목 · 최신 YYYYMMDD` 로 확인한다.
+- **장중에 재시작해도 된다** — 늦게 뜨면 장 시작 판정은 건너뛰고(2분 초과) 장중 추가 매수·청산은 이어서 돈다.
+  보유는 잔고 대조로, 진입일·오늘 판 종목·자산 고점은 상태 파일로 복구된다(미체결 추적은 저장하지 않는다 — 주문을 낸 직후는 피한다). 09:00~09:10 도 피한다.
+- 서버 셸에서 `.env` 를 고칠 때: 파일이 CRLF 라 `sed` 의 `$` 앵커가 맞지 않는다. 고치기 전 `.env.bak_YYYYMMDD` 를 남긴다.
+- 토스 수집은 노트북에서 서버 IP 로 나간다: `ssh -i ~/.ssh/bankis_oracle -N -D 1080 -o ServerAliveInterval=30 root@<IP>`
+  를 열어 두고 `ALL_PROXY=socks5://127.0.0.1:1080`. 터널이 끊기면 수집이 실패만 쌓는다(10/16 16:52 경험) — 수집은 이어받기라 다시 돌리면 된다.
+
 ## 알아 둘 것
 - 같은 계좌에 엔진 둘을 동시에 돌리지 않는다 — `switch` 가 노트북 엔진을 먼저 멈추고 장중에는 거부한다
 - KIS 는 IP 등록이 필요 없다. 서버는 systemd 로 돌아 죽거나 재부팅돼도 30초 뒤 다시 뜬다

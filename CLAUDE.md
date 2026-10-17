@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-python scripts/selftest.py                    # 전체 검증 (22개 항목) — 변경 후 필수로 실행
+python scripts/selftest.py                    # 전체 검증 (26개 항목) — 변경 후 필수로 실행
 python scripts/train_model.py --days 1500     # AI 모델 학습 → models/alpha_gbdt.pkl
 python scripts/train_model.py --source data/cache --no-flow   # 수급 피처 제외(측정용)
 python scripts/run_backtest.py --days 1000    # 백테스트 → reports/
@@ -30,8 +30,28 @@ python scripts/preflight.py                   # 대회 직전 점검 (--live 로
 python scripts/slot_sim.py                    # 달력 시간순 2슬롯 평가(라운드 근사 대신 — 보유일수가 다른 규칙 비교용)
 python scripts/collect_opening.py             # 모든 거래일 09:00~09:30 분봉(토스 · 수집 전 현재 IP 확인)
 python scripts/opening_study.py               # 장 시작 구간 진입 격자 vs 현재 규칙(수집 완료 후)
+python scripts/combo_study.py --slide-grid 5:10   # 지금 실거래 조합(장 시작 + 장중 추가 x VWAP 청산)을 분 단위 자리 순서로 측정
+#   --vwap-variants 로 VWAP 청산 결합(AND·OR·단독) 비교 · --diag 로 원인 진단 · UNIVERSE_FILE 로 유니버스 지정
+python scripts/build_turnover_profile.py --window 10  # VWAP 청산 기준선 표(--window 5 = 장중 추가 매수용) — 분봉 수집 뒤 다시 만들어 서버에 보낸다
+python scripts/probe_warn.py <종목들>          # 모의투자 매매불가(증거금 100%) 확인 — 엔진과 같은 앱 키라 장 마감 후
+python scripts/widen_universe.py              # 거래대금 하한만 낮춘 유니버스(5억은 측정에서 기각, 10/16)
 python -m compileall -q config core api strategy backtest utils monitor scripts main.py
 ```
+
+**실거래는 NCP 서버에서 돈다(2026-10-13~).** 노트북에서 `main.py`·`run_live.ps1`을 켜지 않는다(같은 계좌 이중 주문).
+
+```bash
+BANKIS_SSH_USER=root bash deploy/oracle/deploy.sh $BANKIS_SERVER code    # HEAD 코드 반영 + 엔진 재시작
+BANKIS_SSH_USER=root bash deploy/oracle/deploy.sh $BANKIS_SERVER status
+scripts/open_dashboard.cmd                    # SSH 터널(8500) + 관제 화면(localhost:8500)
+```
+
+- `code`는 git HEAD만 보낸다 — **커밋하지 않은 변경은 안 간다.** 데이터·`.env`는 보내지 않는다.
+- `switch`는 노트북 원장·상태 파일까지 서버에 덮어쓴다. 서버가 실거래 중인 지금은 쓰지 않는다.
+  기준선 표(`data/cache/turnover_profile_w5/w10.json`)만 바꿀 때는 서버 파일을 `.bak`으로 남기고 `scp`한다 —
+  엔진이 자정 날짜 변경 때 다시 읽으므로 재시작이 필요 없다(로그 `[장중·VWAP] 기준선 ... 최신 YYYYMMDD`).
+- 토스 수집은 노트북에서 하되 서버 IP로 나간다(토스 IP 등록): `ssh -i ~/.ssh/bankis_oracle -N -D 1080 root@서버`
+  를 열고 `ALL_PROXY=socks5://127.0.0.1:1080`. 수집 전 `curl --socks5-hostname 127.0.0.1:1080 https://api.ipify.org`로 확인한다.
 
 단일 항목만 검증하려면 `scripts/selftest.py`의 `run_all()` 안 `tests` 리스트를 줄이거나,
 해당 테스트 함수(`test_risk_manager` 등)를 직접 `asyncio.run()`으로 호출한다. pytest는 쓰지 않는다.
@@ -116,7 +136,13 @@ KIS 유량: 실전 20건/초, 모의투자는 문서상 2건/초지만 **실측 
 - 손절선은 **주문 접수가 아니라 체결 시점**에 평단가 기준으로 설정한다(`_on_fill_event`).
   접수 시점에는 포지션이 없어 설정이 누락된다.
 - `open_orders`는 부분체결 시 잔량만 차감하고, 잔량이 0이 될 때만 제거한다. 먼저 제거하면
-  같은 종목에 중복 진입 주문이 나간다.
+  같은 종목에 중복 진입 주문이 나간다. 차감은 체결 폴링과 **체결통보(WS) 양쪽**에서
+  `_settle_open_order()`로 한다 — 모의투자는 미체결 조회(`90000000 제공되지 않습니다`)와
+  일별 체결 조회(`70070000`)가 안 돼 대사가 미체결을 지워 주지 못한다. WS 경로가 빠져 있어
+  다 팔린 HMM 매도 주문이 재시작 전까지 자리를 막았다(2026-10-16 수정, 셀프테스트 26번).
+- 장중 재시작: 장 시작 판정 시각(09:0N)을 `OPENING_LATE_MAX_MIN`(2분) 넘겨 기동하면 판정을
+  건너뛴다(복수시세 누적이 창보다 길어져 다른 판정이 된다). `sold_today`(오늘 판 종목, 같은 날
+  재매수 금지)는 상태 파일에 저장된다.
 - 주기 작업: `BAR_REFRESH_LOOPS`(일봉 재적재) / `RECONCILE_LOOPS`(잔고·미체결 대조) /
   `FILL_POLL_LOOPS`(체결 폴링). Mock은 `_refresh_bars_from_sim()`으로 REST를 건너뛴다.
 - WebSocket이 건강하면(`ws.is_healthy()`) REST 시세 폴링을 생략하고, 끊기면 자동으로 폴백한다.
@@ -151,35 +177,38 @@ KIS 유량: 실전 20건/초, 모의투자는 문서상 2건/초지만 **실측 
 ### 9. 장중 분봉 전략이 현재 주 전략이다 (`USE_INTRADAY=true`)
 
 목적함수가 **절대수익 top10**이므로 최적화 대상은 `E[R]`이 아니라 `P(R ≥ 100%)`다.
-그래서 일봉 스윙에서 **장중 돌파 → 당일 청산**으로 전환했다. 두 경로는 배타적이다 —
+그래서 일봉 스윙에서 **장중 거래대금 폭증 진입 → 다일 보유**로 전환했다. 두 경로는 배타적이다 —
 `USE_INTRADAY=true`면 `_tick()`이 일봉 진입 블록을 건너뛴다. 같이 돌면 익스포저가
 의도의 두 배가 되고 측정한 분포와 달라진다.
 
+**지금 실거래 규칙(2026-10-16~, 서버 `.env`)** — 유니버스는 모의투자 매매 가능 289종목(`config/universe_10b.json`).
+
 ```
-① 아침 스캔 (09:05)  전 후보 상승률을 훑어 '오늘 움직이는' 40종목 구독
-                     — universe.json은 생성 시점의 테마다
-② 폭증 감시 (burst)  당일 누적 거래대금 ≥ 10 × 전일까지 20봉 중앙값
-                     (breakout 모드는 가격 +3% AND 분당 거래량 12배 — 지금은 쓰지 않는다)
-③ 명부 → 선정        발동을 명부에 올리고 신선도 상위부터 빈 슬롯을 채운다
-④ 사이징             고정 2종목 × 45% (`SIZING_MODE=fixed`)
-⑤ 보유·청산          `INTRADAY_FLATTEN=false` → 다일 보유. 청산은 일봉 경로
-                     (`vol_alive` + 손절 25% + 30봉 상한, §9-1)
+① 장 시작 판정 (09:05)  직전 5분 거래대금 ≥ 3 x 평소(지난 20일 같은 5분 중앙, `same_window`)
+                        복수시세 한 번 → 배수 큰 순으로 빈 자리에 바로 진입(지연 0)
+② 장중 추가 매수         20초마다 289종목 복수시세 → 직전 5분 거래대금 ≥ 10 x 평소 같은 시각
+   (`SLIDE_ENTRY`)       이고 전일 종가 대비 +3% 이상인 그날 첫 발동을 빈 자리에(오늘 판 종목·매매불가 제외)
+③ 사이징                고정 2자리 x 45% (`SIZING_MODE=fixed`), 매수 지정가 +2% · 매도 0.4%
+④ 장중 VWAP 청산         09:10 뒤 20초마다: 가격 < 당일 VWAP **그리고** 직전 10분 거래대금 < 평소 같은 시각
+   (`VWAP_EXIT`)
+⑤ 다일 청산             `vol_alive` x2(확정 일봉으로 아침 한 번) · 손절 25% · 30봉 상한 (§9-1)
+⑥ 지수 요건 매매         10/19부터 지수 대형주 100만원씩 09:30 매수 · 14:30 매도 (아래)
 ```
 
-**opening 모드(구현만, 측정 전 — 2026-10-09):** `INTRADAY_ENTRY_MODE=opening`이면 ②가
-"장 시작 N분 거래대금 ≥ k x 평소(20봉 중앙) N/390 몫"으로 바뀐다. 09:0N에 KIS 당일분봉
-(`get_minute_bars`)으로 한 번 판정하고 09:(N+`OPENING_LAG_MIN`)에 한 번 진입한다
-(`main.py::_opening_scan`·`_opening_entries`). 판정은 `strategy/opening.py` 순수 함수이고
-**측정(`scripts/opening_study.py`)이 같은 함수를 import한다** — 셀프테스트 22번이 함수 객체
-동일성까지 본다. 측정 전이므로 preflight가 치명으로 막는다. KIS 분봉의 시각 표기(시작/끝)는
-실서버 첫날 `[장중·개장] 분봉 시각 확인` 로그로 확인해야 한다.
+측정(`scripts/combo_study.py`, 분 단위 자리 순서까지 실거래와 같게): 이 조합 **P(+100%) 7.16%** ·
+30일 −20% 이하 20.5%(지문 `a12a9eb45ea44d2d`). 기각된 것: VWAP 청산을 OR·단독 조건으로(0.00~0.74%,
+−20% 이하 34~77%), 유니버스 거래대금 하한 5억(376종목, 0.49%), 장중 추가 x3(3.48% — 질 낮은 발동이
+VWAP가 판 자리를 다시 채우는 회전). 상세는 `docs/TODO-대회준비.md`.
 
-**진입 모드 현황(2026-10-10):** 실거래는 `opening`(장 시작 10분 같은 시간대 x3 → 09:13).
-누적 10배(`burst`)는 **쓰지 않고 코드만 남긴다**(사용자 결정). `sliding`(장중 직전 W분 거래대금 ≥
-k x 지난 20일 같은 시각 중앙)은 구현만 됐고 측정 전이다 — `strategy/sliding.py`의 `SlidingWatcher`가
-판정하고, `main.py::_sliding_poll_loop`가 284종목 당일분봉을 돌아가며 받는다(한 바퀴 약 2.6분,
-모의 유량을 거의 다 쓴다). 분봉은 날짜가 바뀔 때 `data/cache/fullday/`에 이어 붙는다(내일 기준선).
-측정 데이터는 `collect_opening.py --until 1530 --dir fullday`(모든 날 하루 전체 분봉)다.
+- 판정은 순수 함수다 — 장 시작 `strategy/opening.py`, 장중 `strategy/sliding.py`, VWAP `strategy/exit_rules.py::vwap_fade`.
+  **측정이 같은 함수를 import한다**(셀프테스트 22번이 함수 객체 동일성까지 본다).
+- ②·④의 "평소 같은 시각"은 기준선 표(`data/cache/turnover_profile_w5.json`·`_w10.json`, 종목당 380분)다.
+  서버에는 하루 전체 분봉이 없어(디스크) **노트북에서 `build_turnover_profile.py`로 만들어 보낸다** —
+  분봉을 새로 받으면 다시 만든다. 표의 창(`window`)이 설정과 다르면 엔진은 판정하지 않는다.
+- 관제 화면의 "장 시작 판정"·"장중 발동" 표가 발동마다 결과(매수 주문·자리 없음·전일 대비 미달·매매불가 등)를
+  보여 준다(`main.py::_board*`, 매매에는 쓰지 않는다).
+- 누적 10배(`burst`)와 당일분봉 순회(`sliding` 모드, `_sliding_poll_loop`)는 **쓰지 않고 코드만 남긴다.**
+  측정 데이터는 `collect_opening.py --until 1530 --dir fullday`(모든 날 하루 전체 분봉)다.
 
 **지수 종목 요건은 소액 매매로 채운다.** 폭증 진입은 소형주를 골라 30거래일에 지수(코스피200·
 코스닥150) 종목을 중앙 2개만 산다(5종목 요건 충족 10.7%, `scripts/compliance_study.py`). 그래서
@@ -188,8 +217,8 @@ k x 지난 20일 같은 시각 중앙)은 구현만 됐고 측정 전이다 — 
 로 금액을 묶고 자리 한도를 면제한다. 전략 경로는 `slot_exempt`로 이 포지션을 자리 수에서 뺀다.
 **진입 규칙을 바꾸면 `compliance_study.py`를 다시 돌린다.**
 
-**opening 판정은 09:10 직후 복수시세 한 번이고 진입은 바로(지연 0)다**(2026-10-13). 측정: 10분 구간
-바로 진입 P(+100%) 9.14% vs 3분 지연 9.64% — 차이 없음. 3~15분 구간은 뚜렷한 경향이 없어 10분 유지.
+**opening 판정은 09:0N 직후 복수시세 한 번이고 진입은 바로(지연 0)다**(2026-10-13). 측정: 바로 진입과
+3분 지연은 차이 없음. 창은 매매 가능 289종목 재측정에서 5분 x3(3.98%)이 10분 x3(0.75%)보다 나아 5분이다(10/14).
 내일 기준선용 분봉 기록은 진입 뒤 백그라운드(`_record_opening_history`)다.
 **규칙 진입 모드에서는 일봉 신호를 계산하지 않는다** — KIS 일봉 조회가 100봉만 줘서 실서버에서 실패하고
 (`index -120 ... size 100`), 실패하면 매 루프 재시도로 20초씩 멈췄다. 그 모드에서 신호는 쓰이지 않는다.

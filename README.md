@@ -17,6 +17,15 @@
 > API 키·계좌번호는 `.env`에만 두고 절대 커밋하지 않는다(`.gitignore`로 차단함).
 > `.env.example`을 복사해 쓴다.
 
+## 지금 상태 (2026-10-17)
+
+- **실거래 중** — 2026-10-13부터 네이버 클라우드 서버에서 systemd 서비스로 돈다(`deploy/oracle/`). 노트북에서는 엔진을 켜지 않는다.
+- **전략** — 장중 거래대금 폭증 진입 + 다일 보유. 09:05 장 시작 5분 판정 + 장중 추가 매수(직전 5분 x10 · 전일 +3%↑),
+  장중 VWAP 청산 + 거래대금 생존(`vol_alive`) 청산, 2자리 x 45%, 모의투자 매매 가능 289종목.
+  측정 P(30거래일 +100%) 7.16%. 상세는 [docs/매매전략.md 12-13절](docs/매매전략.md), 설정은 `CLAUDE.md` §9.
+- 아래 1~6장의 일봉 AI 모델·백테스트 흐름은 개발 초기(일봉 스윙) 설계다. 코드는 남아 있고 백테스트·검증 도구로 쓴다.
+- 운영 명령(배포·관제 화면·수집)은 `CLAUDE.md`의 Commands, 할 일·측정 기록은 [docs/TODO-대회준비.md](docs/TODO-대회준비.md).
+
 **핵심 설계**: `.env`의 `USE_MOCK_MODE` 한 줄로 내부 가상 체결 엔진 ↔ 실제 KIS 서버를 전환한다.
 계좌 발급 전에는 Mock으로 전체 파이프라인을 100% 검증하고, 발급 후에는 코드 수정 없이 실서버에 붙는다.
 
@@ -45,7 +54,7 @@
 ```bash
 copy .env.example .env          # 기본값이 USE_MOCK_MODE=true
 
-python scripts/selftest.py      # 전 모듈 스모크 테스트 (16개 항목)
+python scripts/selftest.py      # 전 모듈 스모크 테스트 (26개 항목)
 python scripts/train_model.py   # AI 모델 학습 → models/alpha_gbdt.pkl
 python scripts/run_backtest.py  # 백테스트 → reports/ 에 지표·차트 저장
 python main.py                  # Mock 실시간 매매 루프 + 대시보드
@@ -128,6 +137,10 @@ python scripts/train_model.py --source data/cache
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 코드 구조, 비동기 설계, 유량 제어, 데이터 계약, 코드 읽는 순서 |
 | [docs/매매전략.md](docs/매매전략.md) | 피처 44종, 삼중배리어 라벨링, 앙상블, 포지션 사이징, 청산 규칙 |
 | [docs/architecture.html](docs/architecture.html) | 인터랙티브 구조 다이어그램 |
+| [docs/TODO-대회준비.md](docs/TODO-대회준비.md) | 대회 진행 상황, 측정 결과와 지문, 남은 일 |
+| [docs/서버-운영-설계.md](docs/서버-운영-설계.md) | 서버·트래픽 운영 설계, 장애 기록 |
+| [docs/기술노트.md](docs/기술노트.md) | 이 저장소로 배우는 백엔드·운영 기술 노트 |
+| [deploy/oracle/README.md](deploy/oracle/README.md) | 서버 배포 절차 |
 
 ## 3. 아키텍처
 
@@ -187,7 +200,7 @@ python scripts/train_model.py --source data/cache
    KIS_APP_SECRET=발급받은시크릿
    KIS_ACCOUNT_NO=12345678-01
    KIS_HTS_ID=본인HTS아이디
-   REST_RATE_LIMIT=2          # 모의투자 계정은 초당 2건
+   REST_RATE_LIMIT=1          # 모의투자는 문서상 초당 2건이지만 실측 실효 한도가 약 1건(2026-10-13)
    ```
 2. **연결 점검** — `python main.py --health-only`
    → 토큰 발급 / 시세 조회 / 잔고 조회 3단계가 모두 `ok: true`여야 한다.
