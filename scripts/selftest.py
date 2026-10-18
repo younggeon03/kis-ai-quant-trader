@@ -2326,6 +2326,15 @@ async def test_server_reliability():
         eng._slide_queue = [(5.0, A)]
         await eng._slide_entries(t1 + dt.timedelta(minutes=12), {})
         assert bought == [A], f"체결된 매도가 자리를 막았다: {bought}"
+        # 날짜가 바뀌면 전날 미체결 추적·보유하지 않은 요건 표시를 버린다(모의투자는 미체결 조회가 없다)
+        eng._save_state = lambda: None
+        eng.open_orders = {"old": {"symbol": "YYY", "side": "BUY", "qty": 3, "ts": "2026-10-15T09:05:00"},
+                           "new": {"symbol": "XXX", "side": "BUY", "qty": 3, "ts": "2026-10-16T00:00:10"}}
+        eng._compliance_syms = {"ZZZ": "20261015", "WWW": "20261015"}
+        eng._drop_stale_day_state("20261016")
+        assert list(eng.open_orders) == ["new"], f"전날 미체결 추적이 남았다: {eng.open_orders}"
+        assert eng._compliance_syms == {"ZZZ": "20261015"}, \
+            f"보유 요건 포지션은 남기고 보유 안 한 표시만 버려야 한다: {eng._compliance_syms}"
         eng._opening_done_day = ""
         eng._opening_mode = lambda: True               # opening 모드에서는 장 시작 진입이 먼저다
         assert not eng._slide_ready(t1), "장 시작 진입 전에 장중 추가 매수를 봤다"
@@ -2334,7 +2343,7 @@ async def test_server_reliability():
             setattr(s, k, v)
     return ("주문 읽기 타임아웃·5xx 재시도 안 함(결과 불명) · 접속 실패 재시도 · 조회 재시도 · "
             "무손실 체결 채널 · 히스토그램 분위수·Prometheus · Date 헤더 시계 오차 · "
-            "장중 VWAP 청산(판정·배관) · 장중 추가 매수(첫 발동·배수 순·빈자리·당일 매도 제외·전일 대비 하한) · 체결통보로 미체결 추적 정리 모두 작동")
+            "장중 VWAP 청산(판정·배관) · 장중 추가 매수(첫 발동·배수 순·빈자리·당일 매도 제외·전일 대비 하한) · 체결통보로 미체결 추적 정리 · 날짜 변경 시 전날 미체결·요건 표시 정리 모두 작동")
 
 
 # ============================================================ 실행

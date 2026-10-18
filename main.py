@@ -395,6 +395,7 @@ class TradingEngine:
         고정된다. 실서버에서는 자정 직후(장외)에 돈다 — 유니버스 전체 일봉 적재가
         모의투자 유량으로 수 분 걸리므로 장중에 돌면 안 된다.
         """
+        self._drop_stale_day_state(today)
         if self.s.USE_MOCK_MODE and getattr(self.broker, "is_mock", False):
             self._refresh_bars_from_sim()
         else:
@@ -415,6 +416,33 @@ class TradingEngine:
             last = df[df["ts"].astype(str) < today]
             if not last.empty:
                 logger.info(f"[기준] 마지막 확정 봉 {last['ts'].iloc[-1]} (기준 종목 {self.universe[0]})")
+
+    def _drop_stale_day_state(self, today: str) -> None:
+        """전날 것으로 남은 주문 추적·요건 매매 표시를 버린다.
+
+        지정가는 당일 주문이라 장 마감에 증권사가 취소한다. 실서버는 미체결 조회
+        (`_sync_open_orders`)가 그것을 지워 주지만 **모의투자는 미체결 조회가 안 된다**
+        (`90000000`). 그러면 끝내 체결되지 않은 매수가 `open_orders`에 남아 그 자리를
+        영영 막고(재시작 전까지), 매도는 `_sellable_qty`가 그 수량을 빼서 다시 팔지 못한다.
+
+        요건 매매 표시(`_compliance_syms`)는 주문 접수 때 남기므로 체결되지 않으면
+        보유하지 않은 종목이 남는다. 나중에 전략이 그 종목을 사면 요건 포지션으로 읽혀
+        자리 수에서 빠지고 14:30에 팔린다(2026-10-18 노트북 테스트 잔재로 실제 발견).
+        """
+        stale = [no for no, o in self.open_orders.items()
+                 if str(o.get("ts", ""))[:10].replace("-", "") < today]
+        for no in stale:
+            o = self.open_orders.pop(no)
+            logger.warning(f"[Orders] 전날 미체결 추적 정리: {o.get('symbol', '')} {no} "
+                           f"잔량 {o.get('qty', 0)} (장 마감에 취소된 주문)")
+        held = set(self.portfolio.open_positions())
+        gone = [s_ for s_ in self._compliance_syms if s_ not in held]
+        for s_ in gone:
+            self._compliance_syms.pop(s_, None)
+        if gone:
+            logger.warning(f"[대회·요건] 보유하지 않은 요건 표시 정리: {', '.join(gone)}")
+        if stale or gone:
+            self._save_state()
 
     def _load_vwap_profile(self) -> None:
         """장중 VWAP 청산 기준선 표를 읽는다(없으면 청산 판정을 하지 않는다)."""
