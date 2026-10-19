@@ -940,7 +940,9 @@ class TradingEngine:
         측정(scripts/compliance_study.py)에서 지금 진입 규칙은 30거래일에 지수 종목을 중앙
         2개만 샀다(5종목 요건 충족 10.7%). 요건을 놓치면 수익률과 무관하게 실격이다.
         """
-        if not (self.s.COMPLIANCE_TRADES and self.phase.is_competition):
+        # 매도는 `COMPLIANCE_TRADES`를 꺼도 돈다 — 요건이 찬 뒤 끄면(10/19 사용자) 이미 산 요건 포지션이
+        # 당일 청산되지 않고 남는다
+        if not (self._compliance_syms or self.s.COMPLIANCE_TRADES) or not self.phase.is_competition:
             return
         day = now.strftime("%Y%m%d")
         hhmm = now.strftime("%H%M")
@@ -955,6 +957,8 @@ class TradingEngine:
                     px = prices.get(symbol, pos.last_price or pos.avg_price)
                     await self._submit(symbol, Side.SELL, qty, px, "COMPLIANCE|요건 매매 당일 청산")
         # --- 매수: 하루 한 번, 시작일 이후 ---
+        if not self.s.COMPLIANCE_TRADES:
+            return
         try:
             start = dt.date.fromisoformat(self.s.COMPLIANCE_START)
         except ValueError:
@@ -1426,11 +1430,17 @@ class TradingEngine:
         """
         candidates = list(self.s.UNIVERSE)
         logger.info(f"[Universe] 후보 {len(candidates)}종목 일봉 적재 중...")
+        # 규칙 진입 모드는 일봉 신호를 쓰지 않는다 — 모델 워밍업(80봉)과 20일 평균 거래대금 하한(30억)은
+        # 측정(combo_study: 유니버스 파일 전 종목)에 없는 필터라, 신규 상장주 15개·거래대금 30억 미만 28개가
+        # 실거래에서만 빠져 측정 485종목 대 실거래 443종목이 됐다(10/19). 여기서는 `vol_alive`의
+        # 20봉 중앙값만 있으면 되고 유동성은 유니버스 파일(10억 하한)이 이미 걸렀다.
+        rule_mode = self._rule_entry_mode()
+        min_bars = 21 if rule_mode else self.strategy.warmup_bars()
         loaded: Dict[str, pd.DataFrame] = {}
         for symbol in candidates:
             try:
                 df = await self.broker.get_bars(symbol, count=300, period="D")
-                if df is None or len(df) < self.strategy.warmup_bars():
+                if df is None or len(df) < min_bars:
                     continue
                 loaded[symbol] = df
             except Exception as exc:
@@ -1442,7 +1452,7 @@ class TradingEngine:
         scored = []
         for symbol, df in loaded.items():
             value = float((df["close"] * df["volume"]).tail(20).mean())
-            if value < self.s.MIN_TRADING_VALUE:
+            if not rule_mode and value < self.s.MIN_TRADING_VALUE:
                 continue
             scored.append((symbol, value))
         if not scored:  # 유동성 기준이 너무 빡빡하면 전체 사용
@@ -1457,6 +1467,10 @@ class TradingEngine:
         for s, df in self.panel.items():
             self.latest_prices[s] = float(df["close"].iloc[-1])
         self._last_bar_ts = str(self.panel[self.universe[0]]["ts"].iloc[-1])
+        dropped = len(candidates) - len(self.universe)
+        if dropped:
+            logger.info(f"[Universe] 후보 중 {dropped}종목 제외(적재 실패·봉 {min_bars}개 미만"
+                        + ("" if rule_mode else "·거래대금 하한") + ")")
         logger.success(f"[Universe] 확정 {len(self.universe)}종목: {', '.join(self.universe[:10])}"
                        + (" ..." if len(self.universe) > 10 else ""))
         return True
