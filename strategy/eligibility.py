@@ -49,15 +49,18 @@ ALLOWED_MARKETS = ("KOSPI", "KOSDAQ", "KOSDAQ GLOBAL")
 VTS_BLOCKED_STATUS = frozenset({"51", "52", "53", "58", "59"})
 
 
-def vts_tradable(status: Optional[dict]) -> bool:
+def vts_tradable(status: Optional[dict], block_full_margin: bool = True) -> bool:
     """현재가 응답의 상태 필드로 모의투자에서 살 수 있는지 판정한다.
 
     상태를 모르면(조회 실패·새 종목) 막지 않는다 — 거부되면 엔진이 그날 다시 시도하지 않는다.
+    `block_full_margin=False`면 증거금 100%는 막지 않는다(엔진은 `VTS_BLOCK_FULL_MARGIN`을 넘긴다).
     """
     if not status:
         return True
     if str(status.get("iscd_stat_cls_code", "")) in VTS_BLOCKED_STATUS:
         return False
+    if not block_full_margin:
+        return True
     try:
         return float(status.get("marg_rate") or 0.0) < 100.0
     except (TypeError, ValueError):

@@ -705,7 +705,7 @@ class TradingEngine:
                 px = to_float(status.get("stck_prpr")) or prices.get(symbol, 0.0)
             except Exception:
                 px = prices.get(symbol, 0.0)
-            if self._vts_live() and not vts_tradable(status):
+            if self._vts_live() and not vts_tradable(status, self.s.VTS_BLOCK_FULL_MARGIN):
                 logger.info(f"[장중·추가] {symbol} 건너뜀 — 모의투자 매매불가 "
                             f"(상태 {status.get('iscd_stat_cls_code')} · 증거금 {status.get('marg_rate')}%)")
                 self._reject_today[symbol] = day
@@ -976,7 +976,10 @@ class TradingEngine:
         cap_px = float(self.s.COMPLIANCE_TRADE_KRW) / (1.0 + float(self.s.BUY_LIMIT_BAND)) * 0.97
         affordable = {s_ for s_ in self.universe
                       if 0 < (self._prev_daily.get(s_, (0.0,))[0] or 0.0) <= cap_px}
-        ranked = sorted((s_ for s_ in self.universe if s_ in members and s_ in affordable),
+        # 증거금 100% 종목은 뺀다 — 모의투자 API가 거부할 수 있고(10/14 40070000) 요건 매매는 체결이 확실해야 한다
+        risky = set(self.s.full_margin_symbols()) | {s_ for s_, d in self._reject_today.items() if d == day}
+        ranked = sorted((s_ for s_ in self.universe
+                         if s_ in members and s_ in affordable and s_ not in risky),
                         key=lambda s_: -(self._prev_daily.get(s_, (0, 0, 0.0))[2]
                                          if len(self._prev_daily.get(s_, ())) > 2 else 0.0))
         exclude = set(self.portfolio.open_positions()) | set(self.open_orders_symbols())
@@ -1197,7 +1200,7 @@ class TradingEngine:
                 px = to_float(status.get("stck_prpr")) or prices.get(symbol, 0.0)
             except Exception:
                 px = prices.get(symbol, 0.0)
-            if self._vts_live() and not vts_tradable(status):
+            if self._vts_live() and not vts_tradable(status, self.s.VTS_BLOCK_FULL_MARGIN):
                 logger.info(f"[장중·개장] {symbol} 건너뜀 — 모의투자 매매불가 "
                             f"(상태 {status.get('iscd_stat_cls_code')} · 증거금 {status.get('marg_rate')}%)")
                 self._reject_today[symbol] = day

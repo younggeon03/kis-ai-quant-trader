@@ -800,6 +800,10 @@ def test_competition_rules():
     assert not vts_tradable({"iscd_stat_cls_code": "53", "marg_rate": "40.00"}), "경고인데 증거금만 봄"
     assert vts_tradable({"iscd_stat_cls_code": "55", "marg_rate": "40.00"}), "신용 가능 종목을 막음"
     assert vts_tradable({}), "상태를 모르면 막지 않는다(거부되면 당일 차단 목록이 막는다)"
+    full = {"iscd_stat_cls_code": "57", "marg_rate": "100.00"}
+    assert vts_tradable(full, block_full_margin=False), "증거금 100% 허용인데 막음"
+    assert not vts_tradable({"iscd_stat_cls_code": "53", "marg_rate": "100.00"}, block_full_margin=False),         "증거금 허용이 투자경고까지 풀었다"
+    assert Settings.model_fields["VTS_BLOCK_FULL_MARGIN"].default is False, "기본값은 주문해 본다"
     return (f"매수/매도 판정 · 한도 {MAX_SINGLE_WEIGHT:.0%} 클립 · "
             f"지수 멤버십 {len(members)}종목 · 요건 4항목 집계 · 모의투자 매매불가 판정")
 
@@ -2019,8 +2023,10 @@ async def test_compliance_trades():
             s.MIN_TRADE_SYMBOLS, s.USE_MOCK_MODE = 5, False
             mem = sorted(x for lst in s.index_members().values() for x in lst)
             tradable = set((s._universe_blob() or {}).get("tradable") or mem)
-            uni = [m_ for m_ in mem if m_ in tradable][:8]   # 실거래처럼 유니버스 ∩ 지수
-            s.UNIVERSE = list(uni)              # 규정 필터(유니버스 밖 거부)를 통과시킨다
+            fm = set(s.full_margin_symbols())   # 증거금 100%(10/14) — 요건 매매는 피한다
+            uni = [m_ for m_ in mem if m_ in tradable and m_ not in fm][:8]   # 실거래처럼 유니버스 ∩ 지수
+            fm_mem = [m_ for m_ in mem if m_ in fm][:1]
+            s.UNIVERSE = list(uni) + fm_mem     # 규정 필터(유니버스 밖 거부)를 통과시킨다
             assert len(uni) >= 7, "지수 멤버십 정보가 부족하다(유니버스 파일 확인)"
             # 이미 지수 종목 2개를 매매했다(10/19 이후 체결)
             with open(s.LEDGER_PATH, "w", encoding="utf-8") as f:
@@ -2028,8 +2034,10 @@ async def test_compliance_trades():
                     f.write(json.dumps({"event": "fill", "ts": "2026-10-19T09:13:00",
                                         "symbol": c, "qty": 1, "price": 10000.0}) + "\n")
             eng = TradingEngine(s, enable_dashboard=False)
-            eng.universe = uni
+            eng.universe = uni + fm_mem
             eng._prev_daily = {c: (1e4, 1e5, 1e9 - k) for k, c in enumerate(uni)}
+            for c in fm_mem:                    # 거래대금 1위여도 증거금 100%면 뽑지 않는다
+                eng._prev_daily[c] = (1e4, 1e5, 2e9)
             # 거래대금 1위인 미매매 종목이 1주 120만원 — 예산(100만원)으로 못 사므로 건너뛰어야 한다(10/19 실측)
             eng._prev_daily[uni[2]] = (1.2e6, 1e5, 1e9 - 2)
 

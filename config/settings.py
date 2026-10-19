@@ -674,6 +674,11 @@ class Settings(BaseSettings):
         description="목표 도달 잠금 — 누적 수익률이 이 값 이상이면 전략 포지션을 전량 팔고 대회 끝까지 "
                     "새로 사지 않는다(0이면 끔). 심사는 마지막 날 수익률만 보므로 중간에 목표를 찍고 "
                     "내려오는 경로를 목표로 바꾼다. 측정 scripts/combo_study.py --lock-study (10/19)")
+    VTS_BLOCK_FULL_MARGIN: bool = Field(
+        default=False,
+        description="증거금률 100% 종목을 주문 전에 건너뛸지. 10/14 그런 종목 5건이 40070000으로 "
+                    "거부됐지만 일반 부문 상위권은 같은 상태(57·100%)의 종목을 샀다 — 막지 않고 "
+                    "주문해 보고, 거부되면 그날만 다시 주문하지 않는다(_reject_today)")
 
     # 대회 최소 요건 — 못 채우면 수익률과 무관하게 실격이다(모두 체결 기준).
     MIN_TRADE_COUNT: int = Field(default=0, description="최소 거래 횟수")
@@ -844,6 +849,10 @@ class Settings(BaseSettings):
         """
         blob = self._universe_blob().get("indices") or {}
         return {str(k): [str(x) for x in (v or [])] for k, v in blob.items()}
+
+    def full_margin_symbols(self) -> List[str]:
+        """10/14 조회에서 증거금 100%였던 종목. 요건 매매는 체결이 확실해야 해서 이 종목을 피한다."""
+        return [str(x) for x in (self._universe_blob().get("full_margin_20261014") or [])]
 
     def _universe_num(self, key: str, symbol: str) -> float:
         try:
