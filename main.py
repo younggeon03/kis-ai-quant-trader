@@ -928,7 +928,12 @@ class TradingEngine:
         fills = read_fills(Path(self.s.LOG_DIR) / "ledger.jsonl", since=start)
         traded = index_symbols_traded(fills, members)
         # 거래대금이 큰 지수 종목부터 — 체결이 확실하고 호가가 촘촘하다
-        ranked = sorted((s_ for s_ in self.universe if s_ in members),
+        # 1주 가격이 예산을 넘는 종목은 뺀다(매수 지정가 폭 포함). 남겨 두면 수량 0으로 매번 거부되는데
+        # 거래대금 상위라 날마다 다시 뽑혀 요건이 영영 안 찬다(10/19: SK하이닉스 122만원·삼성전기 111만원)
+        cap_px = float(self.s.COMPLIANCE_TRADE_KRW) / (1.0 + float(self.s.BUY_LIMIT_BAND)) * 0.97
+        affordable = {s_ for s_ in self.universe
+                      if 0 < (self._prev_daily.get(s_, (0.0,))[0] or 0.0) <= cap_px}
+        ranked = sorted((s_ for s_ in self.universe if s_ in members and s_ in affordable),
                         key=lambda s_: -(self._prev_daily.get(s_, (0, 0, 0.0))[2]
                                          if len(self._prev_daily.get(s_, ())) > 2 else 0.0))
         exclude = set(self.portfolio.open_positions()) | set(self.open_orders_symbols())

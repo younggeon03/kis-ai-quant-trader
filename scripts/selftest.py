@@ -2021,7 +2021,7 @@ async def test_compliance_trades():
             tradable = set((s._universe_blob() or {}).get("tradable") or mem)
             uni = [m_ for m_ in mem if m_ in tradable][:8]   # 실거래처럼 유니버스 ∩ 지수
             s.UNIVERSE = list(uni)              # 규정 필터(유니버스 밖 거부)를 통과시킨다
-            assert len(uni) >= 6, "지수 멤버십 정보가 부족하다(유니버스 파일 확인)"
+            assert len(uni) >= 7, "지수 멤버십 정보가 부족하다(유니버스 파일 확인)"
             # 이미 지수 종목 2개를 매매했다(10/19 이후 체결)
             with open(s.LEDGER_PATH, "w", encoding="utf-8") as f:
                 for c in uni[:2]:
@@ -2030,6 +2030,8 @@ async def test_compliance_trades():
             eng = TradingEngine(s, enable_dashboard=False)
             eng.universe = uni
             eng._prev_daily = {c: (1e4, 1e5, 1e9 - k) for k, c in enumerate(uni)}
+            # 거래대금 1위인 미매매 종목이 1주 120만원 — 예산(100만원)으로 못 사므로 건너뛰어야 한다(10/19 실측)
+            eng._prev_daily[uni[2]] = (1.2e6, 1e5, 1e9 - 2)
 
             class _Broker:
                 async def inquire_price(self, symbol):   # 진입 직전 현재가·종목 상태(모의 매매불가 거름)
@@ -2052,21 +2054,21 @@ async def test_compliance_trades():
             assert not bought, "매수 시각 전에 샀다"
             await eng._compliance_trades(dt.datetime(2026, 10, 19, 9, 31), {})
             buys = [b for b in bought if b[1] == "BUY"]
-            assert [b[0] for b in buys] == uni[2:6] and all(b[2] == 100 for b in buys), \
-                f"모자란 3 + 여유 1을 100만원씩 사야 한다: {buys}"
+            assert [b[0] for b in buys] == uni[3:7] and all(b[2] == 100 for b in buys), \
+                f"모자란 3 + 여유 1을 100만원씩 사야 한다(1주가 예산보다 비싼 종목 제외): {buys}"
             await eng._compliance_trades(dt.datetime(2026, 10, 19, 10, 0), {})
             assert len([b for b in bought if b[1] == "BUY"]) == 4, "하루에 두 번 샀다"
             # 체결됐다고 치고 매도 시각에 판다. 전략 자리는 비어 있어야 한다
-            for c in uni[2:6]:
+            for c in uni[3:7]:
                 eng.portfolio.positions[c] = Position(symbol=c, qty=100, avg_price=1e4, last_price=1e4)
             assert not eng._strategy_held(), "요건 포지션이 전략 자리를 차지했다"
             await eng._compliance_trades(dt.datetime(2026, 10, 19, 14, 31), {})
             sells = [b for b in bought if b[1] == "SELL"]
-            assert sorted(b[0] for b in sells) == sorted(uni[2:6]), f"당일 청산 실패: {sells}"
+            assert sorted(b[0] for b in sells) == sorted(uni[3:7]), f"당일 청산 실패: {sells}"
     finally:
         for k, v in saved.items():
             setattr(s, k, v)
-    return ("모자란 수+여유 선택 · 관문 금액 제한·자리 면제 · 전략 자리 미점유 · 시작일 전 금지 · "
+    return ("모자란 수+여유 선택(1주가 예산보다 비싼 종목 제외) · 관문 금액 제한·자리 면제 · 전략 자리 미점유 · 시작일 전 금지 · "
             "하루 1회 매수 · 당일 청산 모두 작동")
 
 
