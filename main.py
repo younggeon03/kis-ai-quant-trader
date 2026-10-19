@@ -1467,10 +1467,15 @@ class TradingEngine:
         for s, df in self.panel.items():
             self.latest_prices[s] = float(df["close"].iloc[-1])
         self._last_bar_ts = str(self.panel[self.universe[0]]["ts"].iloc[-1])
-        dropped = len(candidates) - len(self.universe)
-        if dropped:
-            logger.info(f"[Universe] 후보 중 {dropped}종목 제외(적재 실패·봉 {min_bars}개 미만"
-                        + ("" if rule_mode else "·거래대금 하한") + ")")
+        n_short = len(candidates) - len(loaded)
+        n_cap = max(0, len(scored) - len(self.universe))
+        if n_short:
+            logger.info(f"[Universe] 후보 중 {n_short}종목 제외(적재 실패·봉 {min_bars}개 미만)")
+        if len(loaded) - len(scored):
+            logger.info(f"[Universe] 거래대금 하한으로 {len(loaded) - len(scored)}종목 제외")
+        if n_cap:
+            logger.warning(f"[Universe] UNIVERSE_SIZE={self.s.UNIVERSE_SIZE} 상한으로 거래대금 하위 "
+                           f"{n_cap}종목을 잘랐다 — 유니버스 파일 전부를 쓰려면 상한을 올린다")
         logger.success(f"[Universe] 확정 {len(self.universe)}종목: {', '.join(self.universe[:10])}"
                        + (" ..." if len(self.universe) > 10 else ""))
         return True
