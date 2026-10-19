@@ -669,6 +669,11 @@ class Settings(BaseSettings):
                     "확인되지 않아 2주차부터 하고, 그날 이후 체결만 센다")
     COMPLIANCE_BUY_HHMM: str = Field(default="0930", description="요건 매매 매수 시각")
     COMPLIANCE_SELL_HHMM: str = Field(default="1430", description="요건 매매 매도 시각(당일 청산)")
+    LOCK_RETURN: float = Field(
+        default=0.0,
+        description="목표 도달 잠금 — 누적 수익률이 이 값 이상이면 전략 포지션을 전량 팔고 대회 끝까지 "
+                    "새로 사지 않는다(0이면 끔). 심사는 마지막 날 수익률만 보므로 중간에 목표를 찍고 "
+                    "내려오는 경로를 목표로 바꾼다. 측정 scripts/combo_study.py --lock-study (10/19)")
 
     # 대회 최소 요건 — 못 채우면 수익률과 무관하게 실격이다(모두 체결 기준).
     MIN_TRADE_COUNT: int = Field(default=0, description="최소 거래 횟수")

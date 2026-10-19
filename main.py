@@ -186,6 +186,8 @@ class TradingEngine:
         self._slide_fired: set = set()                  # 오늘 이미 한 번 발동한 종목(첫 발동만 쓴다)
         self._slide_queue: List[tuple] = []             # [(배수, 종목)] 이번 조회에서 새로 발동
         self._sold_today: Dict[str, str] = {}           # 오늘 판 종목(같은 날 다시 사지 않는다)
+        self._locked = False                              # 목표 도달 잠금(LOCK_RETURN) — 켜지면 끝까지 유지
+        self._lock_seen: Optional[dt.datetime] = None     # 목표 첫 확인 시각(시세 튐 방지용 확인 대기)
         # 관제 화면용 오늘의 진입 판정 — 장 시작 판정 결과와 장중 발동, 각각 무엇이 됐는지(매매에는 안 쓴다)
         self._board: Dict[str, Any] = {"day": "", "opening": None, "slide": []}
         # same_window 기준선 — 종목 → 지난 거래일들의 09:00~09:0N 거래대금(오래된 것부터, 최대 20)
@@ -464,6 +466,47 @@ class TradingEngine:
         logger.info(f"[장중·VWAP] 기준선 {len(self._vwap_profile)}종목 · 최신 {data.get('as_of')} · "
                     f"VWAP {self.s.VWAP_EXIT_BELOW:.0%} 아래 + 직전 {self.s.VWAP_EXIT_WINDOW}분 "
                     f"< 평소 x{self.s.VWAP_EXIT_MULT:g}")
+
+    LOCK_CONFIRM_SECONDS = 60.0   # 목표를 처음 넘고 이만큼 지나도 넘어 있어야 잠근다(시세 한 건 튐 방지)
+
+    async def _lock_check(self, now: dt.datetime, prices: Dict[str, float]) -> None:
+        """목표 도달 잠금 — 누적 수익률이 `LOCK_RETURN` 이상이면 전략 포지션을 팔고 매수를 멈춘다.
+
+        심사는 마지막 날(11/20) 수익률만 본다. 꼬리 전략은 출렁임이 커서 중간에 목표를 찍고 내려오는
+        경로가 많다 — 그 경로를 목표로 바꾼다. 측정(`combo_study.py --lock-study`, 지문
+        `a12a9eb45ea44d2d`, 25거래일): +100% 잠금 P(+100%) 5.12% → 6.59%. 측정은 종가 한 번 판정이고
+        여기서는 장중에 보므로 측정보다 불리하지 않다. 요건 매매(`_compliance_trades`)는 계속한다.
+        """
+        target = float(self.s.LOCK_RETURN)
+        if target <= 0 or not self.phase.is_competition:
+            return
+        if not self._locked:
+            ret = float(self.portfolio.total_return)
+            if ret < target:
+                self._lock_seen = None
+                return
+            if self._lock_seen is None:
+                self._lock_seen = now
+                logger.warning(f"[잠금] 누적 {ret:+.2%} ≥ 목표 {target:+.0%} — "
+                               f"{self.LOCK_CONFIRM_SECONDS:.0f}초 뒤에도 넘어 있으면 잠근다")
+                return
+            if (now - self._lock_seen).total_seconds() < self.LOCK_CONFIRM_SECONDS:
+                return
+            self._locked = True
+            self.ledger.write("lock", {"total_return": ret, "target": target,
+                                       "equity": self.portfolio.equity})
+            logger.warning(f"[잠금] 목표 도달 {ret:+.2%} — 전략 포지션 전량 매도 · 대회 끝까지 신규 매수 없음")
+            self._save_state()
+        for symbol, pos in list(self.portfolio.open_positions().items()):
+            if symbol in self._compliance_syms:
+                continue                      # 요건 포지션은 요건 매매가 당일 판다
+            qty = self._sellable_qty(symbol, pos.qty)
+            if qty <= 0:
+                continue
+            px = prices.get(symbol, pos.last_price or pos.avg_price)
+            if await self._submit(symbol, Side.SELL, qty, px, "LOCK|목표 도달 잠금"):
+                self.ledger.write("exit", {"symbol": symbol, "qty": qty, "reason": "lock",
+                                           "detail": "목표 도달 잠금"})
 
     async def _vwap_exits(self, now: dt.datetime) -> None:
         """보유 종목을 장중 VWAP 청산 규칙으로 본다(`vwap_fade`). 복수시세 한 번으로 보유 종목을 다 본다.
@@ -2019,6 +2062,9 @@ class TradingEngine:
                 self.ledger.write("exit", {"symbol": order.symbol, "qty": qty,
                                            "reason": order.reason.value, "detail": order.detail})
 
+        # --- 목표 도달 잠금 (설정 LOCK_RETURN) ---
+        await self._lock_check(now, prices)
+
         # --- 장중 VWAP 청산 (설정 VWAP_EXIT) ---
         await self._vwap_exits(now)
 
@@ -2045,16 +2091,16 @@ class TradingEngine:
                                                "reason": "intraday", "detail": reason})
 
         # --- 장중 진입: opening 모드 (09:0N 판정 → 09:(N+지연) 한 번) ---
-        if self._opening_mode() and self.risk.state == RiskState.NORMAL:
+        if self._opening_mode() and self.risk.state == RiskState.NORMAL and not self._locked:
             await self._opening_entries(now, prices)
 
         # --- 장중 추가 매수 (SLIDE_ENTRY) — 장 시작 진입이 끝난 뒤 빈자리를 장중 발동으로 ---
-        if self.s.SLIDE_ENTRY and self.risk.state == RiskState.NORMAL:
+        if self.s.SLIDE_ENTRY and self.risk.state == RiskState.NORMAL and not self._locked:
             self._slide_kick(now)
             await self._slide_entries(now, prices)
 
         # --- 장중 진입: sliding 모드 (감시 루프가 쌓은 발동) ---
-        if self._sliding_mode() and self.risk.state == RiskState.NORMAL:
+        if self._sliding_mode() and self.risk.state == RiskState.NORMAL and not self._locked:
             await self._sliding_entries(now, prices)
 
         # --- 장중 진입 (분봉 전략) ---
@@ -2515,6 +2561,7 @@ class TradingEngine:
                 "entry_dates": self._entry_dates,
                 "compliance_syms": self._compliance_syms,
                 "sold_today": self._sold_today,
+                "locked": self._locked,
             }
             self._state_path().write_text(
                 json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
@@ -2546,6 +2593,9 @@ class TradingEngine:
             # 오늘 판 종목 — 장중 재시작 뒤 같은 날 다시 사지 않게(날짜를 같이 저장하므로 어제 것은 무해)
             sold = data.get("sold_today") or {}
             self._sold_today = {str(k): str(v) for k, v in sold.items()}
+            self._locked = bool(data.get("locked", False))
+            if self._locked:
+                logger.warning("[잠금] 목표 도달 잠금 상태 복구 — 신규 매수 없음")
         except Exception as exc:
             logger.debug(f"[State] 복구 실패: {exc}")
 

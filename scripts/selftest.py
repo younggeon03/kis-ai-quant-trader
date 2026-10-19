@@ -2337,6 +2337,40 @@ async def test_server_reliability():
         assert list(eng.open_orders) == ["new"], f"전날 미체결 추적이 남았다: {eng.open_orders}"
         assert eng._compliance_syms == {"ZZZ": "20261015"}, \
             f"보유 요건 포지션은 남기고 보유 안 한 표시만 버려야 한다: {eng._compliance_syms}"
+        # 목표 도달 잠금(LOCK_RETURN) — 60초 확인 뒤 잠그고 전략 포지션만 판다(요건 포지션 제외)
+        from strategy.phase import phase_config as _pc
+        saved_lock = (s.LOCK_RETURN, s.COMP_START, s.COMP_END, s.PHASE1_END)
+        try:
+            s.LOCK_RETURN = 1.0
+            s.COMP_START, s.COMP_END, s.PHASE1_END = "2026-10-12", "2026-11-20", "2026-10-16"
+            eng.phase = _pc(settings=s, now=dt.date(2026, 10, 19))
+            eng.open_orders = {}
+            eng._compliance_syms = {"CCC": "20261019"}
+            eng.portfolio.positions["CCC"] = Position(symbol="CCC", qty=1, avg_price=1.0, last_price=1.0)
+            sells = []
+
+            async def _submit_lock(symbol, side, qty, price, reason):
+                sells.append((symbol, side.value, reason.split("|")[0]))
+                return True
+            eng._submit = _submit_lock
+            base_cap = eng.portfolio.initial_capital
+            eng.portfolio.initial_capital = eng.portfolio.equity / 2.5      # 누적 +150%
+            t_l = dt.datetime(2026, 10, 19, 10, 0)
+            await eng._lock_check(t_l, {})
+            await eng._lock_check(t_l + dt.timedelta(seconds=30), {})
+            assert not eng._locked and not sells, "확인 대기(60초) 전에 잠갔다"
+            await eng._lock_check(t_l + dt.timedelta(seconds=61), {})
+            assert eng._locked, "목표를 60초 넘게 유지했는데 잠그지 않았다"
+            assert sells == [("ZZZ", "SELL", "LOCK")], f"전략 포지션만 팔아야 한다(요건 포지션 제외): {sells}"
+            eng.portfolio.initial_capital = base_cap
+            eng._locked, eng._lock_seen = False, None
+            s.LOCK_RETURN = 0.0
+            await eng._lock_check(t_l + dt.timedelta(seconds=200), {})
+            assert not eng._locked, "LOCK_RETURN=0 인데 잠갔다"
+            eng.portfolio.positions.pop("CCC")
+            eng._compliance_syms = {}
+        finally:
+            s.LOCK_RETURN, s.COMP_START, s.COMP_END, s.PHASE1_END = saved_lock
         eng._opening_done_day = ""
         eng._opening_mode = lambda: True               # opening 모드에서는 장 시작 진입이 먼저다
         assert not eng._slide_ready(t1), "장 시작 진입 전에 장중 추가 매수를 봤다"
@@ -2345,7 +2379,7 @@ async def test_server_reliability():
             setattr(s, k, v)
     return ("주문 읽기 타임아웃·5xx 재시도 안 함(결과 불명) · 접속 실패 재시도 · 조회 재시도 · "
             "무손실 체결 채널 · 히스토그램 분위수·Prometheus · Date 헤더 시계 오차 · "
-            "장중 VWAP 청산(판정·배관) · 장중 추가 매수(첫 발동·배수 순·빈자리·당일 매도 제외·전일 대비 하한) · 체결통보로 미체결 추적 정리 · 날짜 변경 시 전날 미체결·요건 표시 정리 모두 작동")
+            "장중 VWAP 청산(판정·배관) · 장중 추가 매수(첫 발동·배수 순·빈자리·당일 매도 제외·전일 대비 하한) · 체결통보로 미체결 추적 정리 · 날짜 변경 시 전날 미체결·요건 표시 정리 · 목표 도달 잠금(확인 대기·요건 제외) 모두 작동")
 
 
 # ============================================================ 실행
