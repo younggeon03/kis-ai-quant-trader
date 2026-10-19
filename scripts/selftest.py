@@ -303,7 +303,8 @@ async def test_mock_broker():
     assert holding and to_int(holding[0]["hldg_qty"]) == filled_qty, balance["output1"]
 
     # 체결되지 않는 지정가 → 미체결로 남고 취소 가능
-    far = round_to_tick(price * 0.7)
+    # 하한가(전일 종가 기준 -30%)로 낸다 — 현재가 x0.7은 현재가가 전일보다 낮은 종목에서 하한 아래라 거부된다
+    far = price_limits(to_float(price_resp["output"]["stck_sdpr"]) or price)[0]
     pending = await broker.order_cash(symbol, Side.BUY, 1, far)
     assert is_ok(pending), pending
     broker.match_all()
