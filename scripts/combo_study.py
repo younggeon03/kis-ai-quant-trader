@@ -59,11 +59,15 @@ def _px_at(op_row: np.ndarray, e: int) -> float:
 
 def run_window_intraday(events: List[Dict[str, Any]], arm: str, d0: int, d1: int,
                         closes: Dict[str, Dict[int, float]], cost: float, slots: int,
-                        weight: float, slide_cap: Optional[int] = None) -> float:
+                        weight: float, slide_cap: Optional[int] = None, lock: float = 0.0) -> float:
     """하루 안의 진입·장중 청산을 분 순서로 처리하는 30일 창 수익률.
 
     청산 `when`: 'open'(그날 장 시작 전), 'intra'(그날 `exit_min` 분), 'close'(장 마감 뒤).
     장중에 판 종목은 그날 다시 사지 않는다.
+
+    `lock` > 0 이면 **목표 도달 잠금**이다 — 그날 종가 평가(매도 비용 절반 반영) 수익률이 `lock` 이상이면
+    종가에 전량 팔고 창 끝까지 현금으로 둔다. 심사는 마지막 날 수익률만 보므로, 중간에 목표를 찍고
+    내려온 경로를 목표로 바꾼다. 판정은 종가 한 번(장중 고점은 보지 않는다 — 보수적).
     """
     cash = 1.0
     held: List[Dict[str, Any]] = []
@@ -107,6 +111,13 @@ def run_window_intraday(events: List[Dict[str, Any]], arm: str, d0: int, d1: int
             if ev.get("src") == "slide":
                 slide_n += 1
         release(d, EOD_MIN, ("intra", "close"))
+        if lock > 0:
+            mtm = cash
+            for h in held:
+                px = closes[h["sym"]].get(d)
+                mtm += h["alloc"] * (px / h["entry_px"] * (1.0 - cost / 2.0)) if px and px > 0 else h["alloc"]
+            if mtm - 1.0 >= lock:
+                return mtm - 1.0
     for h in held:
         px = closes[h["sym"]].get(d1)
         cash += h["alloc"] * (px / h["entry_px"] * (1.0 - cost / 2.0)) if px and px > 0 else h["alloc"]
@@ -137,6 +148,11 @@ def main() -> int:
                     help="지금 서버 칸(--slide-grid 의 장중 설정 · 전일+3%%↑)을 VWAP 청산 조건만 바꿔 잰다: "
                          "AND(지금) · OR · VWAP 만 · 거래만")
     ap.add_argument("--diag", action="store_true", help="원인 진단(출처·청산별 통계 · 회전 수 · 비용 0)")
+    ap.add_argument("--lock-study", default="",
+                    help="지금 서버 칸만 목표 도달 잠금 x 비중 x 창 길이로 잰다. 예: '0,0.5,0.7,1.0' "
+                         "(--slide-grid 5:10 필요 · --lock-weights · --lock-bars)")
+    ap.add_argument("--lock-weights", default="0.45,0.49")
+    ap.add_argument("--lock-bars", default="30,25", help="창 길이(거래일). 25 = 10/19 부터 남은 기간")
     args = ap.parse_args()
 
     s = get_settings()
@@ -284,6 +300,9 @@ def main() -> int:
     last = max(max(v) for v in closes.values())
     starts = list(range(first, last - COMP_BARS + 2))
 
+    if args.lock_study:
+        return _lock_study(args, slide_by_cfg, open_evs, closes, cost, first, last, fp, len(fp_src))
+
     def evaluate(evs: List[Dict[str, Any]], arm: str, cap: Optional[int] = None) -> np.ndarray:
         return np.array([run_window_intraday(evs, arm, d0, d0 + COMP_BARS - 1, closes, cost,
                                              args.slots, weight, cap) for d0 in starts])
@@ -340,6 +359,44 @@ def main() -> int:
         print(f" {x['rule']:<44}{x['median'] * 100:+8.1f}%{x['p90'] * 100:+8.1f}%{x['p50up'] * 100:9.2f}%"
               f"{x['p100up'] * 100:9.2f}%{x['loss20'] * 100:8.2f}%{x['beats_ref'] * 100:9.1f}%")
     print("=" * 104)
+    print(f" 저장 → {op_}")
+    return 0
+
+
+def _lock_study(args, slide_by_cfg, open_evs, closes, cost, first, last, fp, n_sym) -> int:
+    """목표 도달 잠금 x 비중 x 창 길이 — 지금 서버 칸(장 시작 + 장중 추가 · 전일+3%↑ · VWAP 청산)."""
+    cfg = next(iter(slide_by_cfg))
+    evs = open_evs + [e for e in slide_by_cfg[cfg] if e["chase"] >= 0.03]
+    locks = [float(x) for x in args.lock_study.split(",")]
+    weights = [float(x) for x in args.lock_weights.split(",")]
+    bars_l = [int(x) for x in args.lock_bars.split(",")]
+    rows = []
+    for bars in bars_l:
+        starts = list(range(first, last - bars + 2))
+        for w in weights:
+            for lk in locks:
+                r = np.array([run_window_intraday(evs, "vwap", d0, d0 + bars - 1, closes, cost,
+                                                  args.slots, w, None, lk) for d0 in starts])
+                rows.append({"bars": bars, "weight": w, "lock": lk, "windows": len(starts),
+                             "median": float(np.median(r)),
+                             "p50up": float((r >= 0.5).mean()), "p70up": float((r >= 0.7).mean()),
+                             "p100up": float((r >= 1.0).mean()), "loss20": float((r <= -0.2).mean()),
+                             "locked": float((r >= lk).mean()) if lk > 0 else 0.0})
+    out = {"data_fingerprint": {"hash": fp, "symbols": n_sym}, "config": vars(args),
+           "cell": f"{cfg[0]}분x{cfg[1]:g} · 전일+3%↑ · VWAP 청산", "rows": rows}
+    op_ = Path(args.out)
+    op_.parent.mkdir(parents=True, exist_ok=True)
+    op_.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+    print()
+    print("=" * 96)
+    print(f" 목표 도달 잠금 — 지문 {fp} ({n_sym}종목) · {out['cell']}")
+    print("=" * 96)
+    print(f" {'창':>4}{'비중':>6}{'잠금':>7}{'창 수':>7}{'중앙':>9}{'P(+50%)':>10}{'P(+70%)':>10}{'P(+100%)':>10}{'P(-20%)':>9}")
+    for x in rows:
+        lk = f"+{x['lock'] * 100:.0f}%" if x["lock"] > 0 else "없음"
+        print(f" {x['bars']:>4}{x['weight'] * 100:>5.0f}%{lk:>7}{x['windows']:>7}{x['median'] * 100:+8.1f}%"
+              f"{x['p50up'] * 100:9.2f}%{x['p70up'] * 100:9.2f}%{x['p100up'] * 100:9.2f}%{x['loss20'] * 100:8.2f}%")
+    print("=" * 96)
     print(f" 저장 → {op_}")
     return 0
 
