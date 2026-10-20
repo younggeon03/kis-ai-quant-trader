@@ -172,6 +172,7 @@ class TradingEngine:
         self._opening_done_day: str = ""                 # 진입을 처리한 날
         # 오늘 '매매불가'로 거부된 종목(종목 → 날짜). 같은 날 다시 주문하지 않는다
         self._reject_today: Dict[str, str] = {}
+        self._bad_px_logged: Dict[str, float] = {}
         # --- 장중 VWAP 청산 — 보유 종목 누적 거래대금 표본(직전 W분 거래대금을 차분으로 만든다) ---
         self._vwap_profile: Dict[str, List[Optional[float]]] = {}
         self._vwap_hist: Dict[str, deque] = {}           # 종목 → deque[(초, 누적 거래대금)]
@@ -749,6 +750,27 @@ class TradingEngine:
     def _vts_live(self) -> bool:
         """모의투자 실서버에 붙어 있는가(매매불가 종목 거름이 필요한 곳)."""
         return (not self.s.USE_MOCK_MODE) and str(self.s.KIS_ENV).lower() == "vts"
+
+    def _sane_prices(self) -> Dict[str, float]:
+        """평가·청산에 쓸 가격 — 전일 종가 대비 가격제한폭(±30%) 밖의 값은 버린다.
+
+        10/20 장 전에 최고 자산(peak_equity)이 5.34억으로 튀었다(실제 최고 1.07억) — 보유 종목에
+        약 10배 가격이 한 번 들어왔다(출처 미확인). 위로 튀면 낙폭 표시만 틀리지만 아래로 튀면
+        손절이 실제 매도를 낸다. 제한폭 밖 가격은 시장에 존재할 수 없으므로 버리고 처음 한 번 기록한다.
+        """
+        out: Dict[str, float] = {}
+        for sym, px in self.latest_prices.items():
+            if px <= 0:
+                continue
+            pc = (self._prev_daily.get(sym) or (0.0,))[0] or 0.0
+            if pc > 0 and not (pc * 0.69 <= px <= pc * 1.31):
+                if self._bad_px_logged.get(sym) != round(px, 2):
+                    self._bad_px_logged[sym] = round(px, 2)
+                    logger.warning(f"[가격] {sym} {px:,.0f}원 — 전일 종가 {pc:,.0f}원의 ±30% 밖, 버림")
+                    self.ledger.write("bad_price", {"symbol": sym, "price": px, "prev_close": pc})
+                continue
+            out[sym] = px
+        return out
 
     def _opening_mode(self) -> bool:
         return bool(self.s.USE_INTRADAY) and self.s.INTRADAY_ENTRY_MODE == "opening"
@@ -1943,7 +1965,7 @@ class TradingEngine:
                             f"(다음 개장까지 {self.calendar.seconds_until_next_open() / 60:.0f}분)")
             if session is MarketSession.CLOSED and self.portfolio.open_positions():
                 # 장 종료 후에는 평가만 갱신
-                self.portfolio.mark_prices(self.latest_prices)
+                self.portfolio.mark_prices(self._sane_prices())
             return
 
         # --- 시세 갱신 ---
@@ -2006,7 +2028,7 @@ class TradingEngine:
                 self._opening_task = asyncio.create_task(self._opening_scan(now))
 
         # --- 평가 및 리스크 상태 ---
-        prices = {s: p for s, p in self.latest_prices.items() if p > 0}
+        prices = self._sane_prices()
         self.portfolio.mark_prices(prices)
         for symbol, price in prices.items():
             self.risk.track_price(symbol, price)
