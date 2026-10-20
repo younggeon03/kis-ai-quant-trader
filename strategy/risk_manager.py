@@ -404,7 +404,11 @@ class RiskManager:
 
         budget = equity * target_w
         free_cash = max(0.0, portfolio.cash - pending_total)
-        qty = int(min(budget // price, affordable_qty(free_cash, price, self.s.FEE_BPS)))
+        # 현금 한도는 **매수 지정가**(현재가 x (1 + BUY_LIMIT_BAND))로 잰다 — 증권사가
+        # 주문가능금액을 지정가로 예약하므로, 현재가로 재면 남은 현금을 꽉 채운 두 번째
+        # 진입이 "주문가능금액 부족"으로 거부돼 조용히 1종목 구조가 된다(비중 49%).
+        limit_px = price * (1.0 + float(self.s.BUY_LIMIT_BAND))
+        qty = int(min(budget // price, affordable_qty(free_cash, limit_px, self.s.FEE_BPS)))
         if qty < 1:
             return self._reject(
                 f"수량 0 (예산 {budget:,.0f}원, 현금 {portfolio.cash:,.0f}원, 가격 {price:,.0f}원)"
