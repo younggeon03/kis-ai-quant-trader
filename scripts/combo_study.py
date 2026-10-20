@@ -138,6 +138,12 @@ def main() -> int:
     ap.add_argument("--vwap-roll", type=int, default=10)
     ap.add_argument("--hold-vol", type=float, default=2.0)
     ap.add_argument("--max-hold", type=int, default=30)
+    ap.add_argument("--hold-rule", default="alive",
+                    choices=["alive", "tov_ma_turn", "px_ma", "px_ma_turn", "alive_and_px_ma", "alive_or_px_ma"],
+                    help="다일 보유 판정(봉 t 종가 → t+1 시가 매도). alive = vol_alive(지금) · tov_ma_turn = 거래대금 "
+                         "N일 이평이 전일보다 낮으면 매도 · px_ma = 종가 < 종가 N일 이평이면 매도 · px_ma_turn = 종가 "
+                         "N일 이평이 꺾이면 매도 · and/or = vol_alive 와 px_ma 결합(and = 둘 다 살아야 보유)")
+    ap.add_argument("--ma-n", type=int, default=5, help="--hold-rule 의 이동평균 길이(봉)")
     ap.add_argument("--stop", type=float, default=0.25)
     ap.add_argument("--slots", type=int, default=2)
     ap.add_argument("--out", default="reports/combo_study.json")
@@ -194,6 +200,24 @@ def main() -> int:
         med_day = pd.Series(tov).rolling(20, min_periods=10).median().shift(1).to_numpy(float)
         with np.errstate(invalid="ignore", divide="ignore"):
             burst = tov / np.where(med_day > 0, med_day, np.nan)
+        if args.hold_rule != "alive":
+            # path_exit 은 burst[t] >= hold_vol 이면 보유한다 — 규칙의 생존 여부를 그 꼴로 바꿔 넣는다
+            n_ = int(args.ma_n)
+            tma = pd.Series(tov).rolling(n_, min_periods=n_).mean().to_numpy(float)
+            pma = pd.Series(c).rolling(n_, min_periods=n_).mean().to_numpy(float)
+            prev = lambda a: np.concatenate([[np.nan], a[:-1]])   # noqa: E731
+            alive_v = np.nan_to_num(burst, nan=0.0) >= args.hold_vol
+            rules = {
+                "tov_ma_turn": tma >= prev(tma),
+                "px_ma": c >= pma,
+                "px_ma_turn": pma >= prev(pma),
+            }
+            rules["alive_and_px_ma"] = alive_v & rules["px_ma"]
+            rules["alive_or_px_ma"] = alive_v | rules["px_ma"]
+            ok_ = rules[args.hold_rule]
+            # 이평이 아직 없으면(상장 초기) vol_alive 로 판정한다
+            ok_ = np.where(np.isfinite(pma) & np.isfinite(tma), ok_, alive_v)
+            burst = np.where(ok_, 1e9, 0.0)    # path_exit 은 isfinite 를 본다 — inf 는 청산으로 읽힌다
         pos = {t: i for i, t in enumerate(ts)}
 
         fd = pd.read_csv(_fd(sym), dtype={"ts": str})

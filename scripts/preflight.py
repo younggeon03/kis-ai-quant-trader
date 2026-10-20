@@ -197,10 +197,11 @@ def check(settings, live: bool) -> List[Tuple[str, str, str, str]]:
         # 그래서 두 경우를 갈라서 본다.
         state_exit = "vol_alive" in str(s.EXIT_RULES or "")
         if state_exit:
-            add(FATAL, "보유 상한", s.MAX_HOLDING_BARS >= 20,
+            add(FATAL, "보유 상한", s.MAX_HOLDING_BARS >= 10,
                 f"{s.MAX_HOLDING_BARS}봉 (안전 상한 — 주 청산은 vol_alive)",
                 "6봉으로 두면 상태 기반이 무력화된다(살아 있어도 6일에 잘린다). "
-                "측정은 상한 30봉에서 했고 실제 중앙 보유일수는 6일이다")
+                "485종목 측정(10/20, 지문 60af5559dbe882c9)에서 10봉이 30봉보다 네 지표 모두 나았다 "
+                "(P(+100%) 21.92% vs 21.43% · −20% 이하 9.36% vs 11.08%), 5봉은 20.20%")
         else:
             add(FATAL, "보유 봉 수", s.MAX_HOLDING_BARS in (6, 10),
                 f"{s.MAX_HOLDING_BARS}봉 (고정 기간 최적 6봉 · 2위 10봉)",
