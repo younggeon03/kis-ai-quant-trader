@@ -33,7 +33,7 @@ import sys
 import traceback
 from collections import deque
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -70,13 +70,14 @@ from strategy.phase import current_phase, phase_config, reset_recommendation
 from utils.krx_calendar import KRXCalendar, MarketSession
 from utils.logger import JsonLedger, logger, setup_logging
 from utils.orderbook_log import OrderbookRecorder
-from utils.market_rules import round_to_tick
+from utils.market_rules import clamp_to_limits, price_limits, round_to_tick
 
 BAR_REFRESH_LOOPS = 40      # 전체 일봉 재적재 주기(루프 수)
 QUOTE_CHUNK = 4             # 루프당 현재가 갱신 종목 수(유량 보호)
 RECONCILE_LOOPS = 30        # 브로커 잔고 대조 주기
 DISK_WARN_GB = 1.0          # 남은 디스크가 이 아래면 경고(서버 디스크 10GB — 원장·상태 저장 실패 방지)
 FLATTEN_ORDER_TTL = 30.0    # 마감 정리 구간의 미체결 매도 취소 기준(초)
+SELL_REPRICE_SEC = 60.0     # 장중 미체결 매도를 취소하고 지금 가격으로 다시 내는 기준(초)
 OPENING_LATE_MAX_MIN = 2    # 장 시작 판정을 이만큼(분) 넘겨 기동했으면 건너뛴다(누적이 창보다 길어진다)
 FILL_POLL_LOOPS = 5         # 체결 폴링 주기(실서버)
 # 규칙 기반 진입(burst·opening)의 신호 점수. 진입 결정은 규칙이 이미 내렸으므로 리스크
@@ -172,7 +173,7 @@ class TradingEngine:
         self._opening_done_day: str = ""                 # 진입을 처리한 날
         # 오늘 '매매불가'로 거부된 종목(종목 → 날짜). 같은 날 다시 주문하지 않는다
         self._reject_today: Dict[str, str] = {}
-        self._bad_px_logged: Dict[str, float] = {}
+        self._bad_px_logged: Dict[str, str] = {}   # 종목 → 마지막으로 남긴 날(YYYYMMDD)
         # --- 장중 VWAP 청산 — 보유 종목 누적 거래대금 표본(직전 W분 거래대금을 차분으로 만든다) ---
         self._vwap_profile: Dict[str, List[Optional[float]]] = {}
         self._vwap_hist: Dict[str, deque] = {}           # 종목 → deque[(초, 누적 거래대금)]
@@ -764,8 +765,10 @@ class TradingEngine:
                 continue
             pc = (self._prev_daily.get(sym) or (0.0,))[0] or 0.0
             if pc > 0 and not (pc * 0.69 <= px <= pc * 1.31):
-                if self._bad_px_logged.get(sym) != round(px, 2):
-                    self._bad_px_logged[sym] = round(px, 2)
+                # 종목당 하루 한 번만 남긴다 — 값이 바뀔 때마다 남겼더니 하루 약 3,600건이었다(10/21~28)
+                day = self._now().strftime("%Y%m%d")
+                if self._bad_px_logged.get(sym) != day:
+                    self._bad_px_logged[sym] = day
                     logger.warning(f"[가격] {sym} {px:,.0f}원 — 전일 종가 {pc:,.0f}원의 ±30% 밖, 버림")
                     self.ledger.write("bad_price", {"symbol": sym, "price": px, "prev_close": pc})
                 continue
@@ -1802,6 +1805,14 @@ class TradingEngine:
         band = self.s.BUY_LIMIT_BAND if side is Side.BUY else self.s.SELL_LIMIT_BAND
         limit_price = round_to_tick(price * (1.0 + band if side is Side.BUY
                                              else 1.0 - band))
+        # 가격제한폭(전일 종가 ±30%) 안으로 자른다. 상한가 근처에서 +2%를 얹으면 상한을 넘어
+        # `40270000 상/하한가 오류`로 거부된다 — 10/27 1위(x434.5) 050110을 이렇게 놓쳤다.
+        # 기준(전일 종가)이 지금 가격과 안 맞으면(병합·분할 직후 등) 자르지 않는다.
+        prev_close = float((self._prev_daily.get(symbol) or (0.0,))[0] or 0.0)
+        if prev_close > 0:
+            lower, upper = price_limits(prev_close)
+            if lower <= price <= upper:
+                limit_price = clamp_to_limits(limit_price, prev_close)
         request = OrderRequest(symbol=symbol, side=side, qty=qty, price=float(limit_price),
                                order_type=OrderType.LIMIT, reason=reason)
         self.ledger.write("order", {
@@ -1929,6 +1940,50 @@ class TradingEngine:
                 "ts": placed or now.isoformat(),
             }
         self.open_orders = live
+
+    async def _reprice_stale_sells(self, now: dt.datetime) -> None:
+        """`SELL_REPRICE_SEC`보다 오래 걸린 매도를 취소하고 잔고를 다시 맞춘다.
+
+        취소하면 `_sellable_qty`가 풀려 같은 루프의 청산 판정(`vol_alive`는 하루 종일 유효)이
+        **지금 가격**으로 남은 수량을 다시 낸다. 11/02 09:00 매도(시가 −0.4%)가 갭하락에
+        밀려 09:08까지 860주 중 76주만 팔렸고, 09:05 장 시작 판정은 자리가 없어 1위(x21.1)를
+        놓쳤다(10/29도 3,635주 중 1,527주). 모의투자는 미체결 조회가 안 돼
+        `_sync_open_orders`의 장기 미체결 취소가 돌지 않는다.
+
+        취소가 실패하면 대개 이미 다 팔린 것이다 — 잔고에 없으면 추적을 지운다.
+        """
+        stale: List[Tuple[str, Dict[str, Any]]] = []
+        for order_no, o in self.open_orders.items():
+            if o.get("side") != Side.SELL.value:
+                continue
+            try:
+                age = (now - dt.datetime.fromisoformat(o["ts"])).total_seconds()
+            except (KeyError, TypeError, ValueError):
+                continue
+            if age >= SELL_REPRICE_SEC:
+                stale.append((order_no, o))
+        if not stale:
+            return
+        cancelled: List[str] = []
+        for order_no, o in stale:
+            try:
+                resp = await self.broker.cancel_order(str(o.get("org_no") or ""), order_no, all_qty=True)
+            except Exception as exc:
+                resp = {"msg1": str(exc)}
+            if is_ok(resp):
+                cancelled.append(order_no)
+                self.open_orders.pop(order_no, None)
+                logger.info(f"[Orders] 미체결 매도 취소 → 지금 가격으로 다시 낸다: {o.get('symbol')} "
+                            f"{order_no} (지정가 {o.get('price')})")
+            else:
+                logger.info(f"[Orders] 매도 취소 실패 {o.get('symbol')} {order_no}: {resp.get('msg1')}")
+        self.ledger.write("sell_reprice", {"orders": [n for n, _ in stale], "cancelled": cancelled})
+        await self._sync_portfolio()
+        for order_no, o in stale:
+            if order_no in self.open_orders and o.get("symbol") not in self.portfolio.positions:
+                self.open_orders.pop(order_no, None)   # 다 팔렸다
+            elif order_no in self.open_orders:
+                o["ts"] = now.isoformat()              # 취소가 안 됐다 — 한 주기 뒤에 다시 본다
 
     # ================================================================== 메인 루프
     async def _tick(self) -> None:
@@ -2089,6 +2144,8 @@ class TradingEngine:
         # 만든 값(`_refresh_alive`)을 쓰고, 첫 루프(09:00)에 판정이 나면 시가에 판다.
         #
         burst_map = self._vol_alive_map(today)
+        # 오래 걸린 매도는 취소해 아래 판정이 지금 가격으로 다시 내게 한다(09:05 판정 전에 자리를 비운다)
+        await self._reprice_stale_sells(now)
         exits = self.risk.evaluate_exits(self.portfolio, prices, self.atr_map,
                                          self.score_map, now,
                                          turnover_map=turnover_map,

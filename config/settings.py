@@ -111,6 +111,11 @@ class Settings(BaseSettings):
     HTTP_BACKOFF_BASE: float = Field(default=0.6)
     WS_MAX_SUBSCRIPTIONS: int = Field(default=40, description="세션당 실시간 등록 한도(체결+호가 합산, KIS 41건)")
     WS_RECONNECT_MAX_DELAY: float = Field(default=30.0)
+    WS_SILENCE_RECONNECT_SEC: float = Field(
+        default=180.0,
+        description="이 시간(초) 동안 메시지(체결·PINGPONG)가 없으면 멈춘 연결로 보고 다시 연결한다. "
+                    "평일 08~16시에만 이 값이고 장 밖은 30분(PINGPONG 간격 미확인). "
+                    "10/29 09:50 뒤 연결된 채 메시지 0건 — 체결통보가 엿새 끊겼다")
 
     # ------------------------------------------------------------------ 토스증권 (학습 데이터 전용)
     # 과거 일봉과 수급 데이터를 받아 모델 학습·백테스트에 쓴다. 장중 시세와 주문은 KIS로 간다.
@@ -675,10 +680,11 @@ class Settings(BaseSettings):
                     "새로 사지 않는다(0이면 끔). 심사는 마지막 날 수익률만 보므로 중간에 목표를 찍고 "
                     "내려오는 경로를 목표로 바꾼다. 측정 scripts/combo_study.py --lock-study (10/19)")
     VTS_BLOCK_FULL_MARGIN: bool = Field(
-        default=False,
-        description="증거금률 100% 종목을 주문 전에 건너뛸지. 10/14 그런 종목 5건이 40070000으로 "
-                    "거부됐지만 일반 부문 상위권은 같은 상태(57·100%)의 종목을 샀다 — 막지 않고 "
-                    "주문해 보고, 거부되면 그날만 다시 주문하지 않는다(_reject_today)")
+        default=True,
+        description="증거금률 100% 종목을 주문 전에 건너뛸지. 10/19~10/30 막지 않고 주문해 봤는데 "
+                    "장 시작 판정 4일 동안 전부 40070000(매매불가)·40250000(주문가능금액 부족)으로 "
+                    "거부됐다 — 거부 한 건이 약 3초라 진입이 최대 2분 늦었다(10/26). 그래서 현재가 "
+                    "응답의 증거금률로 판정 단계에서 빼고 다음 순위로 바로 내려간다(11/04)")
 
     # 대회 최소 요건 — 못 채우면 수익률과 무관하게 실격이다(모두 체결 기준).
     MIN_TRADE_COUNT: int = Field(default=0, description="최소 거래 횟수")

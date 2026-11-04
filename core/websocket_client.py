@@ -222,12 +222,19 @@ class KISWebSocketClient:
 
     # ------------------------------------------------------------------ 메시지 파싱
     @staticmethod
-    def _parse_trade(body: str) -> List[Quote]:
-        """H0STCNT0 체결 데이터 파싱 (여러 건이 ^로 이어져 올 수 있음)."""
+    def _parse_trade(body: str, count: int = 0) -> List[Quote]:
+        """H0STCNT0 체결 데이터 파싱 (여러 건이 ^로 이어져 올 수 있음).
+
+        **한 건의 필드 수는 머리의 건수(`count`)로 나눠 구한다.** 문서상 46개라 고정했더니
+        모의서버 응답에서 여러 건이 묶인 메시지의 두 번째 건부터 어긋나 `000020` 같은
+        가짜 종목코드에 20원·1,615억원 같은 가격이 들어왔다(10/20~10/29 원장 `bad_price`
+        23,890건, 10/20 최고 자산 5.34억 사건의 출처로 추정).
+        """
         fields = body.split("^")
         quotes: List[Quote] = []
-        # 한 건당 46개 필드
         stride = 46
+        if count > 1 and len(fields) >= count * 14:
+            stride = len(fields) // count
         count = max(1, len(fields) // stride)
         for i in range(count):
             chunk = fields[i * stride: (i + 1) * stride]
@@ -304,7 +311,15 @@ class KISWebSocketClient:
         if tr_id == WS_TR_TRADE:
             self.stats.trades += 1
             if self.on_trade:
-                for quote in self._parse_trade(body):
+                try:
+                    n = int(_count)
+                except ValueError:
+                    n = 0
+                for quote in self._parse_trade(body, n):
+                    # 구독한 종목만 받는다 — 필드가 어긋나면 엉뚱한 코드에 엉뚱한 가격이 붙는다
+                    if (WS_TR_TRADE, quote.symbol) not in self._subs:
+                        self.stats.errors += 1
+                        continue
                     await self.on_trade(quote)
         elif tr_id == WS_TR_ORDERBOOK:
             self.stats.orderbooks += 1
@@ -328,9 +343,11 @@ class KISWebSocketClient:
         body = msg.get("body") or {}
         output = body.get("output") or {}
         if output.get("key") and output.get("iv"):
+            # 구독 응답마다 같은 키가 와서(41건) 바뀔 때만 남긴다
+            if (output["key"], output["iv"]) != (self._aes_key, self._aes_iv):
+                logger.info("[WS] 체결통보 복호화 키 수신 완료")
             self._aes_key = output["key"]
             self._aes_iv = output["iv"]
-            logger.info("[WS] 체결통보 복호화 키 수신 완료")
 
         rt_cd = str(body.get("rt_cd", ""))
         if rt_cd not in ("", "0"):
@@ -349,7 +366,15 @@ class KISWebSocketClient:
                 logger.success(f"[WS] 연결 성공 {self.settings.ws_url}")
                 await self._resubscribe_all()
 
-                async for raw in self._ws:
+                # **조용히 멈춘 연결을 끊는다.** `ping_interval=None`이라 상대가 사라져도
+                # 오류가 안 난다 — 10/29 09:50 뒤 "연결됨" 상태로 메시지가 0건이었고,
+                # 체결통보가 끊겨 원장에 체결이 안 남고 판 종목이 자리를 막았다(11/04 확인).
+                while True:
+                    silence = self._silence_limit()
+                    try:
+                        raw = await asyncio.wait_for(self._ws.recv(), timeout=silence)
+                    except asyncio.TimeoutError:
+                        raise ConnectionError(f"{silence:.0f}초 동안 메시지 없음 — 멈춘 연결로 보고 다시 연결")
                     self.stats.messages += 1
                     self.stats.last_message_at = dt.datetime.now(tz=KST)
                     if isinstance(raw, bytes):
@@ -383,6 +408,16 @@ class KISWebSocketClient:
             except asyncio.TimeoutError:
                 pass
             delay = min(self.settings.WS_RECONNECT_MAX_DELAY, delay * 2)
+
+    def _silence_limit(self, now: Optional[dt.datetime] = None) -> float:
+        """멈춘 연결로 볼 무음 시간(초). 체결이 끊임없이 오는 평일 08:00~16:00만 짧게 잡는다.
+
+        장 밖에는 KIS PINGPONG 간격을 몰라(확인 안 됨) 짧게 잡으면 밤새 재연결·재구독이 반복될 수 있다.
+        """
+        now = now or dt.datetime.now(tz=KST)
+        if now.weekday() < 5 and 8 <= now.hour < 16:
+            return float(self.settings.WS_SILENCE_RECONNECT_SEC)
+        return max(float(self.settings.WS_SILENCE_RECONNECT_SEC), 1800.0)
 
     def start(self) -> None:
         if self._task is None or self._task.done():

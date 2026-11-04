@@ -54,6 +54,7 @@ def vts_tradable(status: Optional[dict], block_full_margin: bool = True) -> bool
 
     상태를 모르면(조회 실패·새 종목) 막지 않는다 — 거부되면 엔진이 그날 다시 시도하지 않는다.
     `block_full_margin=False`면 증거금 100%는 막지 않는다(엔진은 `VTS_BLOCK_FULL_MARGIN`을 넘긴다).
+    10/19~10/30 막지 않고 주문해 봤는데 전부 거부됐다(40070000·40250000) — 기본은 막는다.
     """
     if not status:
         return True

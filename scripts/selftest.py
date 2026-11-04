@@ -804,7 +804,8 @@ def test_competition_rules():
     full = {"iscd_stat_cls_code": "57", "marg_rate": "100.00"}
     assert vts_tradable(full, block_full_margin=False), "증거금 100% 허용인데 막음"
     assert not vts_tradable({"iscd_stat_cls_code": "53", "marg_rate": "100.00"}, block_full_margin=False),         "증거금 허용이 투자경고까지 풀었다"
-    assert Settings.model_fields["VTS_BLOCK_FULL_MARGIN"].default is False, "기본값은 주문해 본다"
+    assert not vts_tradable(full), "증거금 100%를 막지 않음"
+    assert Settings.model_fields["VTS_BLOCK_FULL_MARGIN"].default is True, "기본값은 증거금 100%를 뺀다(11/04)"
     return (f"매수/매도 판정 · 한도 {MAX_SINGLE_WEIGHT:.0%} 클립 · "
             f"지수 멤버십 {len(members)}종목 · 요건 4항목 집계 · 모의투자 매매불가 판정")
 
@@ -2389,12 +2390,119 @@ async def test_server_reliability():
         sp = eng._sane_prices()
         assert "PX1" not in sp and sp.get("PX2") == 12_900.0, f"제한폭 밖 가격을 걸러야 한다: {sp}"
         assert sp.get("PX3") == 5_000.0, "전일 종가를 모르면 막지 않는다"
+
+        # 매수 지정가(+2%)는 상한가로 자른다(10/27 050110 `40270000 상/하한가 오류`).
+        # 기준이 지금 가격과 안 맞으면(병합 직후 등) 자르지 않는다.
+        import types
+        sent: List[float] = []
+
+        async def _submit_order(req):
+            sent.append(req.price)
+            return types.SimpleNamespace(success=False, msg_cd="TEST", msg="selftest")
+        saved_broker = eng.broker
+        eng.broker = types.SimpleNamespace(submit_order=_submit_order)
+        eng._prev_daily["LIM"] = (10_000.0, 1.0, 1.0)
+        await type(eng)._submit(eng, "LIM", Side.BUY, 1, 12_900.0, "selftest")
+        await type(eng)._submit(eng, "LIM", Side.BUY, 1, 50_000.0, "selftest")
+        assert sent == [13_000.0, 51_000.0], f"상한가 클립: {sent}"
+
+        # 오래 걸린 매도는 취소하고 잔고를 다시 맞춘다 — 11/02 09:00 매도가 09:05까지 안 팔려
+        # 장 시작 판정 자리를 막았다. 취소 실패 + 잔고에 없음 = 다 팔림 → 추적 삭제.
+        t_r = dt.datetime(2026, 11, 2, 9, 1, 30)
+        old, new = (t_r - dt.timedelta(seconds=90)).isoformat(), (t_r - dt.timedelta(seconds=10)).isoformat()
+        eng.open_orders = {
+            "S1": {"symbol": "RP1", "side": "SELL", "qty": 10, "price": 100, "org_no": "1", "ts": old},
+            "S2": {"symbol": "RP2", "side": "SELL", "qty": 10, "price": 100, "org_no": "1", "ts": new},
+            "S3": {"symbol": "RP3", "side": "SELL", "qty": 10, "price": 100, "org_no": "1", "ts": old},
+            "S4": {"symbol": "RP4", "side": "SELL", "qty": 10, "price": 100, "org_no": "1", "ts": old},
+            "B1": {"symbol": "RP5", "side": "BUY", "qty": 10, "price": 100, "org_no": "1", "ts": old},
+        }
+        eng.portfolio.positions["RP4"] = Position(symbol="RP4", qty=10, avg_price=100.0)
+        cancels: List[str] = []
+
+        async def _cancel(org_no, order_no, qty=0, all_qty=True):
+            cancels.append(order_no)
+            return {"rt_cd": "0" if order_no == "S1" else "1", "msg1": "selftest"}
+        synced: List[int] = []
+
+        async def _sync(initial=False):
+            synced.append(1)
+        eng.broker = types.SimpleNamespace(cancel_order=_cancel)
+        saved_sync, eng._sync_portfolio = eng._sync_portfolio, _sync
+        try:
+            await eng._reprice_stale_sells(t_r)
+        finally:
+            eng.broker, eng._sync_portfolio = saved_broker, saved_sync
+        assert cancels == ["S1", "S3", "S4"], f"60초 넘은 매도만 취소: {cancels}"
+        assert synced, "취소 뒤 잔고를 다시 맞춰야 한다"
+        assert set(eng.open_orders) == {"S2", "S4", "B1"}, f"추적 정리: {sorted(eng.open_orders)}"
+        assert eng.open_orders["S4"]["ts"] == t_r.isoformat(), "취소 실패·보유 중이면 한 주기 뒤에 다시 본다"
+        eng.open_orders = {}
+        eng.portfolio.positions.pop("RP4", None)
+
+        # WS 체결가 — 한 건 필드 수를 머리의 건수로 나눈다(모의서버가 46개가 아니라 두 번째 건부터
+        # 어긋나 가짜 종목코드·가격이 들어왔다, 10/20~29). 구독하지 않은 종목은 버린다.
+        from core.websocket_client import WS_TR_TRADE, KISWebSocketClient, Subscription
+
+        def _rec(sym, px, n=47):
+            f = [""] * n
+            f[0], f[2], f[5], f[13] = sym, str(px), "1.0", "1000"
+            for i in (7, 8, 9, 10, 11):
+                f[i] = str(px)
+            return f
+        body = "^".join(_rec("005930", 70_000) + _rec("000660", 200_000))
+        qs = KISWebSocketClient._parse_trade(body, 2)
+        assert [(q.symbol, q.price) for q in qs] == [("005930", 70_000.0), ("000660", 200_000.0)], \
+            f"여러 건 메시지 파싱: {[(q.symbol, q.price) for q in qs]}"
+        ws = KISWebSocketClient(s)
+        ws._subs[(WS_TR_TRADE, "005930")] = Subscription(WS_TR_TRADE, "005930", 1)
+        got: List[str] = []
+
+        async def _on_trade(q):
+            got.append(q.symbol)
+        ws.on_trade = _on_trade
+        await ws._handle_realtime(f"0|{WS_TR_TRADE}|002|{body}")
+        assert got == ["005930"], f"구독한 종목만 받아야 한다: {got}"
+
+        # 연결된 채 메시지가 끊기면(10/29 09:50~) 다시 연결한다
+        class _Stalled:
+            async def recv(self):
+                await asyncio.sleep(3600)
+
+            async def send(self, m):
+                pass
+
+            async def close(self):
+                pass
+        opens: List[int] = []
+
+        async def _open():
+            opens.append(1)
+            return _Stalled()
+        saved_silence = s.WS_SILENCE_RECONNECT_SEC
+        s.WS_SILENCE_RECONNECT_SEC = 0.05
+        ws2 = KISWebSocketClient(s)
+        kst = dt.timezone(dt.timedelta(hours=9))
+        assert ws2._silence_limit(dt.datetime(2026, 11, 4, 10, 0, tzinfo=kst)) == 0.05, "장중 무음 기준"
+        assert ws2._silence_limit(dt.datetime(2026, 11, 4, 2, 0, tzinfo=kst)) == 1800.0, "장 밖은 30분"
+        assert ws2._silence_limit(dt.datetime(2026, 11, 7, 10, 0, tzinfo=kst)) == 1800.0, "주말은 30분"
+        ws2._silence_limit = lambda now=None: 0.05     # 실행 시각과 무관하게 재연결을 본다
+        ws2._open = _open
+        ws2.auth._approval_key = "SELFTEST"
+        try:
+            ws2.start()
+            await asyncio.sleep(1.4)
+        finally:
+            await ws2.stop()
+            s.WS_SILENCE_RECONNECT_SEC = saved_silence
+        assert len(opens) >= 2, f"멈춘 연결을 다시 열지 않았다: {len(opens)}회"
     finally:
         for k, v in saved.items():
             setattr(s, k, v)
     return ("주문 읽기 타임아웃·5xx 재시도 안 함(결과 불명) · 접속 실패 재시도 · 조회 재시도 · "
             "무손실 체결 채널 · 히스토그램 분위수·Prometheus · Date 헤더 시계 오차 · "
-            "장중 VWAP 청산(판정·배관) · 장중 추가 매수(첫 발동·배수 순·빈자리·당일 매도 제외·전일 대비 하한) · 체결통보로 미체결 추적 정리 · 날짜 변경 시 전날 미체결·요건 표시 정리 · 목표 도달 잠금(확인 대기·요건 제외) · 제한폭 밖 가격 버림 모두 작동")
+            "장중 VWAP 청산(판정·배관) · 장중 추가 매수(첫 발동·배수 순·빈자리·당일 매도 제외·전일 대비 하한) · 체결통보로 미체결 추적 정리 · 날짜 변경 시 전날 미체결·요건 표시 정리 · 목표 도달 잠금(확인 대기·요건 제외) · 제한폭 밖 가격 버림 · 매수 지정가 상한가 클립 · "
+            "미체결 매도 취소·재대조 · WS 여러 건 체결가 파싱·미구독 종목 버림·멈춘 연결 재연결 모두 작동")
 
 
 # ============================================================ 실행
