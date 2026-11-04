@@ -73,6 +73,16 @@ module.exports = {
     "4.3": [
         { file: "core/websocket_client.py", from: "def is_healthy(self, max_silence: float = 60.0)", lines: 8, lang: "python",
           note: "연결이 없거나 60초 넘게 조용하면 비정상. 엔진은 이때 REST 로 시세를 조회한다." },
+        { file: "core/websocket_client.py", from: "silence = self._silence_limit()", lines: 5, lang: "python",
+          note: "recv() 를 wait_for 로 감싼다. 시간 안에 아무것도 안 오면 ConnectionError → 4.2절의 재연결로 간다." },
+        { file: "core/websocket_client.py", from: "def _silence_limit(self", lines: 10, lang: "python",
+          note: "평일 08~16시만 180초, 장 밖은 30분 — 밤의 PINGPONG 간격을 몰라 길게 잡았다." },
+    ],
+    "4.4": [
+        { file: "core/websocket_client.py", from: "def _parse_trade(body: str, count: int = 0)", lines: 16, lang: "python",
+          note: "stride = len(fields) // count — 한 건의 필드 수를 머리의 건수로 구한다. 46은 건수를 모를 때만 쓴다." },
+        { file: "core/websocket_client.py", from: "for quote in self._parse_trade(body, n):", lines: 6, lang: "python",
+          note: "구독하지 않은 종목 코드로 읽힌 건은 버린다 — 칸이 밀렸다는 신호다." },
     ],
     "5.1": [
         { file: "main.py", from: "if (self._opening_mode() and self._opening_day != now.strftime", lines: 5, lang: "python",
@@ -85,6 +95,8 @@ module.exports = {
     "5.3": [
         { file: "main.py", from: "async def _sync_open_orders(self, max_age_seconds", to: "self.open_orders = live", lang: "python",
           note: "증권사 미체결 목록으로 open_orders 를 다시 만들고, 180초 넘은 미체결은 취소한다." },
+        { file: "main.py", from: "async def _reprice_stale_sells(self", to: "# 취소가 안 됐다", lang: "python",
+          note: "증권사 목록 없이 내 추적만으로 60초 넘은 매도를 취소 → _sync_portfolio → 다 팔렸으면 추적 삭제." },
         { file: "api/base.py", from: "# 현금은 D+2 예수금(`prvs_rcdl_excc_amt`)을 쓴다", lines: 9, lang: "python",
           note: "어느 필드를 믿느냐 — 예수금 총액은 당일 매수가 빠지지 않아 자산이 두 배로 읽혔다." },
     ],
@@ -99,8 +111,8 @@ module.exports = {
           note: "모든 매수가 이 함수의 RiskDecision 을 받아야 나간다. 전략은 수량을 정하지 않는다." },
     ],
     "6.2": [
-        { file: "main.py", from: "band = self.s.BUY_LIMIT_BAND if side is Side.BUY", lines: 3, lang: "python",
-          note: "매수 +2.0% · 매도 −0.4% 를 곱한 뒤 round_to_tick 으로 호가 단위에 맞춘다." },
+        { file: "main.py", from: "band = self.s.BUY_LIMIT_BAND if side is Side.BUY", lines: 13, lang: "python",
+          note: "매수 +2.0% · 매도 −0.4% 를 곱해 호가 단위에 맞추고, 전일 종가 ±30% 안으로 자른다(기준이 안 맞으면 자르지 않음)." },
         { file: "utils/market_rules.py", from: "def round_to_tick(", lines: 15, lang: "python",
           note: "가격대별 호가 단위로 내림·올림·반올림한다. 안 맞으면 증권사가 거절한다." },
     ],
@@ -131,6 +143,8 @@ module.exports = {
           note: "tar 종료 코드 1(읽는 중 바뀜)은 경고로 넘기고 2 이상만 멈춘다." },
         { file: "deploy/oracle/setup.sh", from: "[ -x .venv/bin/python ] || uv venv", lines: 1, lang: "bash",
           note: "있으면 건너뛴다 — 몇 번을 다시 돌려도 같은 결과(멱등)." },
+        { code: "# 서버에만 둔 일회용 스크립트에서 모양만 줄였다(11/04)\nsystemd-run --unit=bankis-postclose-1104 \\\n  --on-calendar=\"2026-11-04 15:45:00\" /bin/bash ~/post_close_20261104.sh\n\n# post_close_20261104.sh\n(cd ~/bankis_next && python scripts/selftest.py) || exit 1   # 실패하면 배포 안 함\nsystemctl stop bankis.service\ntar -cf ~/backup.tar -C ~/bankis $(tar -tf ~/bankis_next.tar)   # 지금 코드 백업\ntar -xf ~/bankis_next.tar -C ~/bankis\nsystemctl start bankis.service\n# 45분 안에 '[Universe] 확정' 이 없거나 서비스가 죽으면\nrollback() { systemctl stop bankis.service; tar -xf ~/backup.tar -C ~/bankis; systemctl start bankis.service; }",
+          lang: "bash", title: "장 마감 뒤 무인 배포", note: "셀프테스트 → 정지 → 백업 → 교체 → 기동 확인 → 실패하면 백업으로. 사람이 없으니 돌아갈 곳을 먼저 만든다." },
     ],
     "8.3": [
         { file: "deploy/oracle/setup.sh", from: "sudo tee /etc/logrotate.d/bankis", lines: 11, lang: "bash",
