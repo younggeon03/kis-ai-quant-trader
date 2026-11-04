@@ -2440,6 +2440,42 @@ async def test_server_reliability():
         eng.open_orders = {}
         eng.portfolio.positions.pop("RP4", None)
 
+        # 대회 마지막 날 — FINAL_FLATTEN_HHMM부터 요건 포지션까지 전부 팔고 그날·종료 뒤에는 사지 않는다
+        saved_final = (s.COMP_END, s.FINAL_FLATTEN, s.FINAL_FLATTEN_HHMM)
+        saved_pos = eng.portfolio.positions
+        try:
+            s.COMP_END, s.FINAL_FLATTEN, s.FINAL_FLATTEN_HHMM = "2026-11-20", True, "1510"
+            d = dt.datetime
+            assert not eng._entries_closed(d(2026, 11, 19, 9, 5)), "마지막 날 전에 매수를 막았다"
+            assert eng._entries_closed(d(2026, 11, 20, 9, 5)), "마지막 날(전량 매도 켬)에 샀다"
+            assert eng._entries_closed(d(2026, 11, 23, 9, 5)), "대회 종료 뒤에 샀다"
+            eng.portfolio.positions = {}      # 앞 검증이 남긴 포지션과 섞지 않는다
+            eng.portfolio.positions["FN1"] = Position(symbol="FN1", qty=7, avg_price=100.0)
+            eng.portfolio.positions["FN2"] = Position(symbol="FN2", qty=3, avg_price=100.0)
+            eng._compliance_syms = {"FN2": "20261120"}
+            final_sells: List[Tuple[str, int, str]] = []
+
+            async def _submit_final(symbol, side, qty, price, reason):
+                final_sells.append((symbol, qty, reason.split("|")[0]))
+                return True
+            saved_submit, eng._submit = eng._submit, _submit_final
+            await eng._final_flatten(d(2026, 11, 19, 15, 10), {})
+            await eng._final_flatten(d(2026, 11, 20, 15, 9), {})
+            assert not final_sells, f"마지막 날 매도 시각 전에 팔았다: {final_sells}"
+            await eng._final_flatten(d(2026, 11, 20, 15, 10), {})
+            assert sorted(final_sells) == [("FN1", 7, "FINAL"), ("FN2", 3, "FINAL")], \
+                f"요건 포지션까지 전부 팔아야 한다: {final_sells}"
+            s.FINAL_FLATTEN = False
+            final_sells.clear()
+            await eng._final_flatten(d(2026, 11, 20, 15, 10), {})
+            assert not final_sells and not eng._entries_closed(d(2026, 11, 20, 9, 5)), "FINAL_FLATTEN=false 인데 동작했다"
+            assert eng._entries_closed(d(2026, 11, 23, 9, 5)), "종료 뒤 매수 금지는 설정과 무관해야 한다"
+            eng._submit = saved_submit
+        finally:
+            s.COMP_END, s.FINAL_FLATTEN, s.FINAL_FLATTEN_HHMM = saved_final
+            eng.portfolio.positions = saved_pos
+            eng._compliance_syms = {}
+
         # WS 체결가 — 한 건 필드 수를 머리의 건수로 나눈다(모의서버가 46개가 아니라 두 번째 건부터
         # 어긋나 가짜 종목코드·가격이 들어왔다, 10/20~29). 구독하지 않은 종목은 버린다.
         from core.websocket_client import WS_TR_TRADE, KISWebSocketClient, Subscription
@@ -2502,7 +2538,7 @@ async def test_server_reliability():
     return ("주문 읽기 타임아웃·5xx 재시도 안 함(결과 불명) · 접속 실패 재시도 · 조회 재시도 · "
             "무손실 체결 채널 · 히스토그램 분위수·Prometheus · Date 헤더 시계 오차 · "
             "장중 VWAP 청산(판정·배관) · 장중 추가 매수(첫 발동·배수 순·빈자리·당일 매도 제외·전일 대비 하한) · 체결통보로 미체결 추적 정리 · 날짜 변경 시 전날 미체결·요건 표시 정리 · 목표 도달 잠금(확인 대기·요건 제외) · 제한폭 밖 가격 버림 · 매수 지정가 상한가 클립 · "
-            "미체결 매도 취소·재대조 · WS 여러 건 체결가 파싱·미구독 종목 버림·멈춘 연결 재연결 모두 작동")
+            "미체결 매도 취소·재대조 · 대회 마지막 날 전량 매도·종료 뒤 매수 금지 · WS 여러 건 체결가 파싱·미구독 종목 버림·멈춘 연결 재연결 모두 작동")
 
 
 # ============================================================ 실행

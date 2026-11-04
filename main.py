@@ -189,6 +189,7 @@ class TradingEngine:
         self._slide_queue: List[tuple] = []             # [(배수, 종목)] 이번 조회에서 새로 발동
         self._sold_today: Dict[str, str] = {}           # 오늘 판 종목(같은 날 다시 사지 않는다)
         self._locked = False                              # 목표 도달 잠금(LOCK_RETURN) — 켜지면 끝까지 유지
+        self._final_flatten_day = ""                      # 마지막 날 전량 매도를 알린 날(로그·원장 1회)
         self._lock_seen: Optional[dt.datetime] = None     # 목표 첫 확인 시각(시세 튐 방지용 확인 대기)
         # 관제 화면용 오늘의 진입 판정 — 장 시작 판정 결과와 장중 발동, 각각 무엇이 됐는지(매매에는 안 쓴다)
         self._board: Dict[str, Any] = {"day": "", "opening": None, "slide": []}
@@ -509,6 +510,45 @@ class TradingEngine:
             if await self._submit(symbol, Side.SELL, qty, px, "LOCK|목표 도달 잠금"):
                 self.ledger.write("exit", {"symbol": symbol, "qty": qty, "reason": "lock",
                                            "detail": "목표 도달 잠금"})
+
+    def _comp_end(self) -> str:
+        return (self.s.COMP_END or "").strip()
+
+    def _entries_closed(self, now: dt.datetime) -> bool:
+        """새로 사지 않는 날인가 — 대회 종료 뒤, 그리고 전량 매도를 켠 마지막 날.
+
+        종료 뒤에는 단계가 '대회 기간 외'로 바뀔 뿐 엔진이 계속 사고판다(11/04 확인). 마지막 날에
+        사면 그날 팔게 되는데 당일 청산은 측정에서 P(+100%) 0.00%였다 — 비용만 든다.
+        """
+        end, today = self._comp_end(), now.strftime("%Y-%m-%d")
+        if not end:
+            return False
+        return today > end or (bool(self.s.FINAL_FLATTEN) and today == end)
+
+    async def _final_flatten(self, now: dt.datetime, prices: Dict[str, float]) -> None:
+        """대회 마지막 날 `FINAL_FLATTEN_HHMM`부터 요건 포지션까지 전부 판다(`FINAL_FLATTEN`).
+
+        매 루프 다시 보므로 안 팔린 잔량은 `_reprice_stale_sells`가 취소한 뒤 여기서 지금 가격으로
+        다시 낸다. 15:20 뒤(동시호가)에는 `_tick`이 여기까지 오지 않는다 — 걸어 둔 주문만 종가에 붙는다.
+        """
+        end = self._comp_end()
+        if (not self.s.FINAL_FLATTEN or not end or now.strftime("%Y-%m-%d") != end
+                or now.strftime("%H%M") < str(self.s.FINAL_FLATTEN_HHMM)):
+            return
+        if self._final_flatten_day != end:
+            self._final_flatten_day = end
+            logger.warning(f"[대회 종료] 마지막 날 {self.s.FINAL_FLATTEN_HHMM} — 전 포지션 매도 "
+                           f"({len(self.portfolio.open_positions())}종목)")
+            self.ledger.write("final_flatten", {"equity": self.portfolio.equity,
+                                                "positions": list(self.portfolio.open_positions())})
+        for symbol, pos in list(self.portfolio.open_positions().items()):
+            qty = self._sellable_qty(symbol, pos.qty)
+            if qty <= 0:
+                continue
+            px = prices.get(symbol, pos.last_price or pos.avg_price)
+            if await self._submit(symbol, Side.SELL, qty, px, "FINAL|대회 마지막 날 전량 매도"):
+                self.ledger.write("exit", {"symbol": symbol, "qty": qty, "reason": "final",
+                                           "detail": "대회 마지막 날 전량 매도"})
 
     async def _vwap_exits(self, now: dt.datetime) -> None:
         """보유 종목을 장중 VWAP 청산 규칙으로 본다(`vwap_fade`). 복수시세 한 번으로 보유 종목을 다 본다.
@@ -988,7 +1028,7 @@ class TradingEngine:
             start = dt.date.fromisoformat(self.s.COMPLIANCE_START)
         except ValueError:
             return
-        if (self._compliance_day == day or now.date() < start
+        if (self._compliance_day == day or now.date() < start or self._entries_closed(now)
                 or hhmm < self.s.COMPLIANCE_BUY_HHMM or hhmm >= self.s.COMPLIANCE_SELL_HHMM):
             return
         self._compliance_day = day
@@ -2166,6 +2206,10 @@ class TradingEngine:
         # --- 목표 도달 잠금 (설정 LOCK_RETURN) ---
         await self._lock_check(now, prices)
 
+        # --- 대회 마지막 날 전량 매도 (설정 FINAL_FLATTEN) ---
+        await self._final_flatten(now, prices)
+        no_buy = self._locked or self._entries_closed(now)
+
         # --- 장중 VWAP 청산 (설정 VWAP_EXIT) ---
         await self._vwap_exits(now)
 
@@ -2192,16 +2236,16 @@ class TradingEngine:
                                                "reason": "intraday", "detail": reason})
 
         # --- 장중 진입: opening 모드 (09:0N 판정 → 09:(N+지연) 한 번) ---
-        if self._opening_mode() and self.risk.state == RiskState.NORMAL and not self._locked:
+        if self._opening_mode() and self.risk.state == RiskState.NORMAL and not no_buy:
             await self._opening_entries(now, prices)
 
         # --- 장중 추가 매수 (SLIDE_ENTRY) — 장 시작 진입이 끝난 뒤 빈자리를 장중 발동으로 ---
-        if self.s.SLIDE_ENTRY and self.risk.state == RiskState.NORMAL and not self._locked:
+        if self.s.SLIDE_ENTRY and self.risk.state == RiskState.NORMAL and not no_buy:
             self._slide_kick(now)
             await self._slide_entries(now, prices)
 
         # --- 장중 진입: sliding 모드 (감시 루프가 쌓은 발동) ---
-        if self._sliding_mode() and self.risk.state == RiskState.NORMAL and not self._locked:
+        if self._sliding_mode() and self.risk.state == RiskState.NORMAL and not no_buy:
             await self._sliding_entries(now, prices)
 
         # --- 장중 진입 (분봉 전략) ---
@@ -2218,9 +2262,9 @@ class TradingEngine:
             if self.risk.state != RiskState.NORMAL:
                 if queued:
                     logger.info(f"[장중] 리스크 상태 {self.risk.state} — 돌파 {len(queued)}건 보류")
-            elif self.intraday.should_flatten(now):
+            elif self.intraday.should_flatten(now) or no_buy:
                 if queued:
-                    logger.info(f"[장중] 마감 정리 시각 — 돌파 {len(queued)}건 진입하지 않음")
+                    logger.info(f"[장중] 마감 정리 시각·매수 금지 — 돌파 {len(queued)}건 진입하지 않음")
             else:
                 held = self._strategy_held()          # 요건 매매 포지션은 자리 수에서 뺀다
                 free = max(0, int(self.s.MAX_POSITIONS)
@@ -2282,7 +2326,7 @@ class TradingEngine:
         # --- 진입 (일봉 신호) ---
         # 장중 전략을 쓰면 진입은 돌파가 결정한다. 두 경로가 같이 돌면 익스포저가
         # 의도의 두 배가 되고, 측정한 분포(하루 2종목 x 45%)와 달라진다.
-        if self.risk.state == RiskState.NORMAL and not self.s.USE_INTRADAY:
+        if self.risk.state == RiskState.NORMAL and not self.s.USE_INTRADAY and not no_buy:
             # 백테스트(`backtest/engine.py`)와 반드시 같은 선정 로직을 쓴다.
             # 두 경로가 갈라지면 백테스트는 실거래를 예측하지 못한다.
             if self.s.USE_TOP_K:

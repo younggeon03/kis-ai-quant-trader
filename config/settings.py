@@ -679,6 +679,16 @@ class Settings(BaseSettings):
         description="목표 도달 잠금 — 누적 수익률이 이 값 이상이면 전략 포지션을 전량 팔고 대회 끝까지 "
                     "새로 사지 않는다(0이면 끔). 심사는 마지막 날 수익률만 보므로 중간에 목표를 찍고 "
                     "내려오는 경로를 목표로 바꾼다. 측정 scripts/combo_study.py --lock-study (10/19)")
+    FINAL_FLATTEN: bool = Field(
+        default=True,
+        description="대회 마지막 날(COMP_END) FINAL_FLATTEN_HHMM부터 전 포지션을 팔고 그날은 새로 사지 않는다. "
+                    "수익률 산정이 평가금액 기준이면 비용(약 0.2%)만 들고, 현금 기준이면 꼭 필요하다 — "
+                    "기준을 확인하지 못해 보험으로 켠다(11/04 사용자 결정). 종료일 다음 날부터는 이 값과 "
+                    "무관하게 새로 사지 않는다")
+    FINAL_FLATTEN_HHMM: str = Field(
+        default="1510",
+        description="마지막 날 전량 매도 시작 시각. 15:20~15:30 동시호가에는 엔진이 주문을 내지 않으므로 "
+                    "연속 매매 구간에서 시작해 안 팔린 잔량을 미체결 매도 재접수(60초)로 따라간다")
     VTS_BLOCK_FULL_MARGIN: bool = Field(
         default=True,
         description="증거금률 100% 종목을 주문 전에 건너뛸지. 10/19~10/30 막지 않고 주문해 봤는데 "
