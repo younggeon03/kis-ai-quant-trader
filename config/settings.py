@@ -138,6 +138,11 @@ class Settings(BaseSettings):
         description="코스피200·코스닥150 구성종목 JSON 경로(`scripts/refresh_universe.py` 산출물). "
                     "비어 있거나 파일이 없으면 DEFAULT_UNIVERSE(40종목)를 쓴다. 지수 구성종목은 "
                     "정기변경이 6월·12월 두 번뿐인 참조 데이터이므로 런타임에 받지 않는다")
+    UNIVERSE_INDEX_ONLY: bool = Field(
+        default=True,
+        description="유니버스 파일의 `tradable`을 코스피200·코스닥150 구성종목(`indices`)으로 좁힌다. "
+                    "대회 매매 대상이 두 지수뿐이다(2026-11-10 안내 확인 — 10/14~11/05 `40070000 "
+                    "매매불가` 34종목이 전부 지수 밖이었다). false는 지수 밖까지 본 과거 측정 재현용")
     UNIVERSE_SIZE: int = Field(
         default=120,
         description="일봉 랭킹으로 추릴 신호 계산 대상 종목 수. 20이면 거래대금 상위 "
@@ -821,6 +826,12 @@ class Settings(BaseSettings):
                 # 조용히 넘기면 40종목으로 도는 이유를 찾기 어렵다.
                 print(f"[Settings] 경고: UNIVERSE_FILE을 읽을 수 없습니다 ({p}) "
                       f"→ DEFAULT_UNIVERSE로 폴백")
+        # 대회 매매 대상은 코스피200·코스닥150뿐이다. 여기서 좁혀야 실매매·규정 필터·측정이
+        # 모두 같은 목록을 본다(`UNIVERSE` 치환·`is_buyable`·스크립트가 전부 이 blob을 읽는다).
+        members = {str(x) for lst in (blob.get("indices") or {}).values() for x in (lst or [])}
+        if self.UNIVERSE_INDEX_ONLY and members and blob.get("tradable"):
+            blob["tradable_all"] = list(blob["tradable"])
+            blob["tradable"] = [x for x in blob["tradable"] if str(x) in members]
         object.__setattr__(self, "_universe_cache", blob)
         return blob
 
@@ -859,10 +870,8 @@ class Settings(BaseSettings):
         return self._universe_num("trading_value", symbol)
 
     def index_members(self) -> Dict[str, List[str]]:
-        """지수별 구성종목. 최소 자격 요건("코스피200·코스닥150 중 5종목") 판정용이다.
-
-        **매매 제한이 아니다.** 대회 규정상 KOSPI·KOSDAQ 전 개별 종목을 매매할 수 있다.
-        """
+        """지수별 구성종목. 최소 자격 요건("코스피200·코스닥150 중 5종목") 판정과
+        매매 대상 제한(`UNIVERSE_INDEX_ONLY`)에 쓴다. 대회 매매 대상은 이 두 지수뿐이다."""
         blob = self._universe_blob().get("indices") or {}
         return {str(k): [str(x) for x in (v or [])] for k, v in blob.items()}
 

@@ -760,6 +760,19 @@ def test_competition_rules():
         for code in blob["tradable"][:50]:
             assert s.shares_of(code) >= MIN_SHARES or s.shares_of(code) == 0, code
 
+    # 매매 대상은 코스피200·코스닥150뿐이다(11/10) — 지수 밖 종목은 유니버스에서 빠진다
+    import json
+    with _tempfile.TemporaryDirectory() as tmp:
+        up = Path(tmp) / "u.json"
+        up.write_text(json.dumps({"indices": {"KOSPI200": ["005930"], "KOSDAQ150": ["247540"]},
+                                  "tradable": ["005930", "247540", "009450"]}), encoding="utf-8")
+        s_idx = Settings(UNIVERSE_FILE=str(up))
+        assert s_idx.UNIVERSE == ["005930", "247540"], s_idx.UNIVERSE
+        assert not is_buyable("009450", 50_000, s_idx)[0]
+        assert is_buyable("005930", 50_000, s_idx)[0]
+        s_all = Settings(UNIVERSE_FILE=str(up), UNIVERSE_INDEX_ONLY=False)
+        assert len(s_all.UNIVERSE) == 3, s_all.UNIVERSE
+
     # 최소 자격 요건: "코스피200·코스닥150 중 5종목"은 지수 멤버십으로 센다
     members = {x for lst in s.index_members().values() for x in lst}
     s_req = s.model_copy(deep=True)
