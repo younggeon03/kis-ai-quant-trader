@@ -2738,9 +2738,13 @@ class TradingEngine:
             # 오늘 판 종목 — 장중 재시작 뒤 같은 날 다시 사지 않게(날짜를 같이 저장하므로 어제 것은 무해)
             sold = data.get("sold_today") or {}
             self._sold_today = {str(k): str(v) for k, v in sold.items()}
-            self._locked = bool(data.get("locked", False))
+            # 설정을 끄면(LOCK_RETURN=0) 저장된 잠금도 풀린다 — 순위를 뺏기면 다시 여는 경로(11/10 사용자 결정)
+            was_locked = bool(data.get("locked", False))
+            self._locked = was_locked and float(self.s.LOCK_RETURN) > 0
             if self._locked:
                 logger.warning("[잠금] 목표 도달 잠금 상태 복구 — 신규 매수 없음")
+            elif was_locked:
+                logger.warning("[잠금] LOCK_RETURN=0 — 저장된 잠금을 풀고 매매를 다시 연다")
         except Exception as exc:
             logger.debug(f"[State] 복구 실패: {exc}")
 
