@@ -237,12 +237,16 @@ def main() -> int:
         days = sorted(intraday)
         TV = np.zeros((len(days), N_MIN))
         OP = np.full((len(days), N_MIN), np.nan)
+        CL = np.full((len(days), N_MIN), np.nan)
+        VO = np.zeros((len(days), N_MIN))
         for j, dy in enumerate(days):
             g = intraday[dy]
             mi = g["mi"].to_numpy()
             TV[j] = minute_turnover(mi, g["close"].to_numpy(float), g["volume"].to_numpy(float), N_MIN)
             ok = (mi >= 0) & (mi < N_MIN)
             OP[j, mi[ok]] = g["open"].to_numpy(float)[ok]
+            CL[j, mi[ok]] = g["close"].to_numpy(float)[ok]
+            VO[j, mi[ok]] = g["volume"].to_numpy(float)[ok]
         S_by_w = {}
         base_by_w = {}
         for (W_, _k, _st) in cfgs:
@@ -302,6 +306,12 @@ def main() -> int:
                     ma = {"px>ma5": px >= ma5p[i], "px>ma20": px >= ma20p[i], "px>ma60": px >= ma60p[i],
                           "ma5>ma20": ma5p[i] >= ma20p[i], "ma20up": ma20p[i] >= ma20p[i - 1],
                           "px<ma20": px < ma20p[i]}
+                    # 분봉 — 09:00~09:04 (판정 시각에 아는 것만)
+                    v5 = VO[j, :ow].sum()
+                    vwap5 = float((CL[j, :ow] * VO[j, :ow]).sum() / v5) if v5 > 0 else np.nan
+                    cl5 = CL[j, :ow]
+                    ma = {**ma, "px>vwap5": px >= vwap5, "px>open": px >= OP[j, 0],
+                          "px>mma5": px >= float(np.nanmean(cl5)) if np.isfinite(cl5).any() else False}
                     open_evs.append({"sym": sym, "d": dc, "entry_px": px, "detect_min": ow + 1 / (1 + r),
                                      "src": "open", "chase": px / c[i - 1] - 1.0, "ratio": r, "ma": ma,
                                      **exits(px, i, ow)})
@@ -358,6 +368,12 @@ def main() -> int:
             ("현재가 > 20일 이평 & 20일 상승", lambda e: e["ma"]["px>ma20"] and e["ma"]["ma20up"]),
             ("현재가 < 20일 이평 (반대)", lambda e: e["ma"]["px<ma20"]),
             ("전일 종가 대비 상승 (가격만)", lambda e: e["chase"] > 0),
+            ("분 · 현재가 > 5분 VWAP", lambda e: e["ma"]["px>vwap5"]),
+            ("분 · 현재가 > 09:00 시가", lambda e: e["ma"]["px>open"]),
+            ("분 · 현재가 > 5분 이평", lambda e: e["ma"]["px>mma5"]),
+            ("분 · 전일↑ & > 5분 VWAP", lambda e: e["chase"] > 0 and e["ma"]["px>vwap5"]),
+            ("분 · 전일↑ & > 09:00 시가", lambda e: e["chase"] > 0 and e["ma"]["px>open"]),
+            ("분 · 현재가 < 5분 VWAP (반대)", lambda e: not e["ma"]["px>vwap5"]),
         ]
         cells = {"장 시작 + vol_alive (10/14 규칙)": (open_evs, "alive")}
         for name, f in ma_cells:
