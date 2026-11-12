@@ -1745,6 +1745,23 @@ async def test_opening_entry():
             f"빈 슬롯 1개(보유 1)를 배수 1위로 채우지 않았다: {submitted}"
         await eng._opening_entries(dt.datetime(2026, 10, 12, 9, 30), {})
         assert submitted == [codes[0]], "하루 한 번인데 다시 진입했다"
+        # VWAP 필터(OPENING_ABOVE_VWAP) — 1위가 VWAP 아래면 자리를 쓰지 않고 다음 순위(c2)를 산다
+        s.OPENING_ABOVE_VWAP = True
+        eng._opening_done_day = None
+        eng._opening_picks = [(codes[0], 20.0), (codes[2], 15.0)]
+        eng._opening_vwap = {codes[0]: (10_000.0, 10_100.0), codes[2]: (10_000.0, 9_950.0)}
+        eng.open_orders.clear()
+        submitted.clear()
+        await eng._opening_entries(dt.datetime(2026, 10, 12, 9, 8), {})
+        assert submitted == [codes[2]], f"VWAP 아래 발동을 샀거나 다음 순위로 안 내려갔다: {submitted}"
+        eng._opening_done_day, eng._opening_picks = None, [(codes[1], 12.0)]
+        eng._opening_vwap = {codes[1]: (10_000.0, 0.0)}             # VWAP 모름 → 건너뜀(측정과 같음)
+        eng.open_orders.clear(); submitted.clear()
+        await eng._opening_entries(dt.datetime(2026, 10, 12, 9, 8), {})
+        assert not submitted, "VWAP 를 모르는데 샀다"
+        s.OPENING_ABOVE_VWAP = False
+        eng.open_orders.clear(); submitted.clear(); submitted.append(codes[0])
+        eng.open_orders["o1"] = {"symbol": codes[0], "side": "BUY", "qty": 1, "price": 10_000.0}
         # 다음 날: 오늘 판정이 아직 없으면 어제 결과로 사지 않는다
         eng._opening_picks = [(codes[1], 12.0)]
         await eng._opening_entries(dt.datetime(2026, 10, 13, 9, 30), {})

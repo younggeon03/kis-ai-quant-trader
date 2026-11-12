@@ -341,6 +341,12 @@ class Settings(BaseSettings):
     # 기준선 — 측정(2026-10-10, scripts/opening_study.py, 2025-01~): 현재 누적 10배 P(+100%)
     # 6.60%에 대해 day_avg(하루 평균 N분 몫)는 4.3~7.4%로 낫지 않았고(장 초반 거래 집중 때문),
     # same_window(지난 20일 같은 구간 중앙)는 3~15분에서 8.4~9.9%였다(약한 증거 — 나은 창 반반).
+    # 가격 필터 — 측정(2026-11-12, combo_study --ma-filters, 지수 281종목 · 6거래일 창 430개 · 2자리 x49%):
+    # 현재가 >= 판정 시각까지의 당일 VWAP(누적 거래대금 ÷ 누적 거래량)인 발동만 사면 −10% 이하 17.9% → 12.3%,
+    # 평균 +0.8% → +2.0%, +20% 이상 6.3% → 7.0%. 반대(VWAP 아래만)는 17.9%로 그대로. 일봉 이평 필터는 효과 없음.
+    OPENING_ABOVE_VWAP: bool = Field(
+        default=False,
+        description="장 시작 판정에서 현재가가 당일 VWAP(복수시세 누적 거래대금 ÷ 누적 거래량) 아래인 발동은 사지 않는다")
     OPENING_BASELINE: str = Field(
         default="same_window",
         description="opening 모드 기준선: same_window=지난 20거래일 같은 09:00~09:0N 거래대금 중앙 / "

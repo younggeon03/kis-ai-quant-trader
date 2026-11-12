@@ -1169,9 +1169,14 @@ class TradingEngine:
         same = self.s.OPENING_BASELINE == "same_window"
         ratios: Dict[str, float] = {}
         quotes = await self.broker.get_turnovers(list(self.universe))
+        # 판정 시각의 (현재가, 당일 VWAP) — VWAP = 누적 거래대금 ÷ 누적 거래량(`OPENING_ABOVE_VWAP`)
+        self._opening_vwap = {}
         for symbol, q in quotes.items():
             if q.get("price", 0) > 0:
                 self.latest_prices[symbol] = float(q["price"])
+            vol_ = float(q.get("acml_vol", 0.0) or 0.0)
+            self._opening_vwap[symbol] = (float(q.get("price", 0.0) or 0.0),
+                                          float(q.get("turnover", 0.0)) / vol_ if vol_ > 0 else 0.0)
             if symbol in held:
                 continue
             tv = float(q.get("turnover", 0.0))
@@ -1259,6 +1264,13 @@ class TradingEngine:
             if self._reject_today.get(symbol) == day:
                 mark(symbol, "매매불가")
                 continue
+            if self.s.OPENING_ABOVE_VWAP:
+                # 측정과 같다 — 판정 시각 현재가 < 당일 VWAP 이면 자리를 쓰지 않고 다음 순위로(VWAP 모르면 건너뜀)
+                px0, vwap0 = (getattr(self, "_opening_vwap", {}) or {}).get(symbol, (0.0, 0.0))
+                if not (px0 > 0 and vwap0 > 0 and px0 >= vwap0):
+                    logger.info(f"[장중·개장] {symbol} 건너뜀 — 현재가 {px0:,.0f} < 당일 VWAP {vwap0:,.0f}")
+                    mark(symbol, "VWAP 아래")
+                    continue
             # 현재가와 종목 상태를 한 호출로 받는다. 관심목록 밖 종목은 현재가가 묵어 있을 수 있고,
             # 모의투자는 증거금 100%·경보 종목 주문을 거부한다(`vts_tradable`) — 거부 주문 한 건이
             # 유량 대기까지 약 3초라, 미리 걸러 다음 순위로 바로 내려간다(2026-10-14 5건 연속 거부).
