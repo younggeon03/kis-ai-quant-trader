@@ -159,6 +159,8 @@ def main() -> int:
                          "(--slide-grid 5:10 필요 · --lock-weights · --lock-bars)")
     ap.add_argument("--lock-weights", default="0.45,0.49")
     ap.add_argument("--lock-bars", default="30,25", help="창 길이(거래일). 25 = 10/19 부터 남은 기간")
+    ap.add_argument("--ma-filters", action="store_true",
+                    help="장 시작 진입에 가격 이동평균 필터를 붙인 칸을 비교한다(09:05에 알 수 있는 값만 — 이평은 전일 종가까지)")
     args = ap.parse_args()
 
     s = get_settings()
@@ -219,6 +221,11 @@ def main() -> int:
             ok_ = np.where(np.isfinite(pma) & np.isfinite(tma), ok_, alive_v)
             burst = np.where(ok_, 1e9, 0.0)    # path_exit 은 isfinite 를 본다 — inf 는 청산으로 읽힌다
         pos = {t: i for i, t in enumerate(ts)}
+        # 가격 이평 — 전일 종가까지(인과). 인덱스 i 의 값 = 봉 i-1 까지의 이평
+        sh = lambda a: np.concatenate([[np.nan], a[:-1]])   # noqa: E731
+        ma5p = sh(pd.Series(c).rolling(5, min_periods=5).mean().to_numpy(float))
+        ma20p = sh(pd.Series(c).rolling(20, min_periods=20).mean().to_numpy(float))
+        ma60p = sh(pd.Series(c).rolling(60, min_periods=60).mean().to_numpy(float))
 
         fd = pd.read_csv(_fd(sym), dtype={"ts": str})
         fd = fd[fd["ts"].str[:8] >= args.since]
@@ -292,8 +299,11 @@ def main() -> int:
                 px = _px_at(OP[j], ow)
                 if np.isfinite(px):
                     r = WO[j] / b0
+                    ma = {"px>ma5": px >= ma5p[i], "px>ma20": px >= ma20p[i], "px>ma60": px >= ma60p[i],
+                          "ma5>ma20": ma5p[i] >= ma20p[i], "ma20up": ma20p[i] >= ma20p[i - 1],
+                          "px<ma20": px < ma20p[i]}
                     open_evs.append({"sym": sym, "d": dc, "entry_px": px, "detect_min": ow + 1 / (1 + r),
-                                     "src": "open", "chase": px / c[i - 1] - 1.0, "ratio": r,
+                                     "src": "open", "chase": px / c[i - 1] - 1.0, "ratio": r, "ma": ma,
                                      **exits(px, i, ow)})
             # 장중 추가 — 설정마다 그날 첫 발동(창 끝 분 ≥ 시작 분)
             if j >= 10:
@@ -338,7 +348,21 @@ def main() -> int:
         "장 시작·장중 추가 + VWAP 청산 (지금 서버)": (open_evs + slide_evs, "vwap"),
     }
     caps = {}
-    if args.slide_grid:
+    if args.ma_filters:
+        ma_cells = [
+            ("현재가 > 5일 이평", lambda e: e["ma"]["px>ma5"]),
+            ("현재가 > 20일 이평", lambda e: e["ma"]["px>ma20"]),
+            ("현재가 > 60일 이평", lambda e: e["ma"]["px>ma60"]),
+            ("5일 > 20일 이평 (정배열)", lambda e: e["ma"]["ma5>ma20"]),
+            ("20일 이평 상승 중", lambda e: e["ma"]["ma20up"]),
+            ("현재가 > 20일 이평 & 20일 상승", lambda e: e["ma"]["px>ma20"] and e["ma"]["ma20up"]),
+            ("현재가 < 20일 이평 (반대)", lambda e: e["ma"]["px<ma20"]),
+            ("전일 종가 대비 상승 (가격만)", lambda e: e["chase"] > 0),
+        ]
+        cells = {"장 시작 + vol_alive (10/14 규칙)": (open_evs, "alive")}
+        for name, f in ma_cells:
+            cells[f"+ {name}"] = ([e for e in open_evs if f(e)], "alive")
+    elif args.slide_grid:
         cells = {"장 시작 + vol_alive (10/14 규칙)": (open_evs, "alive"),
                  "장 시작 + VWAP 청산": (open_evs, "vwap")}
         for cfg, evs_c in slide_by_cfg.items():
@@ -364,7 +388,11 @@ def main() -> int:
     for name, r in res.items():
         rows.append({"rule": name, "median": float(np.median(r)), "p90": float(np.percentile(r, 90)),
                      "p50up": float((r >= 0.5).mean()), "p100up": float((r >= 1.0).mean()),
-                     "loss20": float((r <= -0.2).mean()), "beats_ref": float((r > ref).mean())})
+                     "loss20": float((r <= -0.2).mean()), "beats_ref": float((r > ref).mean()),
+                     "events": len(cells[name][0]), "mean": float(r.mean()), "neg": float((r < 0).mean()),
+                     "loss5": float((r <= -0.05).mean()), "loss10": float((r <= -0.10).mean()),
+                     "up10": float((r >= 0.10).mean()), "up20": float((r >= 0.20).mean()),
+                     "q05": float(np.percentile(r, 5)), "q95": float(np.percentile(r, 95))})
     out = {"data_fingerprint": {"hash": fp, "symbols": len(fp_src)}, "config": vars(args),
            "events": {"opening": len(open_evs),
                       **{f"slide_{c_[0]}x{c_[1]:g}": len(v) for c_, v in slide_by_cfg.items()}},
@@ -383,6 +411,14 @@ def main() -> int:
         print(f" {x['rule']:<44}{x['median'] * 100:+8.1f}%{x['p90'] * 100:+8.1f}%{x['p50up'] * 100:9.2f}%"
               f"{x['p100up'] * 100:9.2f}%{x['loss20'] * 100:8.2f}%{x['beats_ref'] * 100:9.1f}%")
     print("=" * 104)
+    if args.ma_filters:
+        print(f" {'규칙':<34}{'사건':>7}{'평균':>8}{'중앙':>8}{'손실':>7}{'-5%':>7}{'-10%':>7}{'+10%':>7}{'+20%':>7}"
+              f"{'5%분위':>8}{'95%분위':>8}{'기준보다↑':>9}")
+        for x in rows:
+            print(f" {x['rule']:<34}{x['events']:>7,}{x['mean'] * 100:+7.1f}%{x['median'] * 100:+7.1f}%"
+                  f"{x['neg'] * 100:6.1f}%{x['loss5'] * 100:6.1f}%{x['loss10'] * 100:6.1f}%{x['up10'] * 100:6.1f}%"
+                  f"{x['up20'] * 100:6.1f}%{x['q05'] * 100:+7.1f}%{x['q95'] * 100:+7.1f}%{x['beats_ref'] * 100:8.1f}%")
+        print("=" * 104)
     print(f" 저장 → {op_}")
     return 0
 
