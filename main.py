@@ -1803,7 +1803,12 @@ class TradingEngine:
                 self.portfolio.positions[symbol] = pos
             equity = self.portfolio.equity
             if equity > 0:
-                self.portfolio.initial_capital = equity if not positions else self.portfolio.initial_capital
+                # 실서버의 수익률 기준은 대회 초기자본(INITIAL_CAPITAL)이다. 현금만 있을 때 지금 자산으로 다시 잡으면
+                # 누적 수익률이 0이 되어 잠금(LOCK_RETURN)이 안 걸린다(11/13 — 잠근 뒤 재시작해 016360을 샀다).
+                if self.s.USE_MOCK_MODE:
+                    self.portfolio.initial_capital = equity if not positions else self.portfolio.initial_capital
+                else:
+                    self.portfolio.initial_capital = float(self.s.INITIAL_CAPITAL)
                 self.portfolio.peak_equity = max(self.portfolio.peak_equity, equity)
                 self.portfolio.day_start_equity = equity
             logger.info(f"[Sync] 초기 동기화: 현금 {cash:,.0f}원 / 보유 {len(positions)}종목")
