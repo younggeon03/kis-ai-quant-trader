@@ -219,7 +219,8 @@ class AbstractBroker(abc.ABC):
                     continue
                 out[code] = {"price": to_float(row.get("inter2_prpr")),
                              "acml_vol": to_float(row.get("acml_vol")),
-                             "turnover": to_float(row.get("acml_tr_pbmn"))}
+                             "turnover": to_float(row.get("acml_tr_pbmn")),
+                             "change_pct": to_float(row.get("prdy_ctrt"))}   # 전일 대비 %
         return out
 
     async def get_minute_bars(self, symbol: str, hour: str) -> pd.DataFrame:

@@ -228,11 +228,14 @@ class MockKISClient(AbstractBroker):
             if bar is None:
                 continue
             price = self.sim.current_price(code)
+            hist = self.sim.history(code, count=2)
+            prev_close = float(hist["close"].iloc[-2]) if len(hist) >= 2 else price
             rows.append({
                 "inter_shrn_iscd": code,
                 "inter2_prpr": str(int(price)),
                 "acml_vol": str(int(bar["volume"])),
                 "acml_tr_pbmn": str(int(bar["volume"] * price)),
+                "prdy_ctrt": f"{((price / prev_close - 1.0) * 100) if prev_close else 0:.2f}",
             })
         return make_response(rows)          # KIS 복수시세는 output 하나에 행 목록이다
 

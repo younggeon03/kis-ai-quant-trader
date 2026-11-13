@@ -1760,6 +1760,14 @@ async def test_opening_entry():
         await eng._opening_entries(dt.datetime(2026, 10, 12, 9, 8), {})
         assert not submitted, "VWAP 를 모르는데 샀다"
         s.OPENING_ABOVE_VWAP = False
+        # 전일 종가 필터(OPENING_ABOVE_PREV_CLOSE) — 1위가 전일 대비 하락이면 다음 순위(c2), 모르면 건너뜀
+        s.OPENING_ABOVE_PREV_CLOSE = True
+        eng._opening_done_day, eng._opening_picks = None, [(codes[0], 20.0), (codes[2], 15.0), (codes[1], 12.0)]
+        eng._opening_chg = {codes[0]: -1.2, codes[2]: 0.8, codes[1]: None}
+        eng.open_orders.clear(); submitted.clear()
+        await eng._opening_entries(dt.datetime(2026, 10, 12, 9, 8), {})
+        assert submitted == [codes[2]], f"전일 대비 하락·모름 발동을 걸러 다음 순위를 사지 않았다: {submitted}"
+        s.OPENING_ABOVE_PREV_CLOSE = False
         eng.open_orders.clear(); submitted.clear(); submitted.append(codes[0])
         eng.open_orders["o1"] = {"symbol": codes[0], "side": "BUY", "qty": 1, "price": 10_000.0}
         # 다음 날: 오늘 판정이 아직 없으면 어제 결과로 사지 않는다

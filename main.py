@@ -1171,9 +1171,16 @@ class TradingEngine:
         quotes = await self.broker.get_turnovers(list(self.universe))
         # 판정 시각의 (현재가, 당일 VWAP) — VWAP = 누적 거래대금 ÷ 누적 거래량(`OPENING_ABOVE_VWAP`)
         self._opening_vwap = {}
+        self._opening_chg = {}      # 판정 시각 전일 대비 %(`OPENING_ABOVE_PREV_CLOSE`) — 복수시세, 없으면 전일 일봉 종가로
         for symbol, q in quotes.items():
             if q.get("price", 0) > 0:
                 self.latest_prices[symbol] = float(q["price"])
+            chg = q.get("change_pct")
+            if chg is None:
+                pd_ = self._prev_daily.get(symbol)
+                pc_ = float(pd_[0]) if pd_ else 0.0
+                chg = (float(q.get("price", 0.0) or 0.0) / pc_ - 1.0) * 100 if pc_ > 0 and q.get("price", 0) > 0 else None
+            self._opening_chg[symbol] = chg
             vol_ = float(q.get("acml_vol", 0.0) or 0.0)
             self._opening_vwap[symbol] = (float(q.get("price", 0.0) or 0.0),
                                           float(q.get("turnover", 0.0)) / vol_ if vol_ > 0 else 0.0)
@@ -1264,6 +1271,13 @@ class TradingEngine:
             if self._reject_today.get(symbol) == day:
                 mark(symbol, "매매불가")
                 continue
+            if self.s.OPENING_ABOVE_PREV_CLOSE:
+                # 측정과 같다(chase > 0) — 전일 종가 이하에서 터진 거래대금은 사지 않고 다음 순위로
+                chg = (getattr(self, "_opening_chg", {}) or {}).get(symbol)
+                if chg is None or not (float(chg) > 0):
+                    logger.info(f"[장중·개장] {symbol} 건너뜀 — 전일 대비 {('%+.2f%%' % chg) if chg is not None else '모름'}")
+                    mark(symbol, "전일 대비 하락")
+                    continue
             if self.s.OPENING_ABOVE_VWAP:
                 # 측정과 같다 — 판정 시각 현재가 < 당일 VWAP 이면 자리를 쓰지 않고 다음 순위로(VWAP 모르면 건너뜀)
                 px0, vwap0 = (getattr(self, "_opening_vwap", {}) or {}).get(symbol, (0.0, 0.0))
