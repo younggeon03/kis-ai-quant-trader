@@ -295,6 +295,131 @@ def main() -> int:
             dv_ = dvwap_i.get(i, np.nan)
             arms["d1vwap"] = _d1(bool(np.isfinite(c[i]) and np.isfinite(dv_) and c[i] < dv_))
             arms["d1both"] = _d1(bool(np.isfinite(c[i]) and (c[i] < entry_px or (np.isfinite(dv_) and c[i] < dv_))))
+            # 분봉 이평 청산 — 그날 분봉 종가 < N분 이평(그날 분봉으로만, 09:10 이후·진입일은 진입 뒤)이면 다음 분 시가 매도.
+            # vol_cond 면 직전 10분 거래대금 < 지난 20일 같은 시각 중앙(거래 식음)일 때만. 안 걸린 날은 vol_alive 아침 판정 그대로.
+            def _mma(n_ma: int, vol_cond: bool, slope: bool = False, min_ret: Optional[float] = None) -> Dict[str, Any]:
+                # slope=True 면 '이평이 꺾일 때'(ma[j] < ma[j-1]), min_ret 이 있으면 그 수익률 이상일 때만(이익 확정형)
+                for t_ in range(i, i + args.max_hold):
+                    g = intraday.get(ts[t_])
+                    if g is not None and len(g) >= n_ma:
+                        cl_ = g["close"].to_numpy(float); op_ = g["open"].to_numpy(float); mi_ = g["mi"].to_numpy()
+                        ma_ = pd.Series(cl_).rolling(n_ma, min_periods=n_ma).mean().to_numpy()
+                        rb_ = same_vw.get(ts[t_]) if vol_cond else None
+                        for j_ in range(len(cl_)):
+                            m_ = int(mi_[j_])
+                            if m_ < 10 or (t_ == i and m_ <= entry_mi) or m_ > LAST_ENTRY_MIN + 30:
+                                continue
+                            if slope:
+                                if not (j_ > 0 and np.isfinite(ma_[j_]) and np.isfinite(ma_[j_ - 1]) and ma_[j_] < ma_[j_ - 1]):
+                                    continue
+                            elif not (np.isfinite(ma_[j_]) and cl_[j_] < ma_[j_]):
+                                continue
+                            if min_ret is not None and not (cl_[j_] / entry_px - 1.0 > min_ret):
+                                continue
+                            if vol_cond:
+                                if rb_ is None:
+                                    continue
+                                R_, B_ = rb_
+                                if not (m_ < len(R_) and np.isfinite(R_[m_]) and np.isfinite(B_[m_]) and R_[m_] < B_[m_]):
+                                    continue
+                            px_ = float(op_[j_ + 1]) if j_ + 1 < len(op_) and op_[j_ + 1] > 0 else float(cl_[j_])
+                            return {"exit_d": cal[ts[t_]], "when": "intra", "exit_min": m_ + 1,
+                                    "ret": px_ / entry_px - 1.0 - cost}
+                    px_ = float(c[t_])
+                    if not (np.isfinite(px_) and px_ > 0):
+                        continue
+                    hit_ = args.stop > 0 and px_ / entry_px - 1.0 <= -args.stop
+                    if not hit_:
+                        b_ = burst[t_]
+                        hit_ = not (np.isfinite(b_) and b_ >= args.hold_vol)
+                    if hit_:
+                        nxt_ = float(o[t_ + 1]) if (t_ + 1) < len(o) else px_
+                        if not (np.isfinite(nxt_) and nxt_ > 0):
+                            nxt_ = px_
+                        return {"exit_d": cal[ts[min(t_ + 1, len(ts) - 1)]], "when": "open", "exit_min": -1,
+                                "ret": nxt_ / entry_px - 1.0 - cost}
+                e_ = min(i + args.max_hold, len(c) - 1)
+                return {"exit_d": cal[ts[e_]], "when": "close", "exit_min": EOD_MIN, "ret": float(c[e_]) / entry_px - 1.0 - cost}
+            # 수익 없는 종목 조기 정리 — k일째(전날 종가 확인)부터 종가 ≤ 매수가면 다음 날 시가. vol_alive·손절이 먼저 걸리면 그대로.
+            def _kfail(k: int, every: bool) -> Dict[str, Any]:
+                for t_ in range(i + k - 1, i + args.max_hold):
+                    if t_ + 1 >= len(o):
+                        break
+                    if base["when"] == "open" and base["exit_d"] <= cal[ts[t_ + 1]]:
+                        return base
+                    if np.isfinite(c[t_]) and c[t_] <= entry_px and np.isfinite(o[t_ + 1]) and o[t_ + 1] > 0:
+                        return {"exit_d": cal[ts[t_ + 1]], "when": "open", "exit_min": -1,
+                                "ret": float(o[t_ + 1]) / entry_px - 1.0 - cost}
+                    if not every:
+                        break
+                return base
+            def _path(mh: int, vn: float) -> Dict[str, Any]:
+                xi, xpx, xw = path_exit(entry_px, i, mh, args.stop, o, c, burst, vn)
+                return {"exit_d": cal[ts[min(xi, len(ts) - 1)]], "when": xw,
+                        "exit_min": -1 if xw == "open" else EOD_MIN, "ret": xpx / entry_px - 1.0 - cost}
+            # 고정 익절 — 진입 뒤 분봉 고가가 매수가 x(1+tp)에 닿으면 그 가격에 매도(지정가 체결 가정). 못 닿으면
+            # hold=False 는 그날 종가 매도(단타), hold=True 는 지금 규칙대로 보유(다음 날에도 닿으면 매도).
+            def _tp(tp: float, hold: bool) -> Dict[str, Any]:
+                lvl = entry_px * (1.0 + tp)
+                for t_ in (range(i, i + args.max_hold) if hold else [i]):
+                    if t_ >= len(ts):
+                        break
+                    g = intraday.get(ts[t_])
+                    if g is not None and "high" in g:
+                        hi_ = g["high"].to_numpy(float); mi_ = g["mi"].to_numpy()
+                        for j_ in range(len(hi_)):
+                            m_ = int(mi_[j_])
+                            if (t_ == i and m_ < entry_mi) or m_ > LAST_ENTRY_MIN:
+                                continue
+                            if np.isfinite(hi_[j_]) and hi_[j_] >= lvl:
+                                return {"exit_d": cal[ts[t_]], "when": "intra", "exit_min": m_,
+                                        "ret": lvl / entry_px - 1.0 - cost}
+                    if not hold:
+                        return {"exit_d": cal[ts[t_]], "when": "close", "exit_min": EOD_MIN,
+                                "ret": float(c[t_]) / entry_px - 1.0 - cost}
+                    if base["when"] == "open" and base["exit_d"] <= cal[ts[min(t_ + 1, len(ts) - 1)]]:
+                        return base
+                return base
+            # 식어서 떨어지는 종목 — 일 단위 규칙(전날 종가 확인 → 다음 날 시가). vol_alive·손절이 먼저면 그대로.
+            def _daily(cond_fn) -> Dict[str, Any]:
+                for t_ in range(i, i + args.max_hold):
+                    if t_ + 1 >= len(o):
+                        break
+                    if base["when"] == "open" and base["exit_d"] <= cal[ts[t_ + 1]]:
+                        return base
+                    if cond_fn(t_) and np.isfinite(o[t_ + 1]) and o[t_ + 1] > 0:
+                        return {"exit_d": cal[ts[t_ + 1]], "when": "open", "exit_min": -1,
+                                "ret": float(o[t_ + 1]) / entry_px - 1.0 - cost}
+                return base
+            lo_ = d["low"].to_numpy(float)
+            if args.ma_filters:
+                for k_s in (0.03, 0.05, 0.07):
+                    arms[f"dstop{int(k_s * 100)}"] = _daily(lambda t_, k_s=k_s: np.isfinite(c[t_]) and c[t_] <= entry_px * (1.0 - k_s))
+                arms["lowbreak"] = _daily(lambda t_: t_ > i and np.isfinite(c[t_]) and np.isfinite(lo_[i]) and c[t_] < lo_[i])
+                arms["down2"] = _daily(lambda t_: t_ >= i + 2 and np.isfinite(c[t_]) and c[t_] < c[t_ - 1] < c[t_ - 2])
+                arms["tp1_eod"] = _tp(0.01, False)
+                arms["tp2_eod"] = _tp(0.02, False)
+                arms["tp3_eod"] = _tp(0.03, False)
+                arms["tp2_hold"] = _tp(0.02, True)
+                arms["tp3_hold"] = _tp(0.03, True)
+                arms["tp5_hold"] = _tp(0.05, True)
+                arms["d2fail"] = _kfail(2, False)
+                arms["d3fail"] = _kfail(3, False)
+                arms["d2flat"] = _kfail(2, True)
+                arms["d3flat"] = _kfail(3, True)
+                arms["hold3"] = _path(3, args.hold_vol)
+                arms["hold5"] = _path(5, args.hold_vol)
+                arms["alive3"] = _path(args.max_hold, 3.0)
+                arms["mma5"] = _mma(5, False)
+                arms["mma20"] = _mma(20, False)
+                arms["mma60"] = _mma(60, False)
+                arms["mma20v"] = _mma(20, True)
+                arms["turn5p"] = _mma(5, False, slope=True, min_ret=0.0)
+                arms["turn20p"] = _mma(20, False, slope=True, min_ret=0.0)
+                arms["turn60p"] = _mma(60, False, slope=True, min_ret=0.0)
+                arms["below20p"] = _mma(20, False, slope=False, min_ret=0.0)
+                arms["turn20p3"] = _mma(20, False, slope=True, min_ret=0.03)
+                arms["turn60p3"] = _mma(60, False, slope=True, min_ret=0.03)
             if args.vwap_variants:
                 for key, (bl, vm, cb) in VWAP_VARIANTS.items():
                     xi, xpx, xw, xh, _ = vwap_exit(entry_px, i, entry_mi, args.max_hold, args.stop, o, c, burst,
@@ -400,7 +525,21 @@ def main() -> int:
         exit_arms = [("vwap", "장중 VWAP 아래 & 거래 식음(AND)"), ("vwap_px", "장중 VWAP 아래만"),
                      ("vwap_or", "장중 VWAP 아래 또는 거래 식음(OR)"), ("vwap_vol", "장중 거래 식음만"),
                      ("d1fail", "첫날 종가 < 매수가 → 익일 시가"), ("d1vwap", "첫날 종가 < 당일 VWAP → 익일 시가"),
-                     ("d1both", "첫날 종가 < 매수가 또는 VWAP → 익일 시가")]
+                     ("d1both", "첫날 종가 < 매수가 또는 VWAP → 익일 시가"),
+                     ("mma5", "분봉 5분 이평 아래 → 다음 분"), ("mma20", "분봉 20분 이평 아래 → 다음 분"),
+                     ("mma60", "분봉 60분 이평 아래 → 다음 분"), ("mma20v", "분봉 20분 이평 아래 & 거래 식음"),
+                     ("turn5p", "5분 이평 꺾임 & 수익>0"), ("turn20p", "20분 이평 꺾임 & 수익>0"),
+                     ("turn60p", "60분 이평 꺾임 & 수익>0"), ("below20p", "20분 이평 아래 & 수익>0"),
+                     ("turn20p3", "20분 이평 꺾임 & 수익≥3%"), ("turn60p3", "60분 이평 꺾임 & 수익≥3%"),
+                     ("d2fail", "2일째 아침 종가≤매수가면 매도(1회)"), ("d3fail", "3일째 아침 종가≤매수가면 매도(1회)"),
+                     ("d2flat", "2일째부터 매일 종가≤매수가면 매도"), ("d3flat", "3일째부터 매일 종가≤매수가면 매도"),
+                     ("hold3", "보유 상한 3봉"), ("hold5", "보유 상한 5봉"), ("alive3", "vol_alive x3"),
+                     ("dstop3", "종가 ≤ 매수가 −3% → 익일 매도"), ("dstop5", "종가 ≤ 매수가 −5% → 익일 매도"),
+                     ("dstop7", "종가 ≤ 매수가 −7% → 익일 매도"), ("lowbreak", "종가 < 진입일 저가 → 익일 매도"),
+                     ("down2", "이틀 연속 하락 종가 → 익일 매도"),
+                     ("tp1_eod", "익절 +1% · 못 닿으면 종가"), ("tp2_eod", "익절 +2% · 못 닿으면 종가"),
+                     ("tp3_eod", "익절 +3% · 못 닿으면 종가"), ("tp2_hold", "익절 +2% · 못 닿으면 보유"),
+                     ("tp3_hold", "익절 +3% · 못 닿으면 보유"), ("tp5_hold", "익절 +5% · 못 닿으면 보유")]
         for arm, label in exit_arms:
             if not args.vwap_variants and arm in VWAP_VARIANTS:
                 continue
@@ -460,6 +599,26 @@ def main() -> int:
               f"{x['p100up'] * 100:9.2f}%{x['loss20'] * 100:8.2f}%{x['beats_ref'] * 100:9.1f}%")
     print("=" * 104)
     if args.ma_filters:
+        # 거래 단위 통계 — 구간 수익률이 아니라 매매 한 건씩: 승률·평균 이익·평균 손실·보유일(채택 진입 칸만)
+        print("=" * 104)
+        print(f" {'[채택진입] 거래 단위':<34}{'거래':>7}{'승률':>7}{'평균':>8}{'이익평균':>9}{'손실평균':>9}{'+5%↑':>7}{'-5%↓':>7}{'보유일중앙':>9}")
+        per_trade = {}
+        for name, (evs, arm) in cells.items():
+            if not name.startswith("[채택진입] 청산") and name != "+ 분 · 전일↑ & > 5분 VWAP":
+                continue
+            r = np.array([e[arm]["ret"] for e in evs]); hd = np.array([e[arm]["exit_d"] - e["d"] for e in evs])
+            if not len(r):
+                continue
+            w = r > 0
+            per_trade[name] = {"n": int(len(r)), "win": float(w.mean()), "mean": float(r.mean()),
+                               "avg_win": float(r[w].mean()) if w.any() else 0.0, "avg_loss": float(r[~w].mean()) if (~w).any() else 0.0,
+                               "up5": float((r >= 0.05).mean()), "dn5": float((r <= -0.05).mean()), "hold_med": float(np.median(hd))}
+            x = per_trade[name]
+            print(f" {name.replace('[채택진입] 청산 ', ''):<34}{x['n']:>7,}{x['win'] * 100:6.1f}%{x['mean'] * 100:+7.2f}%"
+                  f"{x['avg_win'] * 100:+8.2f}%{x['avg_loss'] * 100:+8.2f}%{x['up5'] * 100:6.1f}%{x['dn5'] * 100:6.1f}%{x['hold_med']:8.1f}")
+        out["per_trade"] = per_trade
+        op_.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+        print("=" * 104)
         print(f" {'규칙':<34}{'사건':>7}{'평균':>8}{'중앙':>8}{'손실':>7}{'-5%':>7}{'-10%':>7}{'+10%':>7}{'+20%':>7}"
               f"{'5%분위':>8}{'95%분위':>8}{'기준보다↑':>9}")
         for x in rows:
