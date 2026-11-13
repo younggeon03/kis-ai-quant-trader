@@ -247,6 +247,12 @@ def main() -> int:
             OP[j, mi[ok]] = g["open"].to_numpy(float)[ok]
             CL[j, mi[ok]] = g["close"].to_numpy(float)[ok]
             VO[j, mi[ok]] = g["volume"].to_numpy(float)[ok]
+        # 진입일 하루 VWAP(일봉 인덱스 기준) — 첫날 실패 청산(d1vwap)용
+        dvwap_i: Dict[int, float] = {}
+        for j_, dy_ in enumerate(days):
+            if dy_ in pos:
+                v_ = VO[j_].sum()
+                dvwap_i[pos[dy_]] = float((CL[j_] * VO[j_])[np.isfinite(CL[j_])].sum() / v_) if v_ > 0 else np.nan
         S_by_w = {}
         base_by_w = {}
         for (W_, _k, _st) in cfgs:
@@ -278,6 +284,17 @@ def main() -> int:
                             "exit_min": -1 if vwhen == "open" else EOD_MIN,
                             "ret": vx_px / entry_px - 1.0 - cost}
             arms = {"alive": base, "vwap": vwap_arm}
+            # 첫날 실패 청산 — 진입일 종가가 매수가(d1fail) / 진입일 VWAP(d1vwap) 아래면 다음 날 시가 매도, 아니면 vol_alive 그대로.
+            # 실거래의 아침 판정(확정 일봉)에 규칙 하나 더 얹는 꼴이라 구조가 안 바뀐다.
+            def _d1(cond: bool) -> Dict[str, Any]:
+                if cond and i + 1 < len(o) and np.isfinite(o[i + 1]) and o[i + 1] > 0                         and not (base["when"] == "open" and base["exit_d"] <= cal[ts[i + 1]]):
+                    return {"exit_d": cal[ts[i + 1]], "when": "open", "exit_min": -1,
+                            "ret": float(o[i + 1]) / entry_px - 1.0 - cost}
+                return base
+            arms["d1fail"] = _d1(bool(np.isfinite(c[i]) and c[i] < entry_px))
+            dv_ = dvwap_i.get(i, np.nan)
+            arms["d1vwap"] = _d1(bool(np.isfinite(c[i]) and np.isfinite(dv_) and c[i] < dv_))
+            arms["d1both"] = _d1(bool(np.isfinite(c[i]) and (c[i] < entry_px or (np.isfinite(dv_) and c[i] < dv_))))
             if args.vwap_variants:
                 for key, (bl, vm, cb) in VWAP_VARIANTS.items():
                     xi, xpx, xw, xh, _ = vwap_exit(entry_px, i, entry_mi, args.max_hold, args.stop, o, c, burst,
@@ -378,6 +395,21 @@ def main() -> int:
         cells = {"장 시작 + vol_alive (10/14 규칙)": (open_evs, "alive")}
         for name, f in ma_cells:
             cells[f"+ {name}"] = ([e for e in open_evs if f(e)], "alive")
+        # 채택 진입(전일↑ & VWAP 위) 위에서 청산 규칙과 장중 추가 매수를 비교한다
+        ok_evs = [e for e in open_evs if e["chase"] > 0 and e["ma"]["px>vwap5"]]
+        exit_arms = [("vwap", "장중 VWAP 아래 & 거래 식음(AND)"), ("vwap_px", "장중 VWAP 아래만"),
+                     ("vwap_or", "장중 VWAP 아래 또는 거래 식음(OR)"), ("vwap_vol", "장중 거래 식음만"),
+                     ("d1fail", "첫날 종가 < 매수가 → 익일 시가"), ("d1vwap", "첫날 종가 < 당일 VWAP → 익일 시가"),
+                     ("d1both", "첫날 종가 < 매수가 또는 VWAP → 익일 시가")]
+        for arm, label in exit_arms:
+            if not args.vwap_variants and arm in VWAP_VARIANTS:
+                continue
+            cells[f"[채택진입] 청산 {label}"] = (ok_evs, arm)
+        sl = [e for e in slide_evs if e["chase"] >= 0.03]
+        cells["[채택진입] + 장중 추가(전일+3%↑) · vol_alive"] = (ok_evs + sl, "alive")
+        cells["[채택진입] + 장중 추가 · 첫날<매수가 청산"] = (ok_evs + sl, "d1fail")
+        if args.vwap_variants:
+            cells["[채택진입] + 장중 추가 · 장중 VWAP 청산(AND)"] = (ok_evs + sl, "vwap")
     elif args.slide_grid:
         cells = {"장 시작 + vol_alive (10/14 규칙)": (open_evs, "alive"),
                  "장 시작 + VWAP 청산": (open_evs, "vwap")}
