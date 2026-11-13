@@ -160,6 +160,9 @@ class TradingEngine:
         # 종목 → (마지막 확정 봉 날짜, 그 종가). 종가 기준 청산(`EXIT_CLOSE_STOP_*`) 입력 — `_refresh_alive`가 만든다.
         self._ref_close: Dict[str, tuple] = {}
         self._ref_stale: bool = False
+        # 초기 잔고 동기화가 실패했으면(야간 정산 시간의 빈 응답 등) 참 — 성공할 때까지 다시 시도하고 그동안 매매하지 않는다.
+        # 11/13 16:57 재시작이 "현금 0 · 보유 0"으로 올라와 보유 2종목을 잃은 채 주말을 넘길 뻔했다.
+        self._sync_pending: bool = False
         # 종목 → 첫 매수 체결일(YYYYMMDD). 진입 당일은 판정하지 않으므로(폭증일이라
         # 당연히 생존) 반드시 알아야 하고, 재시작해도 남도록 상태 파일에 저장한다.
         self._entry_dates: Dict[str, str] = {}
@@ -1845,10 +1848,15 @@ class TradingEngine:
         try:
             cash, positions = await self.broker.get_portfolio_state()
         except Exception as exc:
-            logger.warning(f"[Sync] 잔고 조회 실패: {exc}")
+            if initial:
+                self._sync_pending = True
+                logger.warning(f"[Sync] 초기 동기화 실패 — 보유·현금을 모른다. 맞출 때까지 매매하지 않는다: {exc}")
+            else:
+                logger.warning(f"[Sync] 잔고 조회 실패: {exc}")
             return
 
         if initial:
+            self._sync_pending = False
             self.portfolio.cash = cash
             for symbol, pos in positions.items():
                 pos.sector = self.s.sector_of(symbol)
@@ -2122,6 +2130,15 @@ class TradingEngine:
         today = now.strftime("%Y%m%d")
         if self._ref_day and today != self._ref_day:
             await self._roll_daily_reference(today)
+
+        # --- 초기 동기화가 아직 안 됐으면 먼저 맞춘다(장 밖은 5분마다, 정규장은 매 루프) ---
+        if self._sync_pending:
+            if session is MarketSession.REGULAR or self._loops % 100 == 0:
+                await self._sync_portfolio(initial=True)
+            if self._sync_pending:
+                if self._loops % 20 == 0:
+                    logger.warning("[Sync] 잔고를 아직 모른다(초기 동기화 미완) — 매매 보류")
+                return
 
         # --- 장 상태 체크 ---
         if session is not MarketSession.REGULAR:

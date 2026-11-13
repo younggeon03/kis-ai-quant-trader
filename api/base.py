@@ -295,6 +295,11 @@ class AbstractBroker(abc.ABC):
         # 전까지 당일 매수 대금이 빠지지 않아, 사자마자 현금 + 보유평가가 겹쳐 자산이 두 배로
         # 읽혔다(2026-10-14 실서버: 매수 직후 1억 → 1.9억, 누적 +91%). D+2 값이 없는 응답만 예전 필드.
         row = summary[0] if summary else {}
+        # 모의투자 잔고는 장 마감 뒤 정산 시간(11/13 17:03 실측)에 output1 행과 output2 가 **빈 객체**로 온다(rt_cd 0).
+        # 그대로 읽으면 "현금 0 · 보유 0"이 되어 엔진이 보유 종목을 잃는다 — 예수금 필드가 없으면 실패로 올린다.
+        if row.get("prvs_rcdl_excc_amt") in (None, "") and row.get("dnca_tot_amt") in (None, ""):
+            raise KISAPIError("잔고 응답에 예수금 필드가 없다(모의투자 야간 정산 시간?) — 포지션·현금을 알 수 없다",
+                              "EMPTY_BALANCE", payload)
         if row.get("prvs_rcdl_excc_amt") not in (None, ""):
             cash = to_float(row.get("prvs_rcdl_excc_amt"))
         else:

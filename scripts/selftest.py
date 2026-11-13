@@ -1492,6 +1492,34 @@ async def _check_live_vol_alive(s) -> str:
             eng.portfolio.positions[sym].avg_price = 1000.0
         assert eng._close_stop_exits(today, {}) == [], "꺼져 있는데 종가 기준 청산을 냈다"
 
+        # 야간 정산 시간의 빈 잔고 응답(11/13 17:03 실측: output1 [{}, {}] · output2 [{}] · rt_cd 0)은 실패로 올린다
+        from api.base import AbstractBroker as _AB
+
+        class _EmptyBal:
+            async def inquire_balance(self):
+                return {"rt_cd": "0", "msg_cd": "20310000", "msg1": "모의투자 조회가 완료되었습니다.",
+                        "output1": [{}, {}], "output2": [{}]}
+        try:
+            await _AB.get_portfolio_state(_EmptyBal())
+            raise AssertionError("빈 잔고 응답을 '현금 0 · 보유 0'으로 읽었다 — 보유 종목을 잃는다")
+        except AssertionError:
+            raise
+        except Exception:
+            pass
+        # 초기 동기화가 실패하면 보류 플래그가 서고 현금은 건드리지 않는다 · 성공하면 풀린다
+        class _Flaky:
+            def __init__(self): self.ok = False
+            async def get_portfolio_state(self):
+                if not self.ok:
+                    raise RuntimeError("정산 중")
+                return 123.0, {}
+        eng.broker = _Flaky(); eng.portfolio.cash = 777.0
+        await eng._sync_portfolio(initial=True)
+        assert eng._sync_pending and eng.portfolio.cash == 777.0, "초기 동기화 실패를 보류로 처리하지 않았다"
+        eng.broker.ok = True
+        await eng._sync_portfolio(initial=True)
+        assert not eng._sync_pending and eng.portfolio.cash == 123.0, "초기 동기화 성공 뒤 보류가 안 풀렸다"
+
         # 장중 누적이 아무리 작아도(09:00) 판정 입력은 그대로다
         eng.latest_volumes = {"AAA": 1.0, "BBB": 1.0, "CCC": 1.0}
         assert eng._vol_alive_map(today) == m, "판정 입력에 장중 누적이 섞였다"
