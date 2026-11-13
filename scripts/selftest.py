@@ -1473,6 +1473,25 @@ async def _check_live_vol_alive(s) -> str:
         assert abs(m.get("BBB", 0.0) - 0.5) < 1e-9, f"BBB 배수 오류: {m.get('BBB')}"
         assert "CCC" not in m, "진입 당일 종목을 판정했다 — 폭증 전날 거래대금으로 사자마자 판다"
 
+        # 종가 기준 청산(EXIT_CLOSE_STOP_*) — 마지막 확정 종가(9/25, 1000원) 기준, 측정과 같은 규약
+        s.EXIT_CLOSE_STOP_ON, s.EXIT_CLOSE_STOP_PCT, s.EXIT_CLOSE_STOP_FROM_DAY = True, 0.03, 1
+        eng.portfolio.positions["AAA"].avg_price = 1040.0    # 1000 ≤ 1040x0.97=1008.8 → 청산
+        eng.portfolio.positions["BBB"].avg_price = 1020.0    # 1000 > 989.4 → 유지(vol_alive 가 따로 판다)
+        eng.portfolio.positions["CCC"].avg_price = 1040.0    # 진입 당일(기준 봉이 진입 전) → 판정 없음
+        got = {o.symbol for o in eng._close_stop_exits(today, {})}
+        assert got == {"AAA"}, f"종가 기준 청산 판정 오류: {got}"
+        s.EXIT_CLOSE_STOP_PCT, s.EXIT_CLOSE_STOP_FROM_DAY = 0.0, 2            # '2일째부터 종가 ≤ 평단'
+        eng._entry_dates["AAA"] = "20260925"                                   # 기준 봉 = 진입일 → 2일째부터는 안 본다
+        got = {o.symbol for o in eng._close_stop_exits(today, {})}
+        assert got == {"BBB"}, f"FROM_DAY=2 판정 오류(진입일 종가를 봤거나 ≤ 평단을 놓쳤다): {got}"
+        eng._ref_stale = True
+        assert eng._close_stop_exits(today, {}) == [], "기준 봉이 묵었는데 종가 기준 청산을 냈다"
+        eng._ref_stale = False; eng._entry_dates["AAA"] = "20260924"
+        s.EXIT_CLOSE_STOP_ON = False
+        for sym in ("AAA", "BBB", "CCC"):
+            eng.portfolio.positions[sym].avg_price = 1000.0
+        assert eng._close_stop_exits(today, {}) == [], "꺼져 있는데 종가 기준 청산을 냈다"
+
         # 장중 누적이 아무리 작아도(09:00) 판정 입력은 그대로다
         eng.latest_volumes = {"AAA": 1.0, "BBB": 1.0, "CCC": 1.0}
         assert eng._vol_alive_map(today) == m, "판정 입력에 장중 누적이 섞였다"

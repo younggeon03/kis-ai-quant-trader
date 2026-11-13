@@ -47,6 +47,7 @@ class ExitReason(str, Enum):
     SIGNAL = "SIGNAL"
     CRASH_GUARD = "CRASH_GUARD"
     VOL_DECAY = "VOL_DECAY"        # 거래대금이 보유 중 고점 대비 줄어 상승 동력 소멸
+    CLOSE_STOP = "CLOSE_STOP"      # 확정 종가가 평단 x(1-k) 이하 → 다음 날 시가 매도(11/13 측정, 아침 판정)
     KILL_SWITCH = "KILL_SWITCH"
     DERISK = "DERISK"
     EOD = "EOD"

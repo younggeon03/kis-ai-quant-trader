@@ -157,6 +157,9 @@ class TradingEngine:
         # 종목 → 어제 확정 거래대금 / 그 전일까지 20봉 중앙값(`daily_alive_burst`).
         # 장중 누적으로 판정하면 매일 아침 시가에 팔린다(함수 주석 참고).
         self._alive_burst: Dict[str, float] = {}
+        # 종목 → (마지막 확정 봉 날짜, 그 종가). 종가 기준 청산(`EXIT_CLOSE_STOP_*`) 입력 — `_refresh_alive`가 만든다.
+        self._ref_close: Dict[str, tuple] = {}
+        self._ref_stale: bool = False
         # 종목 → 첫 매수 체결일(YYYYMMDD). 진입 당일은 판정하지 않으므로(폭증일이라
         # 당연히 생존) 반드시 알아야 하고, 재시작해도 남도록 상태 파일에 저장한다.
         self._entry_dates: Dict[str, str] = {}
@@ -305,10 +308,13 @@ class TradingEngine:
         frames = {**self._held_daily, **self.panel}
         alive: Dict[str, float] = {}
         ref_ts: Dict[str, str] = {}
+        ref_close: Dict[str, tuple] = {}
         for symbol, df in frames.items():
             if df is None or df.empty:
                 continue
             hist = df[df["ts"].astype(str) < today]
+            if not hist.empty:
+                ref_close[symbol] = (str(hist["ts"].iloc[-1]), float(hist["close"].iloc[-1]))
             b = daily_alive_burst(hist)
             if b > 0:
                 alive[symbol] = b
@@ -323,6 +329,8 @@ class TradingEngine:
                            "(보유 유지 · 손절·상한만). 재시작하면 다시 받는다")
             alive = {}
         self._alive_burst = alive
+        self._ref_close = ref_close
+        self._ref_stale = stale is not None
         # 보유 종목의 오늘 판정을 미리 찍는다 — 아침에 무엇이 왜 팔릴지 로그로 보인다.
         mult = float(self.s.EXIT_VOL_ALIVE_MULT)
         for symbol in self.portfolio.open_positions():
@@ -336,6 +344,37 @@ class TradingEngine:
                 verdict = "유지" if alive[symbol] >= mult else "청산(시가)"
                 logger.info(f"[보유] {symbol} {ref_ts[symbol]} 거래대금 20봉중앙 "
                             f"x{alive[symbol]:.2f} (기준 x{mult:g}) → {verdict}")
+        for order in self._close_stop_exits(today, {}):
+            logger.info(f"[보유] {order.symbol} 종가 기준 청산 → 청산(시가) · {order.detail}")
+
+    def _close_stop_exits(self, today: str, prices: Dict[str, float]) -> List[ExitOrder]:
+        """종가 기준 청산(`EXIT_CLOSE_STOP_*`) — 마지막 확정 종가 ≤ 평단 x(1-k)이면 오늘 시가에 판다.
+
+        측정(`combo_study.py --ma-filters`의 `_daily`/`_kfail`)과 같은 규약: 봉 t 종가로 판정, t+1 시가 매도.
+        `FROM_DAY=1`이면 진입일 종가부터, `2`면 진입 다음 날 종가부터 본다. vol_alive와 같은 아침 판정이라
+        장중 흔들림에는 반응하지 않는다. 기준 봉이 묵었으면(`_ref_stale`) 판정하지 않는다 — vol_alive와 같다.
+        """
+        if not self.s.EXIT_CLOSE_STOP_ON or self._ref_stale:
+            return []
+        k = float(self.s.EXIT_CLOSE_STOP_PCT)
+        from_day = int(self.s.EXIT_CLOSE_STOP_FROM_DAY)
+        out: List[ExitOrder] = []
+        for symbol, pos in self.portfolio.open_positions().items():
+            if symbol in self._compliance_syms or pos.qty <= 0:
+                continue
+            ref = self._ref_close.get(symbol)
+            if not ref:
+                continue
+            ref_ts, close = ref
+            entered = self._entry_dates.get(symbol, today)
+            if ref_ts < entered or (from_day >= 2 and ref_ts <= entered):
+                continue                      # 진입 전 봉 / 진입일 종가는 FROM_DAY=2 에서 보지 않는다
+            level = float(pos.avg_price) * (1.0 - k)
+            if close <= level:
+                out.append(ExitOrder(symbol=symbol, qty=int(pos.qty), reason=ExitReason.CLOSE_STOP,
+                                     price=float(prices.get(symbol, close)),
+                                     detail=f"{ref_ts} 종가 {close:,.0f} ≤ 평단 {pos.avg_price:,.0f} x(1-{k:g})"))
+        return out
 
     def _stale_reference(self, today: str) -> Optional[str]:
         """실서버에서 패널의 마지막 확정 봉이 **직전 거래일보다 오래됐으면** 그 날짜를,
@@ -2223,6 +2262,9 @@ class TradingEngine:
                                          burst_map=burst_map)
         if self.s.USE_TOP_K:
             exits.extend(self._rotation_exits(signals, prices, exits))
+        # 종가 기준 청산(아침 판정) — 리스크 관문이 이미 낸 종목은 중복하지 않는다
+        taken = {e.symbol for e in exits}
+        exits.extend(o for o in self._close_stop_exits(today, prices) if o.symbol not in taken)
         for order in exits:
             price = prices.get(order.symbol, order.price)
             qty = self._sellable_qty(order.symbol, order.qty)
