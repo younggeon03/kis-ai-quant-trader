@@ -1856,6 +1856,7 @@ class TradingEngine:
             return
 
         if initial:
+            was_pending = self._sync_pending
             self._sync_pending = False
             self.portfolio.cash = cash
             for symbol, pos in positions.items():
@@ -1873,6 +1874,10 @@ class TradingEngine:
                 self.portfolio.peak_equity = max(self.portfolio.peak_equity, equity)
                 self.portfolio.day_start_equity = equity
             logger.info(f"[Sync] 초기 동기화: 현금 {cash:,.0f}원 / 보유 {len(positions)}종목")
+            if was_pending:
+                # 보류 중에는 진입일을 건드리지 않았다 — 이제 보유가 확정됐으니 맞춘다(기록 없으면 원장에서 찾는다)
+                self._reconcile_entry_dates()
+                self._save_state()
             return
 
         # 수량 불일치 시 브로커 값을 신뢰(체결 누락 보정)
@@ -2838,6 +2843,37 @@ class TradingEngine:
         except Exception as exc:
             logger.debug(f"[State] 복구 실패: {exc}")
 
+    def _entry_date_from_ledger(self, symbol: str) -> Optional[str]:
+        """원장(`logs/ledger.jsonl`)의 체결 기록으로 지금 보유의 첫 매수일을 찾는다.
+
+        매도 체결이 나오면 그 전 매수는 지난 보유로 보고 버린다(수량까지 맞추지는 않는다 — 근사).
+        상태 파일의 진입일이 사라졌을 때의 복원용이다. 못 찾으면 None.
+        """
+        path = Path(self.s.LEDGER_PATH)
+        if not path.exists():
+            return None
+        first_buy: Optional[str] = None
+        try:
+            with path.open(encoding="utf-8") as fh:
+                for line in fh:
+                    if f'"{symbol}"' not in line or '"fill"' not in line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue
+                    if rec.get("event") != "fill" or rec.get("symbol") != symbol:
+                        continue
+                    day = str(rec.get("ts", ""))[:10].replace("-", "")
+                    if rec.get("side") == "SELL":
+                        first_buy = None
+                    elif rec.get("side") == "BUY" and first_buy is None and len(day) == 8:
+                        first_buy = day
+        except OSError as exc:
+            logger.warning(f"[State] 원장 읽기 실패: {exc}")
+            return None
+        return first_buy
+
     def _reconcile_entry_dates(self) -> None:
         """재시작 후 보유 종목의 진입일과 보유 봉 수를 맞춘다.
 
@@ -2850,15 +2886,25 @@ class TradingEngine:
         """
         today = self._now().date()
         today_s = today.strftime("%Y%m%d")
+        if self._sync_pending:
+            # 보유를 아직 모른다(잔고 응답 보류). 지금 지우면 저장된 진입일이 사라진다 —
+            # 11/13 16:57 재시작이 "보유 0"으로 올라와 진입일 {}를 저장했고, 월요일 아침 판정이 전부 빠질 뻔했다.
+            logger.warning("[State] 잔고 동기화 보류 중 — 진입일은 건드리지 않는다(동기화 뒤 다시 맞춘다)")
+            return
         held = self.portfolio.open_positions()
         self._entry_dates = {k: v for k, v in self._entry_dates.items() if k in held}
         for symbol, pos in held.items():
             entered = self._entry_dates.get(symbol)
             if not entered:
-                self._entry_dates[symbol] = today_s
-                logger.warning(f"[State] {symbol} 진입일 기록 없음 — 오늘 진입으로 간주"
-                               "(vol_alive 판정은 내일부터)")
-                continue
+                from_ledger = self._entry_date_from_ledger(symbol)
+                if from_ledger:
+                    self._entry_dates[symbol] = entered = from_ledger
+                    logger.warning(f"[State] {symbol} 진입일 기록 없음 — 원장 매수 체결일 {from_ledger}로 복원")
+                else:
+                    self._entry_dates[symbol] = today_s
+                    logger.warning(f"[State] {symbol} 진입일 기록 없음 — 오늘 진입으로 간주"
+                                   "(vol_alive 판정은 내일부터)")
+                    continue
             if self.s.USE_MOCK_MODE:
                 continue    # Mock 가상 날짜는 거래일 달력과 무관하다
             try:

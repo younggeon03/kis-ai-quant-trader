@@ -1516,9 +1516,32 @@ async def _check_live_vol_alive(s) -> str:
         eng.broker = _Flaky(); eng.portfolio.cash = 777.0
         await eng._sync_portfolio(initial=True)
         assert eng._sync_pending and eng.portfolio.cash == 777.0, "초기 동기화 실패를 보류로 처리하지 않았다"
+        # 보류 중에는 저장된 진입일을 지우지 않는다(11/13 사고) · 성공 뒤 다시 맞춘다
+        eng._entry_dates = {"ZZZ": "20260901"}
+        eng._reconcile_entry_dates()
+        assert eng._entry_dates == {"ZZZ": "20260901"}, "잔고를 모르는데 진입일을 지웠다"
         eng.broker.ok = True
         await eng._sync_portfolio(initial=True)
         assert not eng._sync_pending and eng.portfolio.cash == 123.0, "초기 동기화 성공 뒤 보류가 안 풀렸다"
+        assert "ZZZ" not in eng._entry_dates and set(eng._entry_dates) == set(eng.portfolio.open_positions()), \
+            f"동기화 뒤 진입일이 보유 종목과 맞지 않는다: {eng._entry_dates}"
+        # 진입일 기록이 없으면 원장의 (마지막 매도 이후) 첫 매수 체결일로 복원한다
+        import tempfile as _tf
+        with _tf.TemporaryDirectory() as _d:
+            lp = Path(_d) / "ledger.jsonl"
+            lp.write_text("\n".join([
+                '{"ts": "2026-09-10T09:05:00+09:00", "event": "fill", "symbol": "QQQ", "side": "BUY", "qty": 1}',
+                '{"ts": "2026-09-12T09:00:00+09:00", "event": "fill", "symbol": "QQQ", "side": "SELL", "qty": 1}',
+                '{"ts": "2026-09-20T09:05:00+09:00", "event": "fill", "symbol": "QQQ", "side": "BUY", "qty": 1}',
+                '{"ts": "2026-09-21T09:05:00+09:00", "event": "fill", "symbol": "QQQ", "side": "BUY", "qty": 1}',
+                '{"ts": "2026-09-22T09:05:00+09:00", "event": "risk_decision", "symbol": "QQQ"}']) + "\n", encoding="utf-8")
+            old_lp = s.LEDGER_PATH; s.LEDGER_PATH = str(lp)
+            try:
+                assert eng._entry_date_from_ledger("QQQ") == "20260920", "원장 진입일 복원 오류"
+                assert eng._entry_date_from_ledger("NONE") is None
+            finally:
+                s.LEDGER_PATH = old_lp
+        eng._entry_dates = {"AAA": "20260924", "BBB": "20260924", "CCC": today}   # 아래 검증은 원래 진입일 기준
 
         # 장중 누적이 아무리 작아도(09:00) 판정 입력은 그대로다
         eng.latest_volumes = {"AAA": 1.0, "BBB": 1.0, "CCC": 1.0}
