@@ -273,6 +273,13 @@ def main() -> int:
         tv1519 = TV.sum(axis=1)
         base1519 = pd.Series(tv1519).rolling(20, min_periods=10).median().shift(1).to_numpy(float)
         jrow = {pos[dy_]: j_ for j_, dy_ in enumerate(days) if dy_ in pos}
+        # 하루 여러 번 판정(11/15) — 11:00(m=119)·12:00(179)·13:00(239)·15:00(359)·15:19(379) 시점 누적 거래대금과 **같은 절단**의 지난 20일 중앙값
+        cut_cum: Dict[int, np.ndarray] = {}
+        cut_base: Dict[int, np.ndarray] = {}
+        for m_ in (14, 29, 59, 119, 179, 239, 299, 359, 379):
+            cum_ = TV[:, :m_ + 1].sum(axis=1)
+            cut_cum[m_] = cum_
+            cut_base[m_] = pd.Series(cum_).rolling(20, min_periods=10).median().shift(1).to_numpy(float)
         for j_, dy_ in enumerate(days):
             t_ = pos.get(dy_)
             if t_ is not None and np.isfinite(tov[t_]) and tov[t_] > 0 and tv1519[j_] > 0:
@@ -440,6 +447,60 @@ def main() -> int:
                             "ret": float(c[e_]) / entry_px - 1.0 - cost}
                 arms["eod3"] = _eod(False)
                 arms["eod3_cl"] = _eod(True)
+
+                def _gap(k_s: float) -> Dict[str, Any]:
+                    """시가가 매도선(매수가 x(1-k)) 아래로 갭하락하면 그 시가에 바로 판다(11/15). 나머지는 dstop 과 같다.
+                    기존 규칙이 이미 그 시가에 파는 날은 같으므로 그 전 날들만 본다."""
+                    base_arm = arms[f"dstop{int(k_s * 100)}"]
+                    for t_ in range(i + 1, i + args.max_hold + 1):
+                        if t_ >= len(o) or cal[ts[t_]] >= base_arm["exit_d"]:
+                            break
+                        if np.isfinite(o[t_]) and o[t_] > 0 and o[t_] <= entry_px * (1.0 - k_s):
+                            return {"exit_d": cal[ts[t_]], "when": "open", "exit_min": -1,
+                                    "ret": float(o[t_]) / entry_px - 1.0 - cost}
+                    return base_arm
+
+                def _multi(points, k_s: float = 0.03) -> Dict[str, Any]:
+                    """하루 여러 번 판정(11/15): 아침(전날 종가·거래대금 → 오늘 시가, 기존 규칙 그대로) + 장중 시점들(분 m 의 종가와
+                    그 시점 누적 거래대금 ÷ 같은 절단 20일 중앙 → 다음 분 시가 매도). 진입 당일은 가격 조건만(vol_alive 는 다음 날부터)."""
+                    for t_ in range(i, i + args.max_hold):
+                        if t_ >= len(c):
+                            break
+                        if t_ > i:
+                            pc_ = c[t_ - 1]
+                            hit_ = bool(np.isfinite(pc_) and pc_ > 0 and
+                                        ((args.stop > 0 and pc_ / entry_px - 1.0 <= -args.stop) or pc_ <= entry_px * (1.0 - k_s)))
+                            if not hit_:
+                                b_ = burst[t_ - 1]
+                                hit_ = not (np.isfinite(b_) and b_ >= args.hold_vol)
+                            if hit_ and np.isfinite(o[t_]) and o[t_] > 0:
+                                return {"exit_d": cal[ts[t_]], "when": "open", "exit_min": -1,
+                                        "ret": float(o[t_]) / entry_px - 1.0 - cost}
+                        j_ = jrow.get(t_)
+                        if j_ is None:
+                            continue
+                        for m_ in points:
+                            px_ = CL[j_, m_]
+                            if not (np.isfinite(px_) and px_ > 0) or (t_ == i and m_ < entry_mi):
+                                continue
+                            hit_ = (args.stop > 0 and px_ / entry_px - 1.0 <= -args.stop) or px_ <= entry_px * (1.0 - k_s)
+                            if not hit_ and t_ > i:
+                                cum_, base_ = cut_cum[m_][j_], cut_base[m_][j_]
+                                hit_ = not (np.isfinite(base_) and base_ > 0 and cum_ / base_ >= args.hold_vol)
+                            if hit_:
+                                nx_ = OP[j_, m_ + 1] if m_ + 1 < N_MIN else np.nan
+                                fill_ = float(nx_) if np.isfinite(nx_) and nx_ > 0 else float(px_)
+                                return {"exit_d": cal[ts[t_]], "when": "intra", "exit_min": m_ + 1,
+                                        "ret": fill_ / entry_px - 1.0 - cost}
+                    e_ = min(i + args.max_hold, len(c) - 1)
+                    return {"exit_d": cal[ts[e_]], "when": "close", "exit_min": EOD_MIN,
+                            "ret": float(c[e_]) / entry_px - 1.0 - cost}
+                arms["gapopen3"] = _gap(0.03)
+                arms["j1200"] = _multi([179])
+                arms["j3h"] = _multi([179, 359])
+                arms["j2h"] = _multi([119, 239, 359])
+                arms["j2h_1519"] = _multi([119, 239, 359, 379])
+                arms["j8"] = _multi([14, 29, 59, 179, 239, 299, 359])      # 09:00(아침)·09:15·09:30·10:00·12:00·13:00·14:00·15:00
                 arms["down2"] = _daily(lambda t_: t_ >= i + 2 and np.isfinite(c[t_]) and c[t_] < c[t_ - 1] < c[t_ - 2])
                 arms["tp1_eod"] = _tp(0.01, False)
                 arms["tp2_eod"] = _tp(0.02, False)
@@ -507,6 +568,9 @@ def main() -> int:
                           "px>mma5": px >= float(np.nanmean(cl5)) if np.isfinite(cl5).any() else False}
                     open_evs.append({"sym": sym, "d": dc, "entry_px": px, "detect_min": ow + 1 / (1 + r),
                                      "src": "open", "chase": px / c[i - 1] - 1.0, "ratio": r, "ma": ma,
+                                     # 첫날 종가 수익률·다음 날 시가 — "첫날 −3%~0% 구간 보유"의 조건부 분포용(11/15)
+                                     "d1_ret": float(c[i] / px - 1.0) if np.isfinite(c[i]) else np.nan,
+                                     "o2": float(o[i + 1]) if i + 1 < len(o) and np.isfinite(o[i + 1]) else np.nan,
                                      **exits(px, i, ow)})
             # 장중 추가 — 설정마다 그날 첫 발동(창 끝 분 ≥ 시작 분)
             if j >= 10:
@@ -589,6 +653,10 @@ def main() -> int:
                      ("dstop7", "종가 ≤ 매수가 −7% → 익일 매도"), ("lowbreak", "종가 < 진입일 저가 → 익일 매도"),
                      ("down2", "이틀 연속 하락 종가 → 익일 매도"),
                      ("eod3", "15:19 판정(손절·−3%·vol_alive) → 15:19 매도"), ("eod3_cl", "15:19 판정 → 그날 종가 매도"),
+                     ("gapopen3", "시가가 −3% 선 아래 갭하락 → 그 시가 매도(나머지 dstop3)"),
+                     ("j1200", "아침 + 12:00 판정"), ("j3h", "3시간 텀: 아침 + 12:00 + 15:00"),
+                     ("j2h", "2시간 텀: 아침 + 11:00 + 13:00 + 15:00"), ("j2h_1519", "2시간 텀 + 15:19"),
+                     ("j8", "8번: 아침 + 09:15·09:30·10:00·12:00·13:00·14:00·15:00"),
                      ("tp1_eod", "익절 +1% · 못 닿으면 종가"), ("tp2_eod", "익절 +2% · 못 닿으면 종가"),
                      ("tp3_eod", "익절 +3% · 못 닿으면 종가"), ("tp2_hold", "익절 +2% · 못 닿으면 보유"),
                      ("tp3_hold", "익절 +3% · 못 닿으면 보유"), ("tp5_hold", "익절 +5% · 못 닿으면 보유")]
