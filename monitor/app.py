@@ -443,6 +443,8 @@ async function refresh() {
     `루프 <b>${num(sys.loops)}</b>`,
     `가동 <b>${Math.floor(el/3600)}시간 ${Math.floor(el%3600/60)}분</b>`,
     sys.errors ? `<b class="up">오류 ${num(sys.errors)}</b>` : '오류 없음',
+    ...(Object.keys(sys.stale_quotes||{}).length
+        ? [`<b class="up">시세 멈춤 ${Object.entries(sys.stale_quotes).map(([k,v])=>`${k} ${v}초`).join(', ')}</b>`] : []),
   ].map(x => `<span>${x}</span>`).join('');
 
   $('equity').innerHTML = num(p.equity) + '<small>원</small>';

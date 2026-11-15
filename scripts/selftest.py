@@ -1554,6 +1554,21 @@ async def _check_live_vol_alive(s) -> str:
             and abs(snap["equity"] - snap["broker_equity"]) < 1, \
             f"대시보드 총자산이 증권사 순자산과 다르다: {snap['equity']} vs {snap.get('broker_equity')}"
         eng._session, eng.latest_prices = saved_session, saved_px
+        # 보유 종목 시세 묵음 경고(11/15) — 오늘 09:00 이후 QUOTE_STALE_SEC 넘게 시세가 없으면 관제판에 올린다, 매매는 그대로
+        import main as _main_mod
+        _now = dt.datetime(2026, 9, 26, 10, 0, 0)
+        held_syms = list(eng.portfolio.open_positions())
+        assert held_syms
+        eng._quote_seen = {s_: _now - dt.timedelta(seconds=_main_mod.QUOTE_STALE_SEC + 30) for s_ in held_syms}
+        eng._quote_seen[held_syms[0]] = _now - dt.timedelta(seconds=5)
+        eng._check_quote_staleness(_now)
+        assert set(eng._stale_quotes) == set(held_syms[1:]), f"시세 묵음 판정 오류: {eng._stale_quotes}"
+        eng._quote_seen = {}                                   # 시세를 한 번도 못 받았으면 09:00부터 센다
+        eng._check_quote_staleness(dt.datetime(2026, 9, 26, 9, 1, 0))
+        assert eng._stale_quotes == {}, "장 시작 직후에 거짓 경고가 났다"
+        eng._check_quote_staleness(dt.datetime(2026, 9, 26, 9, 3, 0))
+        assert set(eng._stale_quotes) == set(held_syms), "09:00부터 3분간 시세가 없는데 경고가 없다"
+        eng._stale_quotes = {}
         # 진입일 기록이 없으면 원장의 (마지막 매도 이후) 첫 매수 체결일로 복원한다
         import tempfile as _tf
         with _tf.TemporaryDirectory() as _d:
@@ -1568,6 +1583,9 @@ async def _check_live_vol_alive(s) -> str:
             try:
                 assert eng._entry_date_from_ledger("QQQ") == "20260920", "원장 진입일 복원 오류"
                 assert eng._entry_date_from_ledger("NONE") is None
+                # 오늘 판 종목은 원장의 그날 SELL 체결로 복원한다(11/15)
+                assert eng._sold_today_from_ledger("20260912") == {"QQQ"}, "원장 sold_today 복원 오류"
+                assert eng._sold_today_from_ledger("20260920") == set(), "매수만 있는 날을 매도로 읽었다"
             finally:
                 s.LEDGER_PATH = old_lp
         eng._entry_dates = {"AAA": "20260924", "BBB": "20260924", "CCC": today}   # 아래 검증은 원래 진입일 기준

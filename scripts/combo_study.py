@@ -180,6 +180,7 @@ def main() -> int:
     ow, sw, vw = args.open_window, args.slide_window, args.vwap_roll
 
     open_evs: List[Dict[str, Any]] = []
+    day_chase: Dict[int, List[float]] = {}   # 달력 인덱스 → 그날 09:0N 전 종목 전일比(진입 필터 측정용, 11/15)
     if args.slide_grid:
         cfgs = []
         for tok in args.slide_grid.split(","):
@@ -482,6 +483,10 @@ def main() -> int:
             if i is None or i < 25 or i + args.max_hold + 1 >= len(d):
                 continue
             dc = cal[dy]
+            # 진입 필터 측정용(11/15) — 그날 09:0N 가격의 전일比를 **발동 여부와 무관하게** 모든 종목에서 모아 "시장 강도"로 쓴다
+            px_all = _px_at(OP[j], ow)
+            if np.isfinite(px_all) and np.isfinite(c[i - 1]) and c[i - 1] > 0:
+                day_chase.setdefault(dc, []).append(float(px_all / c[i - 1] - 1.0))
             # 장 시작
             b0 = same_window_base(WO[:j].tolist())
             if b0 > 0 and WO[j] >= args.open_mult * b0:
@@ -490,7 +495,10 @@ def main() -> int:
                     r = WO[j] / b0
                     ma = {"px>ma5": px >= ma5p[i], "px>ma20": px >= ma20p[i], "px>ma60": px >= ma60p[i],
                           "ma5>ma20": ma5p[i] >= ma20p[i], "ma20up": ma20p[i] >= ma20p[i - 1],
-                          "px<ma20": px < ma20p[i]}
+                          "px<ma20": px < ma20p[i],
+                          # 직전 3·5일 상승폭(전일 종가 ÷ 3·5일 전 종가) — 과열 제외 필터용(11/15)
+                          "run3": float(c[i - 1] / c[i - 4] - 1.0) if c[i - 4] > 0 else np.nan,
+                          "run5": float(c[i - 1] / c[i - 6] - 1.0) if c[i - 6] > 0 else np.nan}
                     # 분봉 — 09:00~09:04 (판정 시각에 아는 것만)
                     v5 = VO[j, :ow].sum()
                     vwap5 = float((CL[j, :ow] * VO[j, :ow]).sum() / v5) if v5 > 0 else np.nan
@@ -591,6 +599,34 @@ def main() -> int:
         sl = [e for e in slide_evs if e["chase"] >= 0.03]
         cells["[채택진입] + 장중 추가(전일+3%↑) · vol_alive"] = (ok_evs + sl, "alive")
         cells["[채택진입] + 장중 추가 · 첫날<매수가 청산"] = (ok_evs + sl, "d1fail")
+        # 진입 필터(11/15) — 채택 진입 + 채택 청산(종가 −3%) 위에서 과열 제외·시장 강도·그날 발동 수를 본다
+        from collections import Counter as _Counter
+        ntrig = _Counter(e["d"] for e in open_evs)
+        mkt = {d_: float(np.mean(v_)) for d_, v_ in day_chase.items() if v_}
+        ent_cells = [
+            ("직전 3일 상승 < 10%", lambda e: e["ma"]["run3"] < 0.10),
+            ("직전 3일 상승 < 15%", lambda e: e["ma"]["run3"] < 0.15),
+            ("직전 3일 상승 < 20%", lambda e: e["ma"]["run3"] < 0.20),
+            ("직전 3일 상승 < 30%", lambda e: e["ma"]["run3"] < 0.30),
+            ("직전 5일 상승 < 20%", lambda e: e["ma"]["run5"] < 0.20),
+            ("직전 5일 상승 < 30%", lambda e: e["ma"]["run5"] < 0.30),
+            ("직전 3일 상승 ≥ 10% (반대)", lambda e: e["ma"]["run3"] >= 0.10),
+            ("시장(09:0N 전 종목 평균 전일比) ≥ 0", lambda e: mkt.get(e["d"], 0.0) >= 0.0),
+            ("시장 ≥ +0.5%", lambda e: mkt.get(e["d"], 0.0) >= 0.005),
+            ("시장 ≥ −0.5%", lambda e: mkt.get(e["d"], 0.0) >= -0.005),
+            ("시장 < 0 (반대)", lambda e: mkt.get(e["d"], 0.0) < 0.0),
+            ("그날 발동 ≤ 5", lambda e: ntrig[e["d"]] <= 5),
+            ("그날 발동 ≤ 10", lambda e: ntrig[e["d"]] <= 10),
+            ("그날 발동 ≤ 20", lambda e: ntrig[e["d"]] <= 20),
+            ("그날 발동 > 20 (반대)", lambda e: ntrig[e["d"]] > 20),
+            ("종목 전일比 ≥ +1%", lambda e: e["chase"] >= 0.01),
+            ("종목 전일比 ≥ +2%", lambda e: e["chase"] >= 0.02),
+            ("종목 전일比 ≥ +3%", lambda e: e["chase"] >= 0.03),
+            ("종목 전일比 < +5%", lambda e: e["chase"] < 0.05),
+        ]
+        cells["[진입필터] 기준(채택 진입 · 종가 −3%)"] = (ok_evs, "dstop3")
+        for name, f in ent_cells:
+            cells[f"[진입필터] + {name}"] = ([e for e in ok_evs if f(e)], "dstop3")
         if args.vwap_variants:
             cells["[채택진입] + 장중 추가 · 장중 VWAP 청산(AND)"] = (ok_evs + sl, "vwap")
     elif args.slide_grid:

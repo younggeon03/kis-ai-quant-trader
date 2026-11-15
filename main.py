@@ -80,6 +80,7 @@ DISK_WARN_GB = 1.0          # 남은 디스크가 이 아래면 경고(서버 �
 FLATTEN_ORDER_TTL = 30.0    # 마감 정리 구간의 미체결 매도 취소 기준(초)
 SELL_REPRICE_SEC = 60.0     # 장중 미체결 매도를 취소하고 지금 가격으로 다시 내는 기준(초)
 OPENING_LATE_MAX_MIN = 2    # 장 시작 판정을 이만큼(분) 넘겨 기동했으면 건너뛴다(누적이 창보다 길어진다)
+QUOTE_STALE_SEC = 120       # 정규장에 보유 종목 시세가 이만큼 안 들어오면 경고(손절·판정이 묵은 값을 본다, 11/15)
 FILL_POLL_LOOPS = 5         # 체결 폴링 주기(실서버)
 # 규칙 기반 진입(burst·opening)의 신호 점수. 진입 결정은 규칙이 이미 내렸으므로 리스크
 # 관문의 일봉 모델용 문턱(SIGNAL_BUY_THRESHOLD)에 걸리지 않게 둔다. 고정 사이징에서는
@@ -197,6 +198,11 @@ class TradingEngine:
         self._slide_fired: set = set()                  # 오늘 이미 한 번 발동한 종목(첫 발동만 쓴다)
         self._slide_queue: List[tuple] = []             # [(배수, 종목)] 이번 조회에서 새로 발동
         self._sold_today: Dict[str, str] = {}           # 오늘 판 종목(같은 날 다시 사지 않는다)
+        # 종목 → 마지막으로 시세(WS·REST·복수시세)가 들어온 시각. 보유 종목이 QUOTE_STALE_SEC 넘게 조용하면 경고한다 —
+        # `_refresh_quotes` 실패는 debug 로그뿐이라 WS가 끊기고 REST도 실패하면 가격이 소리 없이 동결됐다(11/15 점검).
+        self._quote_seen: Dict[str, dt.datetime] = {}
+        self._stale_quotes: Dict[str, int] = {}          # 지금 묵은 보유 종목 → 나이(초). 관제판 표시
+        self._stale_warned: Dict[str, dt.datetime] = {}
         self._locked = False                              # 목표 도달 잠금(LOCK_RETURN) — 켜지면 끝까지 유지
         self._final_flatten_day = ""                      # 마지막 날 전량 매도를 알린 날(로그·원장 1회)
         self._lock_seen: Optional[dt.datetime] = None     # 목표 첫 확인 시각(시세 튐 방지용 확인 대기)
@@ -1220,6 +1226,7 @@ class TradingEngine:
         for symbol, q in quotes.items():
             if q.get("price", 0) > 0:
                 self.latest_prices[symbol] = float(q["price"])
+                self._quote_seen[symbol] = now
             chg = q.get("change_pct")
             if chg is None:
                 pd_ = self._prev_daily.get(symbol)
@@ -1641,6 +1648,7 @@ class TradingEngine:
     async def _on_ws_quote(self, quote: Quote) -> None:
         if quote.price > 0:
             self.latest_prices[quote.symbol] = quote.price
+            self._quote_seen[quote.symbol] = self._now()
             self.latest_volumes[quote.symbol] = float(quote.volume or 0.0)
             if self.obrec is not None:
                 # 체결강도 분류 규칙(가격 >= 매도1호가 / 가격 > 중간가 ...)은
@@ -1752,6 +1760,29 @@ class TradingEngine:
         )
 
     # ================================================================== 데이터
+    def _check_quote_staleness(self, now: dt.datetime) -> None:
+        """정규장에 보유 종목 시세가 `QUOTE_STALE_SEC` 넘게 안 들어오면 경고하고 관제판에 올린다(11/15).
+
+        손절·종가 판정·대시보드가 전부 `latest_prices`를 보는데, WS가 끊기고 REST 조회까지 실패하면 값이
+        소리 없이 동결된다(조회 실패는 debug 로그다). 나이는 `max(마지막 시세, 오늘 09:00)`부터 센다 —
+        장 시작 직후 전날 시세로 거짓 경고가 나지 않게. 매매는 바꾸지 않고 알리기만 한다.
+        """
+        open_dt = now.replace(hour=9, minute=0, second=0, microsecond=0)
+        stale: Dict[str, int] = {}
+        for symbol in self.portfolio.open_positions():
+            seen = self._quote_seen.get(symbol)
+            base = max(seen, open_dt) if seen else open_dt
+            age = int((now - base).total_seconds())
+            if age > QUOTE_STALE_SEC:
+                stale[symbol] = age
+                last = self._stale_warned.get(symbol)
+                if last is None or (now - last).total_seconds() >= 300:
+                    self._stale_warned[symbol] = now
+                    logger.warning(f"[시세] {symbol} 보유 종목 시세가 {age}초 동안 안 들어온다 — "
+                                   f"손절·판정이 묵은 가격({self.latest_prices.get(symbol, 0):,.0f}원)을 본다"
+                                   f"(WS {'정상' if self.ws is not None and self.ws.is_healthy() else '끊김/없음'})")
+        self._stale_quotes = stale
+
     async def _refresh_quotes(self) -> None:
         """현재가 갱신. 유량 보호를 위해 루프당 일부 종목만 회전 조회한다.
 
@@ -1797,6 +1828,7 @@ class TradingEngine:
                 quote = await self.broker.get_quote(symbol)
                 if quote and quote.price > 0:
                     self.latest_prices[symbol] = quote.price
+                    self._quote_seen[symbol] = self._now()
                     self.latest_volumes[symbol] = float(quote.volume or 0.0)
                     self._feed_intraday(symbol, quote.price, quote.volume, self._now())
             except Exception as exc:
@@ -2198,6 +2230,7 @@ class TradingEngine:
 
         # --- 시세 갱신 ---
         await self._refresh_quotes()
+        self._check_quote_staleness(now)
         # 일봉 재적재는 **장중 전략에서는 하지 않는다.**
         #
         # `_refresh_bars()`는 유니버스 전체(284종목) 일봉을 받으며 블로킹한다.
@@ -2874,6 +2907,12 @@ class TradingEngine:
             # 오늘 판 종목 — 장중 재시작 뒤 같은 날 다시 사지 않게(날짜를 같이 저장하므로 어제 것은 무해)
             sold = data.get("sold_today") or {}
             self._sold_today = {str(k): str(v) for k, v in sold.items()}
+            # 상태 파일은 조건부 저장이라 크래시 시점에 따라 오늘 판 종목이 빠질 수 있다 — 원장의 오늘 매도 체결로 보강(11/15)
+            today_ = self._now().strftime("%Y%m%d")
+            for sym_ in self._sold_today_from_ledger(today_):
+                if self._sold_today.get(sym_) != today_:
+                    self._sold_today[sym_] = today_
+                    logger.warning(f"[State] {sym_} 오늘 매도 체결이 원장에 있다 — 재매수 금지 목록에 복원")
             # 설정을 끄면(LOCK_RETURN=0) 저장된 잠금도 풀린다 — 순위를 뺏기면 다시 여는 경로(11/10 사용자 결정)
             was_locked = bool(data.get("locked", False))
             self._locked = was_locked and float(self.s.LOCK_RETURN) > 0
@@ -2883,6 +2922,28 @@ class TradingEngine:
                 logger.warning("[잠금] LOCK_RETURN=0 — 저장된 잠금을 풀고 매매를 다시 연다")
         except Exception as exc:
             logger.debug(f"[State] 복구 실패: {exc}")
+
+    def _sold_today_from_ledger(self, today: str) -> set:
+        """원장(`logs/ledger.jsonl`)에서 `today`(YYYYMMDD)에 매도 체결된 종목 집합 — `sold_today` 복원용(11/15)."""
+        path = Path(self.s.LEDGER_PATH)
+        out: set = set()
+        if not path.exists():
+            return out
+        try:
+            with path.open(encoding="utf-8") as fh:
+                for line in fh:
+                    if '"fill"' not in line or '"SELL"' not in line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue
+                    if rec.get("event") == "fill" and rec.get("side") == "SELL" \
+                            and str(rec.get("ts", ""))[:10].replace("-", "") == today and rec.get("symbol"):
+                        out.add(str(rec["symbol"]))
+        except OSError as exc:
+            logger.warning(f"[State] 원장 읽기 실패: {exc}")
+        return out
 
     def _entry_date_from_ledger(self, symbol: str) -> Optional[str]:
         """원장(`logs/ledger.jsonl`)의 체결 기록으로 지금 보유의 첫 매수일을 찾는다.
@@ -3055,6 +3116,7 @@ class TradingEngine:
                 "universe": len(self.universe),
                 "watchlist": len(self.watchlist),
                 "open_orders": len(self.open_orders),
+                "stale_quotes": dict(self._stale_quotes),
                 "event_queue": self.bus.pending,
                 "elapsed_sec": round((self.calendar.now() - self._started_at).total_seconds())
                                if self._started_at else 0,
