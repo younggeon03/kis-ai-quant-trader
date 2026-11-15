@@ -362,6 +362,16 @@ class Settings(BaseSettings):
     OPENING_ABOVE_VWAP: bool = Field(
         default=False,
         description="장 시작 판정에서 현재가가 당일 VWAP(복수시세 누적 거래대금 ÷ 누적 거래량) 아래인 발동은 사지 않는다")
+    # 11/15 측정(채택 진입 · 종가 −3%, 5일 창 431개): 직전 3일 상승 < 20% → 평균 +3.1%(기준 +2.8%) · 손실 31.6%(32.9%) · ≥+10% 21.1%(20.0%),
+    # 반대(≥10%)는 +1.1%·손실 42%. 표준오차 안의 차이지만 방향이 일관돼 사용자 결정으로 채택. 측정 정의 = c[i-1]/c[i-4]-1(전일 종가 ÷ 3거래일 전 종가).
+    OPENING_MAX_RUN3: float = Field(
+        default=0.0,
+        description="장 시작 판정에서 직전 3일 상승폭(전일 종가 ÷ 3거래일 전 종가 − 1)이 이 값 이상인 발동은 사지 않는다(0=끔)")
+    # 11/15 실측: 복수시세는 분 경계 뒤 평균 37초에 읽혀 누적 거래대금이 측정(09:00~09:0N-1 분봉 합)보다 평균 +15% 크다(최대 +35%).
+    # 실효 임계가 x3이 아니라 약 x2.6이 된다 → 경과초만큼 환산해 측정 정의에 맞춘다(판정 전용, VWAP·전일比에는 쓰지 않는다).
+    OPENING_TIME_ADJUST: bool = Field(
+        default=False,
+        description="장 시작 판정의 누적 거래대금에 N·60/(N·60+경과초)를 곱해 분 경계 시점 값으로 환산한다(측정 정의와 일치)")
     OPENING_BASELINE: str = Field(
         default="same_window",
         description="opening 모드 기준선: same_window=지난 20거래일 같은 09:00~09:0N 거래대금 중앙 / "

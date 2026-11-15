@@ -1853,6 +1853,19 @@ async def test_opening_entry():
             "판정에 분봉을 종목마다 받았다(복수시세여야 한다 — day_avg 는 기록도 하지 않는다)"
         picks = [c for c, _ in eng._opening_picks]
         assert picks == [codes[0], codes[2], codes[1]], f"배수 큰 순·문턱 적용 오류: {picks}"
+        # 판정 입력 시간 보정(OPENING_TIME_ADJUST, 11/15) — 분 경계 뒤 경과초만큼 누적 거래대금을 경계 시점 값으로 환산한다
+        s.OPENING_TIME_ADJUST = True
+        saved_now = eng._now
+        eng._now = lambda: dt.datetime(2026, 10, 12, 9, 5, 30)         # 경계 09:05:00 뒤 30초 → x300/330
+        await eng._opening_scan(dt.datetime(2026, 10, 12, 9, 5, 0))
+        got = dict(eng._opening_picks)
+        want = 300.0 / 330.0
+        assert abs(got[codes[0]] / 20.0 - want) < 1e-6 and abs(got[codes[2]] / 15.0 - want) < 1e-6, \
+            f"시간 보정 오류(배수가 경과초 비율만큼 줄어야 한다): {got}"
+        eng._now = saved_now
+        s.OPENING_TIME_ADJUST = False
+        await eng._opening_scan(dt.datetime(2026, 10, 12, 9, 5, 1))     # 원래 판정으로 되돌린다(아래 진입 검증용)
+        assert [c for c, _ in eng._opening_picks] == [codes[0], codes[2], codes[1]]
 
         eng._opening_day = "20261012"
         await eng._opening_entries(dt.datetime(2026, 10, 12, 9, 7), {})
@@ -1885,6 +1898,27 @@ async def test_opening_entry():
         await eng._opening_entries(dt.datetime(2026, 10, 12, 9, 8), {})
         assert submitted == [codes[2]], f"전일 대비 하락·모름 발동을 걸러 다음 순위를 사지 않았다: {submitted}"
         s.OPENING_ABOVE_PREV_CLOSE = False
+        # 과열 제외(OPENING_MAX_RUN3, 11/15 측정 "직전 3일 상승 < 20%") — 전일 종가 ÷ 3거래일 전 종가 − 1 ≥ 상한이면 다음 순위, 일봉 없으면 통과
+        s.OPENING_MAX_RUN3 = 0.20
+
+        def _panel(closes):
+            return pd.DataFrame({"ts": [f"202610{d_:02d}" for d_ in (5, 6, 7, 8, 10)], "open": closes, "high": closes,
+                                 "low": closes, "close": closes, "volume": [1.0] * 5})
+        saved_panel = {c_: eng.panel.get(c_) for c_ in codes}
+        eng.panel[codes[0]] = _panel([8000.0, 8000.0, 10_000.0, 10_000.0, 10_000.0])   # 10/10 ÷ 10/6 = +25% → 과열
+        eng.panel[codes[2]] = _panel([9500.0, 9500.0, 9800.0, 10_000.0, 10_000.0])    # +5.3% → 통과
+        eng.panel.pop(codes[1], None)                                                   # 일봉 없음 → 필터 없이 진행
+        assert abs(eng._prior_run(codes[0], "20261012", 3) - 0.25) < 1e-9 and eng._prior_run(codes[1], "20261012", 3) is None
+        eng._opening_done_day, eng._opening_picks = None, [(codes[0], 20.0), (codes[2], 15.0), (codes[1], 12.0)]
+        eng.open_orders.clear(); submitted.clear()
+        await eng._opening_entries(dt.datetime(2026, 10, 12, 9, 8), {})
+        assert submitted == [codes[2]], f"3일 과열 종목을 샀거나 다음 순위로 안 내려갔다: {submitted}"
+        s.OPENING_MAX_RUN3 = 0.0
+        for c_, df_ in saved_panel.items():
+            if df_ is None:
+                eng.panel.pop(c_, None)
+            else:
+                eng.panel[c_] = df_
         eng.open_orders.clear(); submitted.clear(); submitted.append(codes[0])
         eng.open_orders["o1"] = {"symbol": codes[0], "side": "BUY", "qty": 1, "price": 10_000.0}
         # 다음 날: 오늘 판정이 아직 없으면 어제 결과로 사지 않는다

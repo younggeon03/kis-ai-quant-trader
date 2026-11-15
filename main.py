@@ -1219,7 +1219,24 @@ class TradingEngine:
         held = set(self.portfolio.open_positions())
         same = self.s.OPENING_BASELINE == "same_window"
         ratios: Dict[str, float] = {}
-        quotes = await self.broker.get_turnovers(list(self.universe))
+        # 복수시세를 30종목씩 받으며 **분 경계(09:0N:00) 뒤 경과초**를 종목마다 적는다 — `OPENING_TIME_ADJUST`가 누적 거래대금을
+        # 경계 시점 값으로 환산할 때 쓴다(11/15 실측: 경계 뒤 평균 37초, 입력 +15% 치우침 → 실효 임계 x2.6). 호출 수는 전과 같다.
+        n_sec = float(n * 60)
+        boundary = now.replace(hour=9 + n // 60, minute=n % 60, second=0, microsecond=0)
+        adjust = bool(self.s.OPENING_TIME_ADJUST)
+        quotes: Dict[str, Dict[str, float]] = {}
+        elapsed: Dict[str, float] = {}
+        syms_ = list(self.universe)
+        for k_ in range(0, len(syms_), 30):
+            part = await self.broker.get_turnovers(syms_[k_:k_ + 30])
+            cur_ = self._now()
+            if (cur_.tzinfo is None) != (boundary.tzinfo is None):      # Mock·테스트는 naive, 실서버는 KST aware
+                cur_ = cur_.replace(tzinfo=boundary.tzinfo)
+            sec_ = min(300.0, max(0.0, (cur_ - boundary).total_seconds()))
+            for sym_, q_ in part.items():
+                quotes[sym_] = q_
+                elapsed[sym_] = sec_
+        factors: List[float] = []
         # 판정 시각의 (현재가, 당일 VWAP) — VWAP = 누적 거래대금 ÷ 누적 거래량(`OPENING_ABOVE_VWAP`)
         self._opening_vwap = {}
         self._opening_chg = {}      # 판정 시각 전일 대비 %(`OPENING_ABOVE_PREV_CLOSE`) — 복수시세, 없으면 전일 일봉 종가로
@@ -1239,6 +1256,10 @@ class TradingEngine:
             if symbol in held:
                 continue
             tv = float(q.get("turnover", 0.0))
+            if adjust:
+                f_ = n_sec / (n_sec + elapsed.get(symbol, 0.0))
+                factors.append(f_)
+                tv *= f_
             vals = self._prev_daily.get(symbol)
             med20 = vals[2] if vals and len(vals) > 2 else 0.0
             r = (same_window_ratio(tv, self._opening_hist.get(symbol, [])) if same
@@ -1252,8 +1273,10 @@ class TradingEngine:
             "mult": float(self.s.OPENING_MULT), "checked": len(quotes), "skipped": None,
             "rows": [self._board_row(s_, r, self._now(), "진입 대기") for s_, r in picks[:30]]}
         top = ", ".join(f"{s_} x{r:.1f}" for s_, r in picks[:5]) or "없음"
+        adj_note = (f" · 시간 보정 평균 x{sum(factors) / len(factors):.3f}(경계 뒤 {max(elapsed.values(), default=0.0):.0f}초)"
+                    if adjust and factors else "")
         logger.info(f"[장중·개장] 09:00~{hour[:2]}:{hour[2:4]} 판정 {len(quotes)}종목 "
-                    f"({self.s.OPENING_BASELINE} · 복수시세 {self._now().strftime('%H:%M:%S')}) → "
+                    f"({self.s.OPENING_BASELINE} · 복수시세 {self._now().strftime('%H:%M:%S')}{adj_note}) → "
                     f"발동 {len(picks)}건 (x{self.s.OPENING_MULT:g} 이상 · 상위: {top})")
         self.ledger.write("opening_scan", {
             "window_min": n, "mult": float(self.s.OPENING_MULT), "checked": len(quotes),
@@ -1288,6 +1311,17 @@ class TradingEngine:
                 logger.info(f"[장중·개장] 분봉 시각 확인 {symbol}: "
                             f"{', '.join(bars['ts'].astype(str).str[8:12].tolist()[:8])}")
         logger.info(f"[장중·개장] 기준선 분봉 기록 {done}/{len(self.universe)}종목 ({day})")
+
+    def _prior_run(self, symbol: str, day: str, k: int) -> Optional[float]:
+        """전일 종가 ÷ k거래일 전 종가 − 1 — 일봉 패널에서 `day` 전 봉만 쓴다(측정 `ma["run3"]`과 같은 정의)."""
+        df = self.panel.get(symbol)
+        if df is None or df.empty:
+            return None
+        hist = df[df["ts"].astype(str) < day]
+        if len(hist) < k + 1:
+            return None
+        c = hist["close"].to_numpy(float)
+        return float(c[-1] / c[-1 - k] - 1.0) if c[-1 - k] > 0 else None
 
     async def _opening_entries(self, now: dt.datetime, prices: Dict[str, float]) -> None:
         """판정 결과로 **하루 한 번** 빈 슬롯을 채운다.
@@ -1337,6 +1371,17 @@ class TradingEngine:
                     logger.info(f"[장중·개장] {symbol} 건너뜀 — 현재가 {px0:,.0f} < 당일 VWAP {vwap0:,.0f}")
                     mark(symbol, "VWAP 아래")
                     continue
+            max_run = float(self.s.OPENING_MAX_RUN3)
+            if max_run > 0:
+                # 11/15 측정 "직전 3일 상승 < 20%"(ma["run3"] = c[i-1]/c[i-4]-1) — 꼭대기 진입(11/13 이수페타시스 3일 +30%)을 뺀다.
+                # 일봉이 모자라 모르면 필터 없이 진행한다(측정은 i ≥ 25라 항상 안다 — 실거래에서 데이터 결함으로 매수를 막지 않는다).
+                run3 = self._prior_run(symbol, day, 3)
+                if run3 is not None and run3 >= max_run:
+                    logger.info(f"[장중·개장] {symbol} 건너뜀 — 직전 3일 {run3 * 100:+.1f}% ≥ {max_run * 100:.0f}% (과열)")
+                    mark(symbol, f"3일 과열 {run3 * 100:+.0f}%")
+                    continue
+                if run3 is None:
+                    logger.info(f"[장중·개장] {symbol} 직전 3일 상승폭 모름(일봉 부족) — 과열 필터 없이 진행")
             # 현재가와 종목 상태를 한 호출로 받는다. 관심목록 밖 종목은 현재가가 묵어 있을 수 있고,
             # 모의투자는 증거금 100%·경보 종목 주문을 거부한다(`vts_tradable`) — 거부 주문 한 건이
             # 유량 대기까지 약 3초라, 미리 걸러 다음 순위로 바로 내려간다(2026-10-14 5건 연속 거부).
