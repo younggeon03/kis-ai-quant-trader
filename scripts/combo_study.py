@@ -46,6 +46,7 @@ from strategy.sliding import (LAST_ENTRY_MIN, first_trigger, minute_turnover, ro
 from utils.logger import enable_utf8_console, logger  # noqa: E402
 
 N_MIN = LAST_ENTRY_MIN + 1
+RATIO_1519: List[float] = []   # (15:19 누적 거래대금 / 하루 전체 거래대금) 표본 — 15:19 판정의 실거래 분모 근사용(11/15)
 EOD_MIN = 10_000          # 일봉 종가·시가 청산은 그날 어떤 분보다 뒤/앞으로 놓는다
 
 
@@ -266,6 +267,15 @@ def main() -> int:
         base_vw[~(base_vw > 0)] = np.nan
         same_vw = {dy: (S_vw[r], base_vw[r]) for r, dy in enumerate(days)}
         WO = TV[:, :ow].sum(axis=1)
+        # 15:19 판정용(11/15) — 09:00~15:19 누적 거래대금과 **같은 절단**의 지난 20일 중앙값(전일까지). 분자·분모 절단이 같아야 한다.
+        # 동시호가(15:20~15:30)는 격자(N_MIN=380) 밖이라 자연히 빠진다.
+        tv1519 = TV.sum(axis=1)
+        base1519 = pd.Series(tv1519).rolling(20, min_periods=10).median().shift(1).to_numpy(float)
+        jrow = {pos[dy_]: j_ for j_, dy_ in enumerate(days) if dy_ in pos}
+        for j_, dy_ in enumerate(days):
+            t_ = pos.get(dy_)
+            if t_ is not None and np.isfinite(tov[t_]) and tov[t_] > 0 and tv1519[j_] > 0:
+                RATIO_1519.append(float(tv1519[j_] / tov[t_]))
 
         def exits(entry_px: float, i: int, entry_mi: int) -> Dict[str, Dict[str, Any]]:
             ex_i, ex_px, when = path_exit(entry_px, i, args.max_hold, args.stop, o, c, burst, args.hold_vol)
@@ -396,6 +406,39 @@ def main() -> int:
                 for k_s in (0.03, 0.05, 0.07):
                     arms[f"dstop{int(k_s * 100)}"] = _daily(lambda t_, k_s=k_s: np.isfinite(c[t_]) and c[t_] <= entry_px * (1.0 - k_s))
                 arms["lowbreak"] = _daily(lambda t_: t_ > i and np.isfinite(c[t_]) and np.isfinite(lo_[i]) and c[t_] < lo_[i])
+
+                def _eod(fill_close: bool) -> Dict[str, Any]:
+                    """15:19 판정(11/15) — 아침 판정(종가 → 익일 시가)을 당일 15:19로 당긴 것. 판정 내용은 같다:
+                    손절 25% · 15:19 가격 ≤ 매수가 −3%(진입일 포함) · 진입 다음 날부터 15:19 누적 거래대금 < 같은 절단 20일 중앙 x hold_vol.
+                    매도는 15:19 가격(fill_close=False) 또는 그날 종가(True, 동시호가 체결 가정). 안 걸리면 보유 상한 종가(base 와 같다)."""
+                    for t_ in range(i, i + args.max_hold):
+                        if t_ >= len(c):
+                            break
+                        j_ = jrow.get(t_)
+                        if j_ is None:
+                            continue
+                        row_ = CL[j_]
+                        fin_ = np.where(np.isfinite(row_))[0]
+                        if len(fin_) == 0:
+                            continue
+                        px_ = float(row_[LAST_ENTRY_MIN]) if np.isfinite(row_[LAST_ENTRY_MIN]) else float(row_[fin_[-1]])
+                        if not px_ > 0:
+                            continue
+                        hit_ = (args.stop > 0 and px_ / entry_px - 1.0 <= -args.stop) or px_ <= entry_px * 0.97
+                        if not hit_ and t_ > i:
+                            b_ = base1519[j_]
+                            hit_ = not (np.isfinite(b_) and b_ > 0 and tv1519[j_] / b_ >= args.hold_vol)
+                        if hit_:
+                            if fill_close and np.isfinite(c[t_]) and c[t_] > 0:
+                                return {"exit_d": cal[ts[t_]], "when": "close", "exit_min": EOD_MIN,
+                                        "ret": float(c[t_]) / entry_px - 1.0 - cost}
+                            return {"exit_d": cal[ts[t_]], "when": "intra", "exit_min": LAST_ENTRY_MIN,
+                                    "ret": px_ / entry_px - 1.0 - cost}
+                    e_ = min(i + args.max_hold, len(c) - 1)
+                    return {"exit_d": cal[ts[e_]], "when": "close", "exit_min": EOD_MIN,
+                            "ret": float(c[e_]) / entry_px - 1.0 - cost}
+                arms["eod3"] = _eod(False)
+                arms["eod3_cl"] = _eod(True)
                 arms["down2"] = _daily(lambda t_: t_ >= i + 2 and np.isfinite(c[t_]) and c[t_] < c[t_ - 1] < c[t_ - 2])
                 arms["tp1_eod"] = _tp(0.01, False)
                 arms["tp2_eod"] = _tp(0.02, False)
@@ -537,6 +580,7 @@ def main() -> int:
                      ("dstop3", "종가 ≤ 매수가 −3% → 익일 매도"), ("dstop5", "종가 ≤ 매수가 −5% → 익일 매도"),
                      ("dstop7", "종가 ≤ 매수가 −7% → 익일 매도"), ("lowbreak", "종가 < 진입일 저가 → 익일 매도"),
                      ("down2", "이틀 연속 하락 종가 → 익일 매도"),
+                     ("eod3", "15:19 판정(손절·−3%·vol_alive) → 15:19 매도"), ("eod3_cl", "15:19 판정 → 그날 종가 매도"),
                      ("tp1_eod", "익절 +1% · 못 닿으면 종가"), ("tp2_eod", "익절 +2% · 못 닿으면 종가"),
                      ("tp3_eod", "익절 +3% · 못 닿으면 종가"), ("tp2_hold", "익절 +2% · 못 닿으면 보유"),
                      ("tp3_hold", "익절 +3% · 못 닿으면 보유"), ("tp5_hold", "익절 +5% · 못 닿으면 보유")]
