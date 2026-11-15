@@ -1525,6 +1525,35 @@ async def _check_live_vol_alive(s) -> str:
         assert not eng._sync_pending and eng.portfolio.cash == 123.0, "초기 동기화 성공 뒤 보류가 안 풀렸다"
         assert "ZZZ" not in eng._entry_dates and set(eng._entry_dates) == set(eng.portfolio.open_positions()), \
             f"동기화 뒤 진입일이 보유 종목과 맞지 않는다: {eng._entry_dates}"
+        # 장 밖 잔고 대조는 보유 평가가격을 증권사 현재가(prpr)로 맞춘다 — 대시보드 총자산 = MTS 순자산(11/15, 156만 원 괴리 수정)
+        from utils.krx_calendar import MarketSession as _MS
+
+        class _Bal:
+            def __init__(self, cash, held):
+                self.cash, self.held = cash, held
+                self.last_balance = {"cash": cash, "nass": cash + sum(p.qty * p.last_price for p in held.values()),
+                                     "ts": "2026-11-15T14:00:00"}
+            async def get_portfolio_state(self):
+                return self.cash, {k: Position(symbol=v.symbol, qty=v.qty, avg_price=v.avg_price, last_price=v.last_price)
+                                   for k, v in self.held.items()}
+        held_now = {sym: Position(symbol=sym, qty=p.qty, avg_price=p.avg_price, last_price=777.0)
+                    for sym, p in eng.portfolio.open_positions().items()}
+        assert held_now, "검증용 보유가 없다"
+        saved_px, saved_session = dict(eng.latest_prices), eng._session
+        eng.broker = _Bal(123.0, held_now)
+        eng._session = lambda: _MS.REGULAR
+        await eng._sync_portfolio()
+        assert all(eng.latest_prices.get(sym) != 777.0 for sym in held_now), \
+            "정규장에 증권사 현재가로 시세를 덮었다(손절 판정이 묵은 값을 본다)"
+        eng._session = lambda: _MS.CLOSED
+        await eng._sync_portfolio()
+        assert all(eng.latest_prices.get(sym) == 777.0 and eng.portfolio.positions[sym].last_price == 777.0
+                   for sym in held_now), "장 밖 대조가 평가가격을 증권사 값으로 맞추지 않았다"
+        snap = eng._portfolio_snapshot()
+        assert snap["broker_equity"] == eng.broker.last_balance["nass"] and abs(snap["broker_gap"]) < 1 \
+            and abs(snap["equity"] - snap["broker_equity"]) < 1, \
+            f"대시보드 총자산이 증권사 순자산과 다르다: {snap['equity']} vs {snap.get('broker_equity')}"
+        eng._session, eng.latest_prices = saved_session, saved_px
         # 진입일 기록이 없으면 원장의 (마지막 매도 이후) 첫 매수 체결일로 복원한다
         import tempfile as _tf
         with _tf.TemporaryDirectory() as _d:

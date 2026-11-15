@@ -304,6 +304,15 @@ class AbstractBroker(abc.ABC):
             cash = to_float(row.get("prvs_rcdl_excc_amt"))
         else:
             cash = to_float(row.get("dnca_tot_amt"))
+        # 증권사가 매긴 순자산(`nass_amt`)을 남긴다 — 대시보드 총자산을 계좌(MTS·대회 순위)와 맞추는 기준.
+        # 모의투자는 보유 종목을 **자체 현재가(`prpr`)**로 평가하고 그 값이 실제 종가와 다를 수 있다(11/13 종가 91,000·74,500인데
+        # 잔고의 prpr 88,500·73,900 → 순자산 122,379,334원 = MTS = 대회 +22.38%). 엔진이 자체 시세로 평가하면 156만 원 어긋났다.
+        self.last_balance = {
+            "cash": cash,
+            "nass": to_float(row.get("nass_amt")) or to_float(row.get("tot_evlu_amt")),
+            "scts": to_float(row.get("scts_evlu_amt")),
+            "ts": dt.datetime.now().isoformat(timespec="seconds"),
+        }
         return cash, positions
 
     async def submit_order(self, request: OrderRequest) -> OrderAck:

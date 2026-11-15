@@ -75,6 +75,7 @@ from utils.market_rules import clamp_to_limits, price_limits, round_to_tick
 BAR_REFRESH_LOOPS = 40      # 전체 일봉 재적재 주기(루프 수)
 QUOTE_CHUNK = 4             # 루프당 현재가 갱신 종목 수(유량 보호)
 RECONCILE_LOOPS = 30        # 브로커 잔고 대조 주기
+OFFHOURS_SYNC_LOOPS = 100   # 장 밖 잔고 대조 주기(약 5~6분) — 평가가격·현금을 증권사 값으로 맞춰 대시보드 총자산 = MTS 순자산
 DISK_WARN_GB = 1.0          # 남은 디스크가 이 아래면 경고(서버 디스크 10GB — 원장·상태 저장 실패 방지)
 FLATTEN_ORDER_TTL = 30.0    # 마감 정리 구간의 미체결 매도 취소 기준(초)
 SELL_REPRICE_SEC = 60.0     # 장중 미체결 매도를 취소하고 지금 가격으로 다시 내는 기준(초)
@@ -163,6 +164,8 @@ class TradingEngine:
         # 초기 잔고 동기화가 실패했으면(야간 정산 시간의 빈 응답 등) 참 — 성공할 때까지 다시 시도하고 그동안 매매하지 않는다.
         # 11/13 16:57 재시작이 "현금 0 · 보유 0"으로 올라와 보유 2종목을 잃은 채 주말을 넘길 뻔했다.
         self._sync_pending: bool = False
+        # 마지막 잔고 대조 때 증권사가 매긴 순자산(`nass_amt`) — 대시보드 "증권사 순자산" 표시와 괴리 확인용(11/15).
+        self._acct_eval: Optional[Dict[str, Any]] = None
         # 종목 → 첫 매수 체결일(YYYYMMDD). 진입 당일은 판정하지 않으므로(폭증일이라
         # 당연히 생존) 반드시 알아야 하고, 재시작해도 남도록 상태 파일에 저장한다.
         self._entry_dates: Dict[str, str] = {}
@@ -1851,9 +1854,20 @@ class TradingEngine:
             if initial:
                 self._sync_pending = True
                 logger.warning(f"[Sync] 초기 동기화 실패 — 보유·현금을 모른다. 맞출 때까지 매매하지 않는다: {exc}")
-            else:
+            elif self._session() is MarketSession.REGULAR:
                 logger.warning(f"[Sync] 잔고 조회 실패: {exc}")
+            else:
+                logger.info(f"[Sync] 잔고 조회 실패(장 밖 — 정산 시간의 빈 응답이면 정상): {exc}")
             return
+
+        # 장 밖에서는 보유 종목 평가가격을 증권사 잔고의 현재가(`prpr`)로 맞춘다 — 그러면 총자산이 MTS 순자산(대회 순위 기준)과
+        # 같아진다. 모의투자의 평가가격은 실제 종가와 다를 수 있어(11/13 88,500 vs 91,000) 자체 시세로 평가하면 156만 원 어긋났다.
+        # 정규장에는 WS·REST 시세가 더 새롭고 손절 판정이 그 값을 쓰므로 덮지 않는다.
+        broker_px = {sym: float(p.last_price) for sym, p in positions.items() if p.last_price > 0}
+        if broker_px and self._session() is not MarketSession.REGULAR:
+            self.latest_prices.update(broker_px)
+        else:
+            broker_px = {}
 
         if initial:
             was_pending = self._sync_pending
@@ -1874,6 +1888,7 @@ class TradingEngine:
                 self.portfolio.peak_equity = max(self.portfolio.peak_equity, equity)
                 self.portfolio.day_start_equity = equity
             logger.info(f"[Sync] 초기 동기화: 현금 {cash:,.0f}원 / 보유 {len(positions)}종목")
+            self._note_acct_eval()
             if was_pending:
                 # 보류 중에는 진입일을 건드리지 않았다 — 이제 보유가 확정됐으니 맞춘다(기록 없으면 원장에서 찾는다)
                 self._reconcile_entry_dates()
@@ -1901,6 +1916,29 @@ class TradingEngine:
                 self.portfolio.positions.pop(symbol, None)
                 self._entry_dates.pop(symbol, None)
         self.portfolio.cash = cash
+        if broker_px:
+            self.portfolio.mark_prices(broker_px)
+        self._note_acct_eval()
+
+    def _note_acct_eval(self) -> None:
+        """잔고 응답의 증권사 순자산(`nass_amt`)을 기억한다 — 대시보드가 엔진 자산과 나란히 보여 준다."""
+        bal = getattr(self.broker, "last_balance", None)
+        if not bal or not bal.get("nass"):
+            return
+        nass = float(bal["nass"])
+        gap = self.portfolio.equity - nass
+        self._acct_eval = {"nass": nass, "ts": bal.get("ts")}
+        if abs(gap) >= 1000:
+            logger.info(f"[Sync] 증권사 순자산 {nass:,.0f}원 · 엔진 자산 {self.portfolio.equity:,.0f}원 (차이 {gap:+,.0f}원)")
+
+    def _portfolio_snapshot(self) -> Dict[str, Any]:
+        """포트폴리오 스냅샷 + 증권사 순자산(마지막 대조)과 그 차이."""
+        snap = self.portfolio.snapshot()
+        if self._acct_eval:
+            snap["broker_equity"] = round(self._acct_eval["nass"], 0)
+            snap["broker_equity_ts"] = self._acct_eval["ts"]
+            snap["broker_gap"] = round(self.portfolio.equity - self._acct_eval["nass"], 0)
+        return snap
 
     # ================================================================== 주문
     async def _submit(self, symbol: str, side: Side, qty: int, price: float, reason: str) -> bool:
@@ -2150,7 +2188,10 @@ class TradingEngine:
             if self._loops % 20 == 0:
                 logger.info(f"[Engine] 장 상태 {session.value} — 대기 중 "
                             f"(다음 개장까지 {self.calendar.seconds_until_next_open() / 60:.0f}분)")
-            if session is MarketSession.CLOSED and self.portfolio.open_positions():
+            # 장 밖에도 주기적으로 잔고를 대조해 평가가격·현금을 증권사 값으로 맞춘다(대시보드 총자산 = MTS 순자산, 11/15)
+            if self._loops % OFFHOURS_SYNC_LOOPS == 0 and self._loops > 0 and not self.s.USE_MOCK_MODE:
+                await self._sync_portfolio()
+            if self.portfolio.open_positions():
                 # 장 종료 후에는 평가만 갱신
                 self.portfolio.mark_prices(self._sane_prices())
             return
@@ -2995,7 +3036,7 @@ class TradingEngine:
         auth = getattr(self.broker, "auth", None)
         return {
             "competition": self._competition_snapshot(),
-            "portfolio": self.portfolio.snapshot(),
+            "portfolio": self._portfolio_snapshot(),
             "risk": self.risk.snapshot(self.portfolio),
             "strategy": self.strategy.snapshot(),
             "triggers": (self._board if self._board["day"] == self._now().strftime("%Y%m%d")

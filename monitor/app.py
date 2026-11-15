@@ -89,6 +89,8 @@ _HTML = r"""<!DOCTYPE html>
   .delta{display:flex;align-items:baseline;gap:18px;margin-top:12px;font-size:14px;flex-wrap:wrap;}
   .delta>span{white-space:nowrap;}
   .delta i{font-style:normal;color:var(--dim);font-size:12px;margin-right:5px;}
+  .delta.note{margin-top:8px;font-size:12.5px;color:var(--dim);}
+  .delta.note b{color:var(--fg);font-weight:600;}
   .chart{position:relative;}
   .chart svg{display:block;width:100%;height:150px;}
   .chart .empty{position:absolute;inset:0;display:grid;place-items:center;color:var(--faint);font-size:13px;}
@@ -219,6 +221,7 @@ _HTML = r"""<!DOCTYPE html>
       <div class="equity-label">총자산</div>
       <div class="equity" id="equity">—</div>
       <div class="delta" id="delta"></div>
+      <div class="delta note" id="brokerEq"></div>
     </div>
     <figure class="chart" style="margin:0">
       <svg id="spark" viewBox="0 0 1000 150" preserveAspectRatio="none" aria-label="자산 추이"></svg>
@@ -447,6 +450,13 @@ async function refresh() {
     ['누적', p.total_return_pct], ['당일', p.daily_pnl_pct],
   ].map(([k,v]) => `<span><i>${k}</i><b class="${tone(v)}">${signed(v)}%</b></span>`).join('')
    + `<span><i>현금</i>${num(p.cash)}</span><span><i>익스포저</i>${num((p.gross_exposure||0)*100,1)}%</span>`;
+
+  // 증권사가 매긴 순자산(MTS·대회 순위 기준)과 엔진 자산의 차이 — 장 밖에는 0이어야 한다
+  const be = p.broker_equity, bts = (p.broker_equity_ts||'').slice(11,16);
+  $('brokerEq').innerHTML = (be===null||be===undefined) ? '' :
+    (Math.abs(p.broker_gap||0) < 1
+      ? `<span>증권사 순자산과 일치 <b>${num(be)}원</b></span><span><i>${bts} 대조</i></span>`
+      : `<span>증권사 순자산 <b>${num(be)}원</b></span><span>차이 <b>${signed(p.broker_gap,0)}원</b></span><span><i>${bts} 대조</i></span>`);
 
   drawSpark(s.history||[]);
   drawGauge(r, {soft: sys.mdd_soft ?? 7, hard: sys.mdd_hard ?? 12});
