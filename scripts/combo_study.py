@@ -228,6 +228,10 @@ def main() -> int:
         ma5p = sh(pd.Series(c).rolling(5, min_periods=5).mean().to_numpy(float))
         ma20p = sh(pd.Series(c).rolling(20, min_periods=20).mean().to_numpy(float))
         ma60p = sh(pd.Series(c).rolling(60, min_periods=60).mean().to_numpy(float))
+        # 숲 보기(11/16) — 당일 종가 포함 이평(종가 확정 뒤 아침 판정용: c[t] < ma[t] → 다음 날 시가)
+        ma5c = pd.Series(c).rolling(5, min_periods=5).mean().to_numpy(float)
+        ma10c = pd.Series(c).rolling(10, min_periods=10).mean().to_numpy(float)
+        ma20c = pd.Series(c).rolling(20, min_periods=20).mean().to_numpy(float)
 
         fd = pd.read_csv(_fd(sym), dtype={"ts": str})
         fd = fd[fd["ts"].str[:8] >= args.since]
@@ -501,6 +505,83 @@ def main() -> int:
                 arms["j2h"] = _multi([119, 239, 359])
                 arms["j2h_1519"] = _multi([119, 239, 359, 379])
                 arms["j8"] = _multi([14, 29, 59, 179, 239, 299, 359])      # 09:00(아침)·09:15·09:30·10:00·12:00·13:00·14:00·15:00
+
+                def _istop(k_s: float, d1_only: bool, tv_fade: Optional[float] = None, k_daily: float = 0.03) -> Dict[str, Any]:
+                    """장중 가격 손절(11/16): 분봉 종가 ≤ 매수가 x(1-k) 이면 다음 분 시가 매도. d1_only 면 진입일만 본다(실패 돌파 잡기),
+                    아니면 매일 본다(하드스톱). tv_fade 가 있으면 가격 조건에 더해 '직전 5분 거래대금 < 발동 창 분당 평균 x tv_fade'
+                    (거래가 식으며 빠질 때만). 그 밖의 날·시간은 지금 규칙(아침 판정: 종가 −k_daily · vol_alive → 시가)과 같다."""
+                    jr0 = jrow.get(i)
+                    rate0 = (TV[jr0, :entry_mi].sum() / max(1, entry_mi)) if jr0 is not None else np.nan
+                    for t_ in range(i, i + args.max_hold):
+                        if t_ >= len(c):
+                            break
+                        if t_ > i:
+                            pc_ = c[t_ - 1]
+                            hit_ = bool(np.isfinite(pc_) and pc_ > 0 and
+                                        ((args.stop > 0 and pc_ / entry_px - 1.0 <= -args.stop) or pc_ <= entry_px * (1.0 - k_daily)))
+                            if not hit_:
+                                b_ = burst[t_ - 1]
+                                hit_ = not (np.isfinite(b_) and b_ >= args.hold_vol)
+                            if hit_ and np.isfinite(o[t_]) and o[t_] > 0:
+                                return {"exit_d": cal[ts[t_]], "when": "open", "exit_min": -1,
+                                        "ret": float(o[t_]) / entry_px - 1.0 - cost}
+                            if d1_only:
+                                continue
+                        j_ = jrow.get(t_)
+                        if j_ is None:
+                            continue
+                        start_m = entry_mi + 1 if t_ == i else 0
+                        row_ = CL[j_]
+                        for m_ in range(start_m, N_MIN):
+                            px_ = row_[m_]
+                            if not (np.isfinite(px_) and px_ > 0) or px_ > entry_px * (1.0 - k_s):
+                                continue
+                            if tv_fade is not None:
+                                lo_m = max(0, m_ - 4)
+                                rate_ = TV[j_, lo_m:m_ + 1].sum() / (m_ + 1 - lo_m)
+                                if not (np.isfinite(rate0) and rate0 > 0 and rate_ < rate0 * tv_fade):
+                                    continue
+                            nx_ = OP[j_, m_ + 1] if m_ + 1 < N_MIN else np.nan
+                            fill_ = float(nx_) if np.isfinite(nx_) and nx_ > 0 else float(px_)
+                            return {"exit_d": cal[ts[t_]], "when": "intra", "exit_min": m_ + 1,
+                                    "ret": fill_ / entry_px - 1.0 - cost}
+                    e_ = min(i + args.max_hold, len(c) - 1)
+                    return {"exit_d": cal[ts[e_]], "when": "close", "exit_min": EOD_MIN,
+                            "ret": float(c[e_]) / entry_px - 1.0 - cost}
+                def _dstop_or(ma_arr: np.ndarray, k_s: float = 0.03, replace: bool = False) -> Dict[str, Any]:
+                    """아침 판정에 '종가 < N일 이평(당일 포함)' 을 더한다(replace=False: 종가 −3% 와 OR, True: 이평만). 매도는 다음 날 시가."""
+                    def cond(t_):
+                        if not np.isfinite(c[t_]):
+                            return False
+                        below = np.isfinite(ma_arr[t_]) and c[t_] < ma_arr[t_]
+                        return bool(below if replace else (below or c[t_] <= entry_px * (1.0 - k_s)))
+                    return _daily(cond)
+                arms["d3_ma5x"] = _dstop_or(ma5c)
+                arms["d3_ma10x"] = _dstop_or(ma10c)
+                arms["d3_ma20x"] = _dstop_or(ma20c)
+                arms["ma5x_only"] = _dstop_or(ma5c, replace=True)
+                arms["ma10x_only"] = _dstop_or(ma10c, replace=True)
+                arms["be_d1"] = _istop(0.0, True)
+                arms["be1_d1"] = _istop(0.01, True)
+                arms["be2_d1"] = _istop(0.02, True)
+                arms["be_all"] = _istop(0.0, False)
+                arms["istop5"] = _istop(0.05, False)
+                arms["istop7"] = _istop(0.07, False)
+                arms["istop10"] = _istop(0.10, False)
+                arms["befade_d1"] = _istop(0.0, True, tv_fade=0.3)
+                arms["be1fade_d1"] = _istop(0.01, True, tv_fade=0.3)
+                # 조건부용: 진입일에 매수가 아래로 처음 내려온 분과 그 다음 분 시가(없으면 NaN)
+                jr0 = jrow.get(i)
+                touch_m, touch_px = -1, np.nan
+                if jr0 is not None:
+                    row0 = CL[jr0]
+                    for m_ in range(entry_mi + 1, N_MIN):
+                        if np.isfinite(row0[m_]) and 0 < row0[m_] < entry_px:
+                            touch_m = m_
+                            nx_ = OP[jr0, m_ + 1] if m_ + 1 < N_MIN else np.nan
+                            touch_px = float(nx_) if np.isfinite(nx_) and nx_ > 0 else float(row0[m_])
+                            break
+                arms["_touch"] = {"m": touch_m, "px": touch_px}
                 arms["down2"] = _daily(lambda t_: t_ >= i + 2 and np.isfinite(c[t_]) and c[t_] < c[t_ - 1] < c[t_ - 2])
                 arms["tp1_eod"] = _tp(0.01, False)
                 arms["tp2_eod"] = _tp(0.02, False)
@@ -557,6 +638,9 @@ def main() -> int:
                     ma = {"px>ma5": px >= ma5p[i], "px>ma20": px >= ma20p[i], "px>ma60": px >= ma60p[i],
                           "ma5>ma20": ma5p[i] >= ma20p[i], "ma20up": ma20p[i] >= ma20p[i - 1],
                           "px<ma20": px < ma20p[i],
+                          "ma60up": ma60p[i] >= ma60p[i - 1],
+                          "dist20": (px / ma20p[i] - 1.0) if ma20p[i] > 0 else np.nan,   # 20일 이평 대비 이격
+                          "dist60": (px / ma60p[i] - 1.0) if ma60p[i] > 0 else np.nan,
                           # 직전 3·5일 상승폭(전일 종가 ÷ 3·5일 전 종가) — 과열 제외 필터용(11/15)
                           "run3": float(c[i - 1] / c[i - 4] - 1.0) if c[i - 4] > 0 else np.nan,
                           "run5": float(c[i - 1] / c[i - 6] - 1.0) if c[i - 6] > 0 else np.nan}
@@ -657,6 +741,13 @@ def main() -> int:
                      ("j1200", "아침 + 12:00 판정"), ("j3h", "3시간 텀: 아침 + 12:00 + 15:00"),
                      ("j2h", "2시간 텀: 아침 + 11:00 + 13:00 + 15:00"), ("j2h_1519", "2시간 텀 + 15:19"),
                      ("j8", "8번: 아침 + 09:15·09:30·10:00·12:00·13:00·14:00·15:00"),
+                     ("d3_ma5x", "종가 −3% 또는 종가 < 5일 이평 → 익일 매도"), ("d3_ma10x", "종가 −3% 또는 종가 < 10일 이평 → 익일 매도"),
+                     ("d3_ma20x", "종가 −3% 또는 종가 < 20일 이평 → 익일 매도"), ("ma5x_only", "종가 < 5일 이평만(−3% 대신) → 익일 매도"),
+                     ("ma10x_only", "종가 < 10일 이평만 → 익일 매도"),
+                     ("be_d1", "진입일 장중 매수가 아래 → 다음 분 매도(실패 돌파)"), ("be1_d1", "진입일 장중 매수가 −1% 아래 → 매도"),
+                     ("be2_d1", "진입일 장중 매수가 −2% 아래 → 매도"), ("be_all", "매일 장중 매수가 아래 → 매도(본전 스톱)"),
+                     ("istop5", "장중 하드스톱 −5%"), ("istop7", "장중 하드스톱 −7%"), ("istop10", "장중 하드스톱 −10%"),
+                     ("befade_d1", "진입일 매수가 아래 & 5분 거래대금 < 발동 분당 x0.3"), ("be1fade_d1", "진입일 매수가 −1% 아래 & 거래 식음 x0.3"),
                      ("tp1_eod", "익절 +1% · 못 닿으면 종가"), ("tp2_eod", "익절 +2% · 못 닿으면 종가"),
                      ("tp3_eod", "익절 +3% · 못 닿으면 종가"), ("tp2_hold", "익절 +2% · 못 닿으면 보유"),
                      ("tp3_hold", "익절 +3% · 못 닿으면 보유"), ("tp5_hold", "익절 +5% · 못 닿으면 보유")]
@@ -692,6 +783,24 @@ def main() -> int:
             ("종목 전일比 ≥ +3%", lambda e: e["chase"] >= 0.03),
             ("종목 전일比 < +5%", lambda e: e["chase"] < 0.05),
         ]
+        forest = [
+            ("현재가 > 5일 이평", lambda e: e["ma"]["px>ma5"]),
+            ("현재가 > 20일 이평", lambda e: e["ma"]["px>ma20"]),
+            ("현재가 > 60일 이평", lambda e: e["ma"]["px>ma60"]),
+            ("5일 > 20일 이평(정배열)", lambda e: e["ma"]["ma5>ma20"]),
+            ("20일 이평 상승 중", lambda e: e["ma"]["ma20up"]),
+            ("60일 이평 상승 중", lambda e: e["ma"]["ma60up"]),
+            ("20일 이평 위 & 상승 중", lambda e: e["ma"]["px>ma20"] and e["ma"]["ma20up"]),
+            ("20일 이평 대비 이격 < +10%", lambda e: e["ma"]["dist20"] < 0.10),
+            ("20일 이평 대비 이격 < +20%", lambda e: e["ma"]["dist20"] < 0.20),
+            ("20일 이평 대비 이격 ≥ +20% (반대)", lambda e: e["ma"]["dist20"] >= 0.20),
+            ("60일 이평 대비 이격 < +30%", lambda e: e["ma"]["dist60"] < 0.30),
+            ("현재가 < 20일 이평 (반대)", lambda e: e["ma"]["px<ma20"]),
+            ("3일 상승 < 20% & 20일 이평 위", lambda e: e["ma"]["run3"] < 0.20 and e["ma"]["px>ma20"]),
+            ("3일 상승 < 20% & 이격20 < 10%", lambda e: e["ma"]["run3"] < 0.20 and e["ma"]["dist20"] < 0.10),
+        ]
+        for name, f in forest:
+            cells[f"[숲필터] + {name}"] = ([e for e in ok_evs if f(e)], "dstop3")
         cells["[진입필터] 기준(채택 진입 · 종가 −3%)"] = (ok_evs, "dstop3")
         for name, f in ent_cells:
             cells[f"[진입필터] + {name}"] = ([e for e in ok_evs if f(e)], "dstop3")
