@@ -356,6 +356,13 @@ class Settings(BaseSettings):
         description="확정 종가 ≤ 평단 x(1-k)이면 다음 날 시가 매도. 0이면 '종가 ≤ 평단'(FROM_DAY=2와 함께 '수익 없으면 매도')")
     EXIT_CLOSE_STOP_FROM_DAY: int = Field(
         default=1, description="몇 일째 종가부터 보는지(1=진입일 종가부터, 2=진입 다음 날 종가부터)")
+    # 장중 하드스톱 — 11/16 측정(`failed_breakout_study.py`, 같은 지문·431창, 채택 진입·종가 −3% 위): 분봉 종가 ≤ 매수가 x(1-k) → 다음 분 시가 매도.
+    #   −5%: +2.1% · 손실 41.3% · −10% 이하 3.5%   **−7%: +2.6% · 36.0% · 4.6%**   −10%: +2.5% · 34.1% · 8.4%   (지금 +2.8% · 32.9% · 6.7%)
+    #   평균 −0.2%p(표준오차 안)로 −10% 꼬리를 6.7 → 4.6%로 줄이는 보험. 11/16 사용자 결정으로 −7% 채택(서버 .env).
+    EXIT_INTRADAY_STOP_PCT: float = Field(
+        default=0.0, description="장중 하드스톱: 현재가 ≤ 평단 x(1-k)가 CONFIRM_SEC 동안 이어지면 바로 매도. 0이면 끔(진입일 포함 매일)")
+    EXIT_INTRADAY_STOP_CONFIRM_SEC: float = Field(
+        default=20.0, description="하드스톱 선 아래가 이만큼 이어져야 판다(측정의 '분봉 종가' 판정 근사 · 시세 한 건 튐 방지)")
     OPENING_ABOVE_PREV_CLOSE: bool = Field(
         default=False,
         description="장 시작 판정에서 현재가가 전일 종가 이하인 발동은 사지 않는다(복수시세 prdy_ctrt, 없으면 전일 일봉 종가)")

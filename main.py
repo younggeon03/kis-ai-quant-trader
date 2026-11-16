@@ -162,6 +162,8 @@ class TradingEngine:
         # 종목 → (마지막 확정 봉 날짜, 그 종가). 종가 기준 청산(`EXIT_CLOSE_STOP_*`) 입력 — `_refresh_alive`가 만든다.
         self._ref_close: Dict[str, tuple] = {}
         self._ref_stale: bool = False
+        # 장중 하드스톱(`EXIT_INTRADAY_STOP_*`) — 종목 → 선 아래를 처음 본 시각. 선 위로 올라오면 지운다.
+        self._istop_seen: Dict[str, dt.datetime] = {}
         # 초기 잔고 동기화가 실패했으면(야간 정산 시간의 빈 응답 등) 참 — 성공할 때까지 다시 시도하고 그동안 매매하지 않는다.
         # 11/13 16:57 재시작이 "현금 0 · 보유 0"으로 올라와 보유 2종목을 잃은 채 주말을 넘길 뻔했다.
         self._sync_pending: bool = False
@@ -386,6 +388,47 @@ class TradingEngine:
                 out.append(ExitOrder(symbol=symbol, qty=int(pos.qty), reason=ExitReason.CLOSE_STOP,
                                      price=float(prices.get(symbol, close)),
                                      detail=f"{ref_ts} 종가 {close:,.0f} ≤ 평단 {pos.avg_price:,.0f} x(1-{k:g})"))
+        return out
+
+    def _intraday_stop_exits(self, now: dt.datetime, prices: Dict[str, float]) -> List[ExitOrder]:
+        """장중 하드스톱(`EXIT_INTRADAY_STOP_*`) — 현재가 ≤ 평단 x(1-k)가 `CONFIRM_SEC` 동안 이어지면 지금 판다.
+
+        측정(`combo_study.py`의 `_istop(k, d1_only=False)`)은 '분봉 종가 ≤ 매수가 x(1-k) → 다음 분 시가 매도'이고
+        진입일부터 매일 본다. 실거래는 3초 루프의 현재가라 분봉 종가 대신 '선 아래가 20초 이어짐'으로 근사한다 —
+        한 건 튄 시세(10/20 10배 가격 사건)로 팔지 않기 위해서다. 가격은 `_sane_prices`(제한폭 밖 제거)를 받는다.
+        요건 포지션은 보지 않는다. 종가 손절·vol_alive 가 이미 낸 종목은 호출부가 뺀다.
+        """
+        k = float(self.s.EXIT_INTRADAY_STOP_PCT)
+        if k <= 0:
+            self._istop_seen.clear()
+            return []
+        confirm = float(self.s.EXIT_INTRADAY_STOP_CONFIRM_SEC)
+        out: List[ExitOrder] = []
+        held = self.portfolio.open_positions()
+        for symbol in list(self._istop_seen):
+            if symbol not in held:
+                self._istop_seen.pop(symbol, None)
+        for symbol, pos in held.items():
+            if symbol in self._compliance_syms or pos.qty <= 0 or pos.avg_price <= 0:
+                continue
+            px = float(prices.get(symbol, 0.0))
+            if px <= 0:
+                continue                      # 시세가 없으면 판정하지 않는다(묵은 가격은 `_check_quote_staleness`가 경고)
+            level = float(pos.avg_price) * (1.0 - k)
+            if px > level:
+                if symbol in self._istop_seen:
+                    self._istop_seen.pop(symbol, None)
+                continue
+            first = self._istop_seen.get(symbol)
+            if first is None:
+                self._istop_seen[symbol] = now
+                logger.info(f"[하드스톱] {symbol} {px:,.0f} ≤ 평단 {pos.avg_price:,.0f} x(1-{k:g}) = {level:,.0f} — "
+                            f"{confirm:.0f}초 뒤에도 아래면 매도")
+                continue
+            if (now - first).total_seconds() < confirm:
+                continue
+            out.append(ExitOrder(symbol=symbol, qty=int(pos.qty), reason=ExitReason.INTRADAY_STOP, price=px,
+                                 detail=f"장중 {px:,.0f} ≤ 평단 {pos.avg_price:,.0f} x(1-{k:g}) {confirm:.0f}초 유지"))
         return out
 
     def _stale_reference(self, today: str) -> Optional[str]:
@@ -2406,6 +2449,9 @@ class TradingEngine:
         # 종가 기준 청산(아침 판정) — 리스크 관문이 이미 낸 종목은 중복하지 않는다
         taken = {e.symbol for e in exits}
         exits.extend(o for o in self._close_stop_exits(today, prices) if o.symbol not in taken)
+        # 장중 하드스톱(11/16) — 현재가가 평단 −k% 아래로 CONFIRM_SEC 유지되면 지금 판다
+        taken = {e.symbol for e in exits}
+        exits.extend(o for o in self._intraday_stop_exits(now, prices) if o.symbol not in taken)
         for order in exits:
             price = prices.get(order.symbol, order.price)
             qty = self._sellable_qty(order.symbol, order.qty)

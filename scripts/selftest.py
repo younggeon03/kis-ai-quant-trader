@@ -1492,6 +1492,30 @@ async def _check_live_vol_alive(s) -> str:
             eng.portfolio.positions[sym].avg_price = 1000.0
         assert eng._close_stop_exits(today, {}) == [], "꺼져 있는데 종가 기준 청산을 냈다"
 
+        # 장중 하드스톱(EXIT_INTRADAY_STOP_*, 11/16) — 현재가 ≤ 평단 x(1-k)가 CONFIRM_SEC 이어져야 판다(한 건 튐 방지)
+        s.EXIT_INTRADAY_STOP_PCT, s.EXIT_INTRADAY_STOP_CONFIRM_SEC = 0.07, 20.0
+        t0 = dt.datetime(2026, 9, 26, 10, 0, 0)
+        px = {"AAA": 929.0, "BBB": 931.0, "CCC": 920.0}             # 선 = 930: AAA·CCC 아래, BBB 위
+        assert eng._intraday_stop_exits(t0, px) == [], "선 아래를 처음 본 루프에 바로 팔았다(확인 대기 없음)"
+        assert set(eng._istop_seen) == {"AAA", "CCC"}, f"확인 대기 기록 오류: {eng._istop_seen}"
+        assert eng._intraday_stop_exits(t0 + dt.timedelta(seconds=10), px) == [], "20초 전에 팔았다"
+        got = {o.symbol: o for o in eng._intraday_stop_exits(t0 + dt.timedelta(seconds=20), px)}
+        assert set(got) == {"AAA", "CCC"} and got["AAA"].reason.value == "INTRADAY_STOP" and got["AAA"].qty == 100, \
+            f"하드스톱 판정 오류: {got}"
+        eng._istop_seen = {"AAA": t0}
+        assert eng._intraday_stop_exits(t0 + dt.timedelta(seconds=5), {"AAA": 935.0}) == [] and "AAA" not in eng._istop_seen, \
+            "선 위로 올라왔는데 확인 대기가 안 풀렸다"
+        eng._istop_seen = {"AAA": t0}
+        assert eng._intraday_stop_exits(t0 + dt.timedelta(seconds=60), {}) == [], "시세가 없는데 하드스톱을 냈다"
+        eng._compliance_syms["AAA"] = today
+        eng._istop_seen = {}
+        eng._intraday_stop_exits(t0, px); got = eng._intraday_stop_exits(t0 + dt.timedelta(seconds=30), px)
+        assert {o.symbol for o in got} == {"CCC"}, f"요건 포지션을 하드스톱으로 팔았다: {got}"
+        eng._compliance_syms.pop("AAA", None)
+        s.EXIT_INTRADAY_STOP_PCT = 0.0
+        assert eng._intraday_stop_exits(t0 + dt.timedelta(seconds=60), px) == [] and not eng._istop_seen, \
+            "꺼져 있는데 하드스톱을 냈다"
+
         # 야간 정산 시간의 빈 잔고 응답(11/13 17:03 실측: output1 [{}, {}] · output2 [{}] · rt_cd 0)은 실패로 올린다
         from api.base import AbstractBroker as _AB
 
