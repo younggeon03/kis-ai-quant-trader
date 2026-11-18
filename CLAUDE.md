@@ -46,7 +46,13 @@ BANKIS_SSH_USER=root bash deploy/oracle/deploy.sh $BANKIS_SERVER status
 scripts/open_dashboard.cmd                    # SSH 터널(8500) + 관제 화면(localhost:8500)
 ```
 
-- **직접 매매 기간(2026-11-18~, 사용자 결정)**: 엔진 매수 차단은 서버에 `state/NO_BUY` 파일을 만들면 된다(재시작 불필요,
+- **마지막 이틀(11/19~20) 엔진 재가동 — 목표 이틀 누적 +10%(11/18 저녁, 사용자 결정)**: 서버 `.env`(백업 `.env.bak.20261118`)
+  `MAX_POSITIONS=1` · `FIXED_POSITION_WEIGHT=0.98` · `MAX_POSITION_WEIGHT=1.0` · `OPENING_RANK_BY=atr10`(장 시작 판정 통과 종목 중
+  10일 평균 고저폭 큰 순) · `OPEN_FLATTEN_DATE=2026-11-19`(09:00 그 전에 산 종목 매도 → 09:04 판정으로 갈아타기) ·
+  `EXIT_TAKE_PROFIT_PCT=0.103`(순수익 +10% 익절) · 11/20 15:10 `FINAL_FLATTEN`. 손절·`vol_alive`는 11/17부터 꺼져 있다. `NO_BUY`·`NO_SELL` 삭제.
+  측정(`scripts/two_day_study.py`·`two_day_cv.py`, 지문 `d30cf1675546e7f8`): P(이틀 ≥ +10%) 배수 순 22.9% · ATR10 순 26.6%
+  (시간 순 5조각 중 4조각 우세) · 이틀 평균 +0.6~0.9% · 손실 48%. 종목 비율 규정 상수 `MAX_SINGLE_WEIGHT`는 1.0(규정 없음, 11/17).
+- **직접 매매 기간(2026-11-18 낮, 사용자 결정 — 저녁에 위 재가동으로 바뀜)**: 엔진 매수 차단은 서버에 `state/NO_BUY` 파일을 만들면 된다(재시작 불필요,
   지우면 풀린다 · `.env` `ENGINE_NO_BUY=true`도 같다). **매도도 막는다**(`state/NO_SELL` · `ENGINE_NO_SELL`) — 손절 25%·
   `vol_alive`·11/20 15:10 전량 매도·요건 청산·미체결 취소(앱 주문 포함)가 전부 꺼지고 청산은 사람이 한다
   (사용자는 하루 +5% 단기 차익). 모든 엔진 주문이 지나는 `_submit`에서 막는다. 관제 화면에 지수 종목 거래대금·등락률 순위와
