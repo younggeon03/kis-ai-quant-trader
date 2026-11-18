@@ -935,14 +935,16 @@ class TradingEngine:
             return []
         return [str(x).zfill(6) for x in (data.get("symbols") or []) if str(x).strip()]
 
-    def _rank_kick(self, now: dt.datetime) -> None:
-        """조회 간격이 됐으면 지수 종목 복수시세를 태스크로 띄운다(루프를 막지 않는다 — 12호출 약 12초)."""
+    def _rank_kick(self, now: dt.datetime, min_sec: Optional[float] = None) -> None:
+        """조회 간격이 됐으면 지수 종목 복수시세를 태스크로 띄운다(루프를 막지 않는다 — 12호출 약 12초).
+        장 밖에서는 `min_sec`(10분)로 드물게 부른다 — 마감 뒤에도 그날 최종 순위를 볼 수 있게(11/18)."""
         if not self.s.DASH_RANK or self.dashboard is None:
             return
         if self._rank_task is not None and not self._rank_task.done():
             return
         t = now.timestamp()
-        if t - self._rank_last_poll < float(self.s.DASH_RANK_POLL_SEC):
+        gap = float(self.s.DASH_RANK_POLL_SEC) if min_sec is None else max(float(min_sec), float(self.s.DASH_RANK_POLL_SEC))
+        if self._rank_last_poll and t - self._rank_last_poll < gap:
             return
         self._rank_last_poll = t
         self._rank_task = asyncio.create_task(self._rank_poll(now))
@@ -2421,6 +2423,7 @@ class TradingEngine:
             if self.portfolio.open_positions():
                 # 장 종료 후에는 평가만 갱신
                 self.portfolio.mark_prices(self._sane_prices())
+            self._rank_kick(now, min_sec=600)   # 장 밖에도 순위판(마감 값) — 기동 직후 1회, 이후 10분마다
             return
 
         # --- 시세 갱신 ---
