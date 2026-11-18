@@ -211,6 +211,7 @@ def main() -> int:
     ap.add_argument("--daily-dir", default="data/cache")
     ap.add_argument("--since", default="20250101")
     ap.add_argument("--out", default="reports/scalp_study.json")
+    ap.add_argument("--tp", type=float, default=0.0, help="0보다 크면 익절 폭 하나만 짧은 격자로(3분 창)")
     args = ap.parse_args()
 
     s = get_settings()
@@ -230,7 +231,7 @@ def main() -> int:
         if len(order) < 50:
             continue
         O, H, L, Cf, TVm, PC = day_matrix(per_day[dy], order)
-        pre[dy] = (O, H, L, Cf, {w: cross_lists(order, Cf, TVm, PC, w) for w in WINS})
+        pre[dy] = (O, H, L, Cf, {w: cross_lists(order, Cf, TVm, PC, w) for w in (WINS if args.tp <= 0 else (3,))})
         if n % 50 == 0:
             print(f"  순위 {n}/{len(days)} ({time.time() - t1:.0f}s)", flush=True)
 
@@ -246,6 +247,13 @@ def main() -> int:
         grid.append(dict(base, sl=sl, end=90))
         grid.append(dict(base, sl=sl, pick="random"))
     grid.append(dict(base, tp=0.0, sl=0.0, n_max=1))
+    if args.tp > 0:      # 익절 폭 하나만(11/18 0.5% 질문)
+        grid = []
+        for sl, n_max, ext in product([0.0, 0.01, 0.02, 0.03], [5, 10], [True, False]):
+            grid.append(dict(base, tp=args.tp, sl=sl, n_max=n_max, extend=ext))
+        grid.append(dict(base, tp=args.tp, sl=0.0, tp_buf=0.002))
+        grid.append(dict(base, tp=args.tp, sl=0.0, pick="random"))
+        grid.append(dict(base, tp=args.tp, sl=0.02, pick="random"))
     results = []
     for g in grid:
         rng = np.random.default_rng(7)
@@ -256,7 +264,7 @@ def main() -> int:
         results.append(r)
 
     def lab(g):
-        return (f"{'누적' if g['win'] == 0 else str(g['win']) + '분'} 익절{g['tp']:.0%} 손절{g['sl']:.1%} {g['n_max']:>2}회 첫매수09:{g['start'] + 1:02d} 끝{9 + g['end'] // 60}:{g['end'] % 60:02d}"
+        return (f"{'누적' if g['win'] == 0 else str(g['win']) + '분'} 익절{g['tp']:.1%} 손절{g['sl']:.1%} {g['n_max']:>2}회 첫매수09:{g['start'] + 1:02d} 끝{9 + g['end'] // 60}:{g['end'] % 60:02d}"
                 f"{' 연속+2%' if g['extend'] else ' 연속보유X'}{' 체결+0.2%' if g['tp_buf'] else ''}{' 무작위' if g['pick'] == 'random' else ''}")
 
     print("\n설정 | 하루 거래 | 거래당 평균 | 승률 | 익절1%/연속2%/손절/시간 | 하루 평균 | 하루 중앙 | 손실일 | −3%↓일 | +5%↑일 | 2일 평균 | 2일 손실 | 2일 +10%↑")
