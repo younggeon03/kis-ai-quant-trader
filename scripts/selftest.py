@@ -2754,6 +2754,125 @@ async def test_server_reliability():
             "미체결 매도 취소·재대조 · 대회 마지막 날 전량 매도·종료 뒤 매수 금지 · WS 여러 건 체결가 파싱·미구독 종목 버림·멈춘 연결 재연결 모두 작동")
 
 
+@check("27. 직접 매매 스위치(매수·매도) · 지수 종목 순위판")
+async def test_rank_board():
+    """직접 매매 기간(2026-11-18~) — 엔진 매수 차단 스위치와 관제 화면 순위판.
+
+    보는 것: (1) 순위판은 지수 종목만, 거래대금 큰 순, 전일 종가를 모르면 등락률 없음(0%로 쓰지 않는다),
+    소형(시총 1조 이하)·보유 표시 (2) 관심 종목에 거래대금·등락률 순위가 붙고 지수 밖 관심 종목도 보인다
+    (3) `state/NO_BUY` 파일·`ENGINE_NO_BUY`가 신규 매수를 막고, 지우면 풀린다.
+    """
+    import datetime as dt
+
+    from main import TradingEngine
+    from monitor.ranking import build_rank_rows, pick_rows
+
+    snap = {
+        "A": {"price": 11000.0, "turnover": 5e10, "prev_close": 10000.0, "name": "에이"},
+        "B": {"price": 9000.0, "turnover": 9e10, "prev_close": 0.0, "name": "비"},     # 전일 종가는 엔진 값
+        "C": {"price": 5000.0, "turnover": 1e11, "prev_close": 0.0, "name": "씨"},     # 전일 종가 모름
+        "X": {"price": 3000.0, "turnover": 9e12, "prev_close": 2000.0, "name": "지수밖"},
+        "Z": {"price": 0.0, "turnover": 1e9, "prev_close": 100.0},                     # 시세 없음
+    }
+    index_of = {"A": "KOSDAQ150", "B": "KOSPI200", "C": "KOSPI200", "Z": "KOSPI200"}
+    rows = build_rank_rows(snap, index_of, market_cap={"A": 5e11, "B": 3e12},
+                           prev_close={"B": 10000.0}, held={"B"})
+    assert [r["symbol"] for r in rows] == ["C", "B", "A"], f"지수 밖·시세 없는 종목 제외 · 거래대금 순 실패: {rows}"
+    by = {r["symbol"]: r for r in rows}
+    assert by["A"]["chg_pct"] == 10.0 and by["B"]["chg_pct"] == -10.0, "등락률(복수시세 전일 종가 → 엔진 값 순)"
+    assert by["C"]["chg_pct"] is None, "전일 종가를 모르면 등락률은 None이어야 한다(0%면 순위가 거짓)"
+    assert by["A"]["small"] and not by["B"]["small"] and not by["C"]["small"], "소형주(시총 1조 이하) 표시"
+    assert by["B"]["held"] and not by["A"]["held"], "보유 표시"
+    pk = pick_rows(rows, ["A", "Q"])
+    assert pk[0]["tv_rank"] == 3 and pk[0]["chg_rank"] == 1, f"관심 종목 순위: {pk[0]}"
+    assert pk[1]["symbol"] == "Q" and pk[1]["tv_rank"] is None, "시세 없는 관심 종목은 빈 행"
+
+    s = make_settings()
+    saved = {k: getattr(s, k) for k in ("ENGINE_NO_BUY", "COMP_END", "FINAL_FLATTEN", "DASH_PICKS_FILE")}
+    try:
+        s.ENGINE_NO_BUY, s.COMP_END, s.FINAL_FLATTEN = False, "2026-11-20", True
+        Path(s.STATE_DIR).mkdir(parents=True, exist_ok=True)
+        flag = Path(s.STATE_DIR) / "NO_BUY"
+        flag.unlink(missing_ok=True)
+        eng = TradingEngine(s, enable_dashboard=False)
+        now = dt.datetime(2026, 11, 19, 9, 5)
+        assert not eng._entries_closed(now), "스위치가 꺼져 있는데 매수가 막혔다"
+        flag.write_text("", encoding="utf-8")
+        assert eng._entries_closed(now), "state/NO_BUY 파일이 매수를 막지 못했다"
+        flag.unlink()
+        assert not eng._entries_closed(now), "파일을 지웠는데 매수가 계속 막혔다(재시작 없이 풀려야 한다)"
+        s.ENGINE_NO_BUY = True
+        assert eng._entries_closed(now), "ENGINE_NO_BUY 가 매수를 막지 못했다"
+        s.ENGINE_NO_BUY = False
+        assert eng._entries_closed(dt.datetime(2026, 11, 20, 9, 5)), "마지막 날 매수 금지가 깨졌다"
+
+        # --- 엔진 배선: 복수시세 → 순위판(지수 종목만 + 지수 밖 관심 종목) ---
+        members = s.index_members()
+        mem = sorted(x for lst in members.values() for x in lst)[:3]
+        assert len(mem) == 3, "지수 멤버십 정보가 없다(UNIVERSE_FILE 확인)"
+        eng._dash_picks = [mem[0], "999999"]
+        eng._prev_daily = {mem[1]: (1000.0, 1.0, 1.0)}
+
+        class _Broker:
+            async def get_turnovers(self, syms):
+                assert "999999" in syms, "관심 종목이 조회 대상에 없다"
+                return {mem[0]: {"price": 1100.0, "turnover": 3e9, "prev_close": 1000.0, "name": "가"},
+                        mem[1]: {"price": 900.0, "turnover": 5e9, "prev_close": 0.0, "name": "나"},
+                        "999999": {"price": 500.0, "turnover": 1e8, "prev_close": 400.0, "name": "밖"}}
+        eng.broker = _Broker()
+        await eng._rank_poll(now)
+        rk = eng._rank
+        assert [r["symbol"] for r in rk["rows"]] == [mem[1], mem[0]], f"순위판 행: {rk['rows']}"
+        assert rk["rows"][0]["chg_pct"] == -10.0, "엔진 전일 종가로 등락률을 구하지 못했다"
+        assert [p["symbol"] for p in rk["picks"]] == [mem[0], "999999"], "관심 종목 순서"
+        assert rk["picks"][0]["tv_rank"] == 2 and rk["picks"][1]["chg_pct"] == 25.0, f"관심 종목 값: {rk['picks']}"
+        assert eng.state_snapshot()["rank"] is rk, "상태 스냅샷에 순위판이 없다"
+
+        # --- 매도 차단: 모든 매도·취소가 막히고, 끄면 다시 판다 ---
+        from core.events import OrderAck
+        sent, cancels = [], []
+
+        class _Broker2:
+            async def submit_order(self, req):
+                sent.append((req.side.value, req.symbol))
+                return OrderAck(success=True, order_no=f"N{len(sent)}", symbol=req.symbol,
+                                side=req.side, qty=req.qty, price=req.price)
+
+            async def cancel_order(self, org_no, order_no, qty=0, all_qty=True):
+                cancels.append(order_no)
+                return {"rt_cd": "0"}
+
+            async def inquire_open_orders(self):        # 앱에서 낸 매도(엔진은 모르는 주문)
+                return {"rt_cd": "0", "output1": [{"odno": "APP1", "pdno": mem[0], "rmn_qty": "10"}]}
+
+            async def get_portfolio_state(self):
+                return eng.portfolio.cash, dict(eng.portfolio.positions)
+        eng.broker = _Broker2()
+        eng.portfolio.positions[mem[0]] = Position(symbol=mem[0], qty=10, avg_price=1000.0, last_price=1000.0)
+        nsell = Path(s.STATE_DIR) / "NO_SELL"
+        nsell.write_text("", encoding="utf-8")
+        assert not await eng._submit(mem[0], Side.SELL, 10, 1000.0, "STOP_LOSS|test"), "매도 차단 중 매도가 나갔다"
+        last_day = dt.datetime(2026, 11, 20, 15, 11)
+        await eng._final_flatten(last_day, {mem[0]: 1000.0})
+        eng.open_orders = {"APP1": {"symbol": mem[0], "side": "SELL", "qty": 10, "price": 1000.0,
+                                    "ts": (eng._now() - dt.timedelta(seconds=999)).isoformat()}}
+        await eng._sync_open_orders(max_age_seconds=1.0)
+        await eng._reprice_stale_sells(last_day)
+        assert not sent and not cancels, f"매도 차단 중 엔진이 팔거나 앱 주문을 취소했다: {sent} {cancels}"
+        assert eng.state_snapshot()["system"]["no_sell"], "관제 화면에 매도 차단 표시가 없다"
+        nsell.unlink()
+        assert await eng._submit(mem[0], Side.SELL, 10, 1000.0, "STOP_LOSS|test"), "차단을 풀었는데 못 판다"
+        assert sent == [("SELL", mem[0])], f"해제 뒤 매도: {sent}"
+    finally:
+        for k, v in saved.items():
+            setattr(s, k, v)
+        (Path(s.STATE_DIR) / "NO_BUY").unlink(missing_ok=True)
+        (Path(s.STATE_DIR) / "NO_SELL").unlink(missing_ok=True)
+    return ("순위판(지수 종목만·거래대금 순·전일 종가 모르면 등락률 없음·소형·보유 표시) · 관심 종목 순위·지수 밖 표시 · "
+            "state/NO_BUY·ENGINE_NO_BUY 매수 차단과 해제 · 마지막 날 매수 금지 유지 · "
+            "state/NO_SELL 매도 차단(청산·마지막 날 전량 매도·앱 주문 취소·매도 재접수 없음)과 해제 모두 작동")
+
+
 # ============================================================ 실행
 
 async def run_all() -> int:
@@ -2767,7 +2886,7 @@ async def run_all() -> int:
         test_intraday, test_intraday_book, test_decay_exits,
         test_orderbook_recorder, test_burst_wiring, test_opening_entry,
         test_sliding, test_sliding_wiring, test_compliance_trades,
-        test_server_reliability,
+        test_server_reliability, test_rank_board,
     ]
     print("\n" + "=" * 86)
     print(" KIS AI Quant Trader — 셀프 테스트")

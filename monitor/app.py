@@ -187,6 +187,15 @@ _HTML = r"""<!DOCTYPE html>
   .tape td:first-child{color:var(--faint);}
   .why{color:var(--dim);font-size:11.5px;}
 
+  /* 지수 종목 순위판 */
+  .rank-head{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:12px;}
+  .rank-head h2{margin:0;}
+  .rank-head label{font-size:12.5px;color:var(--dim);display:flex;align-items:center;gap:6px;cursor:pointer;}
+  .rank-head select{font:inherit;font-size:12.5px;color:var(--text);background:var(--surface);
+                    border:1px solid var(--rule);border-radius:2px;padding:3px 6px;}
+  .tag{font-size:10.5px;color:var(--faint);border:1px solid var(--rule);border-radius:2px;padding:0 4px;margin-left:5px;font-weight:400;}
+  .tag.held{color:var(--live);border-color:var(--live);}
+  .nobuy{color:var(--caution);font-weight:700;}
   .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--halt);
          color:#fff;font-size:13px;padding:9px 18px;border-radius:2px;display:none;}
   @media(max-width:980px){
@@ -247,6 +256,21 @@ _HTML = r"""<!DOCTYPE html>
     <section><h2>보유 포지션 <em id="posCount"></em></h2><table id="positions"></table></section>
     <section><h2>장 시작 판정 <em id="openNote"></em></h2><table id="openTbl"></table>
       <h2 style="margin-top:18px">장중 발동 <em id="slideNote"></em></h2><table id="slideTbl"></table></section>
+  </div>
+
+  <section>
+    <div class="rank-head">
+      <h2>지수 종목 순위 <em id="rankNote"></em></h2>
+      <label><input type="checkbox" id="rankSmall"> 시총 1조 이하만</label>
+      <label>지수 <select id="rankIdx"><option value="">전체</option><option>KOSPI200</option><option>KOSDAQ150</option></select></label>
+      <label>표시 <select id="rankTop"><option>10</option><option selected>20</option><option>30</option></select></label>
+    </div>
+    <h2>관심 종목 <em id="pickNote"></em></h2>
+    <table id="pickTbl"></table>
+  </section>
+  <div class="cols">
+    <section><h2>거래대금 상위 <em>장 시작부터 누적</em></h2><table id="tvTbl"></table></section>
+    <section><h2>등락률 상위 <em>전일 종가 대비</em></h2><table id="chgTbl"></table></section>
   </div>
 
   <div class="cols thirds">
@@ -417,6 +441,37 @@ function renderCompetition(c){
   }).join('');
 }
 
+// 지수 종목 순위판 — 엔진이 60초마다 복수시세로 만든 표(매매에는 쓰지 않는다)
+let lastRank = null;
+const eok = v => (v ? num(v / 1e8, 0) + '억' : '—');
+const rankName = x => esc(x.name || x.symbol) + `<span class="sub">${esc(x.symbol)}</span>`
+  + (x.held ? '<span class="tag held">보유</span>' : '') + (x.small ? '<span class="tag">소형</span>' : '');
+const chgCell = v => v === null || v === undefined ? '—' : `<span class="${tone(v)}">${signed(v)}%</span>`;
+function renderRank(rk) {
+  if (rk) lastRank = rk;
+  rk = lastRank;
+  if (!rk) return;
+  const small = $('rankSmall').checked, idx = $('rankIdx').value, top = +$('rankTop').value;
+  const pool = (rk.rows || []).filter(r => (!small || r.small) && (!idx || r.index === idx));
+  $('rankNote').textContent = rk.time ? `${rk.time} 기준 · ${(rk.rows || []).length}종목 · 60초마다` : '장중에 갱신됩니다';
+  const idxShort = s => ({KOSPI200: '코스피200', KOSDAQ150: '코스닥150'}[s] || s || '—');
+  $('tvTbl').innerHTML = rows(['#', '종목', '거래대금', '등락률', '현재가', '시총'],
+    pool.slice(0, top).map((r, i) => [String(i + 1), rankName(r), eok(r.turnover), chgCell(r.chg_pct),
+                                       num(r.price), eok(r.mcap)]), '데이터 없음');
+  const byChg = pool.filter(r => r.chg_pct !== null && r.chg_pct !== undefined)
+                    .sort((a, b) => b.chg_pct - a.chg_pct);
+  $('chgTbl').innerHTML = rows(['#', '종목', '등락률', '거래대금', '현재가', '시총'],
+    byChg.slice(0, top).map((r, i) => [String(i + 1), rankName(r), chgCell(r.chg_pct), eok(r.turnover),
+                                       num(r.price), eok(r.mcap)]), '데이터 없음');
+  const picks = rk.picks || [];
+  $('pickNote').textContent = picks.length ? `${picks.length}종목 · config/dash_picks.json` : '';
+  $('pickTbl').innerHTML = rows(['종목', '지수', '현재가', '등락률', '거래대금', '거래대금 순위', '등락률 순위', '시총'],
+    picks.map(r => [rankName(r), esc(idxShort(r.index)), num(r.price), chgCell(r.chg_pct), eok(r.turnover),
+                    r.tv_rank ? r.tv_rank + '위' : '—', r.chg_rank ? r.chg_rank + '위' : '—', eok(r.mcap)]),
+    '관심 종목이 없습니다');
+}
+['rankSmall', 'rankIdx', 'rankTop'].forEach(id => $(id).addEventListener('change', () => renderRank()));
+
 async function refresh() {
   if (holding) return;
   let s;
@@ -438,6 +493,8 @@ async function refresh() {
   const el = Math.round(sys.elapsed_sec||0);
   $('meta').innerHTML = [
     `<b>${esc(sys.mode||'—')}</b>`,
+    sys.no_buy ? '<span class="nobuy">엔진 매수 차단</span>' : '엔진 매수 중',
+    sys.no_sell ? '<span class="nobuy">엔진 매도 차단(손절·마감 매도 없음)</span>' : '엔진 매도 중',
     `장 ${esc({REGULAR:'정규장',PRE_AUCTION:'장전 동시호가',CLOSING_AUCTION:'마감 동시호가',AFTER_HOURS:'시간외',CLOSED:'휴장'}[sys.session]||sys.session||'—')}`,
     `유니버스 <b>${num(sys.universe)}</b>종목`,
     `루프 <b>${num(sys.loops)}</b>`,
@@ -496,6 +553,7 @@ async function refresh() {
     sl.slice(0,12).map(x => [nm(x), esc(String(x.time||'').slice(0,5)), 'x' + num(x.ratio,1), oc(x.outcome)]),
     '발동 없음');
 
+  renderRank(s.rank);
   drawRps(s.rps_history||[], rl);
 
   $('progLabel').textContent = pr.label || '';
