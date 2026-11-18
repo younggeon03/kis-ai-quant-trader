@@ -56,7 +56,7 @@ from core.events import (
     Signal,
 )
 from monitor.app import DashboardServer
-from monitor.ranking import build_rank_rows, pick_rows
+from monitor.ranking import build_rank_rows, pick_rows, cross_rows
 from strategy.ai_model import EnsembleAlphaStrategy
 from strategy.exit_rules import daily_alive_burst, vwap_fade
 from strategy.sliding import (LAST_ENTRY_MIN, SlidingWatcher, minute_turnover, rolling_sum,
@@ -974,7 +974,8 @@ class TradingEngine:
         by_extra = {r["symbol"]: r for r in extra_rows}
         picks = [dict(by_extra[p["symbol"]], tv_rank=None, chg_rank=None)
                  if p["symbol"] in by_extra else p for p in picks]
-        self._rank = {"time": self._now().strftime("%H:%M:%S"), "rows": rows, "picks": picks}
+        self._rank = {"time": self._now().strftime("%H:%M:%S"), "rows": rows, "picks": picks,
+                      "cross": cross_rows(rows, 10)}
 
     def _vts_live(self) -> bool:
         """모의투자 실서버에 붙어 있는가(매매불가 종목 거름이 필요한 곳)."""

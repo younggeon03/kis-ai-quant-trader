@@ -2765,7 +2765,7 @@ async def test_rank_board():
     import datetime as dt
 
     from main import TradingEngine
-    from monitor.ranking import build_rank_rows, pick_rows
+    from monitor.ranking import build_rank_rows, cross_rows, pick_rows
 
     snap = {
         "A": {"price": 11000.0, "turnover": 5e10, "prev_close": 10000.0, "name": "에이"},
@@ -2786,6 +2786,12 @@ async def test_rank_board():
     pk = pick_rows(rows, ["A", "Q"])
     assert pk[0]["tv_rank"] == 3 and pk[0]["chg_rank"] == 1, f"관심 종목 순위: {pk[0]}"
     assert pk[1]["symbol"] == "Q" and pk[1]["tv_rank"] is None, "시세 없는 관심 종목은 빈 행"
+    # 거래대금 · 등락률 동시 상위(11/18): max(두 순위) 작은 순 · 하락·등락률 모름 제외
+    cr_rows = [{"symbol": k, "chg_pct": c, "turnover": t} for k, c, t in
+               [("P", 1.0, 9e11), ("Q", 30.0, 1e9), ("R", 8.0, 8e11), ("S", 9.0, 7e11), ("T", -2.0, 6e11), ("U", None, 5e11)]]
+    cr = cross_rows(cr_rows, 3)
+    assert [r["symbol"] for r in cr] == ["R", "S", "P"], f"교집합 순서: {cr}"
+    assert cr[0]["tv_rank"] == 2 and cr[0]["chg_rank"] == 3, f"교집합 순위 표시: {cr[0]}"
 
     s = make_settings()
     saved = {k: getattr(s, k) for k in ("ENGINE_NO_BUY", "COMP_END", "FINAL_FLATTEN", "DASH_PICKS_FILE")}
@@ -2868,7 +2874,7 @@ async def test_rank_board():
             setattr(s, k, v)
         (Path(s.STATE_DIR) / "NO_BUY").unlink(missing_ok=True)
         (Path(s.STATE_DIR) / "NO_SELL").unlink(missing_ok=True)
-    return ("순위판(지수 종목만·거래대금 순·전일 종가 모르면 등락률 없음·소형·보유 표시) · 관심 종목 순위·지수 밖 표시 · "
+    return ("순위판(지수 종목만·거래대금 순·전일 종가 모르면 등락률 없음·소형·보유 표시) · 관심 종목 순위·지수 밖 표시 · 거래대금·등락률 동시 상위 · "
             "state/NO_BUY·ENGINE_NO_BUY 매수 차단과 해제 · 마지막 날 매수 금지 유지 · "
             "state/NO_SELL 매도 차단(청산·마지막 날 전량 매도·앱 주문 취소·매도 재접수 없음)과 해제 모두 작동")
 

@@ -72,3 +72,20 @@ def pick_rows(rows: List[Dict[str, Any]], picks: Iterable[str]) -> List[Dict[str
         row["chg_rank"] = chg_rank.get(symbol)
         out.append(row)
     return out
+
+
+def cross_rows(rows: List[Dict[str, Any]], k: int = 10) -> List[Dict[str, Any]]:
+    """거래대금 상위 ∩ 등락률 상위 k종목(11/18 사용자 요청).
+
+    두 순위 중 나쁜 쪽(`max(거래대금 순위, 등락률 순위)`)이 작은 순으로 k개 — "상위 N 두 목록의 교집합이 k개가 되는
+    가장 작은 N"의 교집합과 같다. 같으면 두 순위 합, 그다음 거래대금 순위. 등락률이 0 이하(하락·보합)는 넣지 않는다.
+    """
+    by_tv = sorted(rows, key=lambda r: (-float(r["turnover"] or 0.0), r["symbol"]))
+    tv_rank = {r["symbol"]: i + 1 for i, r in enumerate(by_tv)}
+    ranked_chg = sorted((r for r in rows if r["chg_pct"] is not None),
+                        key=lambda r: (-r["chg_pct"], r["symbol"]))
+    chg_rank = {r["symbol"]: i + 1 for i, r in enumerate(ranked_chg)}
+    cand = [r for r in ranked_chg if r["chg_pct"] > 0]
+    cand.sort(key=lambda r: (max(tv_rank[r["symbol"]], chg_rank[r["symbol"]]),
+                             tv_rank[r["symbol"]] + chg_rank[r["symbol"]], tv_rank[r["symbol"]]))
+    return [dict(r, tv_rank=tv_rank[r["symbol"]], chg_rank=chg_rank[r["symbol"]]) for r in cand[:k]]

@@ -267,6 +267,8 @@ _HTML = r"""<!DOCTYPE html>
     </div>
     <h2>관심 종목 <em id="pickNote"></em></h2>
     <table id="pickTbl"></table>
+    <h2>거래대금 · 등락률 동시 상위 <em>두 순위 중 나쁜 쪽이 작은 순 10종목 · 지수 전체 · 상승 종목만</em></h2>
+    <table id="crossTbl"></table>
   </section>
   <div class="cols">
     <section><h2>거래대금 상위 <em>장 시작부터 누적</em></h2><table id="tvTbl"></table></section>
@@ -469,6 +471,9 @@ function renderRank(rk) {
     picks.map(r => [rankName(r), esc(idxShort(r.index)), num(r.price), chgCell(r.chg_pct), eok(r.turnover),
                     r.tv_rank ? r.tv_rank + '위' : '—', r.chg_rank ? r.chg_rank + '위' : '—', eok(r.mcap)]),
     '관심 종목이 없습니다');
+  $('crossTbl').innerHTML = rows(['#', '종목', '지수', '현재가', '등락률', '거래대금', '거래대금 순위', '등락률 순위', '시총'],
+    (rk.cross || []).map((r, i) => [String(i + 1), rankName(r), esc(idxShort(r.index)), num(r.price), chgCell(r.chg_pct), eok(r.turnover),
+                    r.tv_rank + '위', r.chg_rank + '위', eok(r.mcap)]), '장중에 갱신됩니다');
 }
 ['rankSmall', 'rankIdx', 'rankTop'].forEach(id => $(id).addEventListener('change', () => renderRank()));
 
