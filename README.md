@@ -1,265 +1,167 @@
 # KIS AI Quant Trader
 
-제16회 뱅키스 대학생 모의투자대회(AI 부문)용 한국투자증권 Open API 기반 자동매매 시스템.
+한국투자증권 Open API로 **실제 대회 계좌에 주문을 내는** 자동매매 엔진.
+제16회 뱅키스 대학생 모의투자대회(AI 부문, 2026-10-12 ~ 11-20, 30거래일)에 참가하며 1인이 설계·구현·배포·운영했다.
 
 > ## 면책
 >
-> **이 코드는 모의투자 대회 참가용이며 투자 조언이 아니다.** 실제 주문을 내는
-> 자동매매 시스템이므로, 실계좌에 연결해 발생하는 금전적 손실을 포함한 모든
-> 결과는 사용자 책임이다. 저자는 어떠한 보증도 하지 않는다(MIT License 참고).
+> **이 코드는 모의투자 대회 참가용이며 투자 조언이 아니다.** 실제 주문을 내는 자동매매 시스템이므로, 실계좌에 연결해
+> 생기는 금전적 손실을 포함한 모든 결과는 사용자 책임이다. 저자는 어떠한 보증도 하지 않는다(MIT License).
 >
-> 저장소의 성과 수치는 **과거 데이터에 대한 백테스트·리플레이 결과**이며 미래
-> 수익을 보장하지 않는다. 측정 과정에서 드러난 한계를 문서에 그대로 남겨 두었다
-> — 생존 편향(유니버스가 특정 시점 거래대금 상위로 구성됨), 파라미터 선택편향
-> (여러 값을 시험해 최고를 고름), 표본 부족(30거래일 구간에서는 운과 실력을
-> 구분할 수 없음). 수치를 읽을 때 `docs/매매전략.md`의 단서를 함께 보기를 권한다.
+> 저장소의 성과 수치는 **과거 데이터에 대한 측정값**이며 미래 수익을 보장하지 않는다. 생존 편향(유니버스가 특정 시점의
+> 지수 구성으로 정해짐), 선택 편향(여러 설정을 시험해 고름), 표본 부족(30거래일로는 운과 실력을 가르기 어려움)을
+> 문서에 그대로 남겨 두었다.
 >
-> API 키·계좌번호는 `.env`에만 두고 절대 커밋하지 않는다(`.gitignore`로 차단함).
-> `.env.example`을 복사해 쓴다.
+> API 키·계좌번호는 `.env`에만 두고 커밋하지 않는다(`.gitignore`가 막는다). `.env.example`을 복사해 쓴다.
 
-## 지금 상태 (2026-11-04, 대회 18거래일째)
+---
 
-- **실거래 중** — 2026-10-13부터 네이버 클라우드 서버에서 systemd 서비스로 돈다(`deploy/oracle/`). 노트북에서는 엔진을 켜지 않는다.
-- **전략** — 장중 거래대금 폭증 진입 + 다일 보유. 09:05 장 시작 판정(직전 5분 거래대금 ≥ 같은 시간대 20일 중앙 x3)으로
-  사고, 거래대금 생존(`vol_alive` x2) · 손절 25% · 보유 10봉 상한으로 판다. 2자리 x 49%, 유니버스 거래대금 10억 이상 708종목.
-  장중 추가 매수와 장중 VWAP 청산은 10/20부터 끈다.
-- **측정과의 관계** — 485종목 측정(30일 창 406개)에서 이 조합의 P(30거래일 +100%)는 21.92%였다. 그런데 측정에 들어간
-  증거금 100% 종목을 모의투자 서버가 전부 거부해(10/22~30) 11/04부터 판정에서 빼므로, **지금 칸은 측정한 데이터 지문이 없다.**
-  위 면책의 생존 편향·선택편향 단서도 그대로 적용된다. 상세는 [docs/매매전략.md 12-13절](docs/매매전략.md), 설정은 `CLAUDE.md` §9.
-- **대회 마지막 날(11/20)** — 그날은 사지 않고 15:10부터 전 포지션을 판다(`FINAL_FLATTEN`). 수익률 산정이 평가금액 기준인지
-  확인하지 못해 보험으로 켰다(평가 기준이면 비용 약 0.2%). 종료 뒤에는 설정과 무관하게 사지 않는다.
-- **최소 자격 요건** — 4개 모두 충족(11/04 관제 기준: 거래 550회 · 매매금액 6.50억 · 매매일수 8일 · 지수 종목 11개).
-- 아래 1~6장의 일봉 AI 모델·백테스트 흐름은 개발 초기(일봉 스윙) 설계다. 코드는 남아 있고 백테스트·검증 도구로 쓴다.
-- 운영 명령(배포·관제 화면·수집)은 `CLAUDE.md`의 Commands, 할 일·측정 기록은 [docs/TODO-대회준비.md](docs/TODO-대회준비.md).
+## 한눈에 보기
 
-**핵심 설계**: `.env`의 `USE_MOCK_MODE` 한 줄로 내부 가상 체결 엔진 ↔ 실제 KIS 서버를 전환한다.
-계좌 발급 전에는 Mock으로 전체 파이프라인을 100% 검증하고, 발급 후에는 코드 수정 없이 실서버에 붙는다.
+| | |
+|---|---|
+| **무엇** | 장 시작 거래대금 폭증 종목을 사서 며칠 들고 가는 규칙 기반 엔진. 측정·백테스트·실거래가 같은 코드를 쓴다 |
+| **어디서** | 네이버 클라우드 서버(2vCPU · 3.8GB · 디스크 10GB) · systemd · 2026-10-13부터 실거래 |
+| **스택** | Python 3.13 · asyncio · httpx · WebSocket · FastAPI · Prometheus 형식 지표 · scikit-learn |
+| **검증** | 셀프테스트 27개 항목(`scripts/selftest.py`) · Mock 브로커로 네트워크 없이 전 경로 재현 |
+
+### 운영하며 풀어 낸 문제 (수치는 [docs/포트폴리오-자기소개서.md](docs/포트폴리오-자기소개서.md) 7장에 출처)
+
+| 문제 | 해결 | 결과 |
+|---|---|---|
+| 기동 6분 동안 유량 초과 74회 | 문서 한도(초당 2건) 대신 거절률을 직접 재 실효 한도 초당 1건 · 버스트 1로 토큰 버킷 재조정 | 74회 → 0~3회 |
+| 284종목 장 시작 판정 305초 | 요청 지연을 분해(유량 대기 86% · 왕복 14%) → 30종목 묶음 조회로 호출 수를 줄임 | 284호출 · 305.0초 → 10호출 · 19.8초 |
+| WebSocket이 연결된 채 엿새 동안 메시지 0건 | 장중 무음 180초 유휴 타임아웃으로 재연결 | 하루 체결 기록 0건 → 46건 |
+| 판정 입력이 측정보다 평균 +15% | 유량 때문에 분 경계 뒤 평균 37초에 읽힘 → 읽은 시각으로 환산 | 실거래 환산 계수 x0.966~0.967 |
+| 외부 데이터 API의 IP 화이트리스트가 가정용 회선에서 끊김 | SSH SOCKS 터널로 출발 IP를 서버에 고정(코드 변경 0줄) | `403` 6회 → 0회 |
+
+---
+
+## 전략은 어떻게 바뀌었나
+
+| 시기 | 규칙 | 바꾼 이유 |
+|---|---|---|
+| 개발 초기 | 일봉 AI 스윙(피처 44종 · 삼중배리어 라벨 · GBDT 앙상블) | 심사가 **절대수익 순위**라 평균보다 큰 상승 확률이 중요했다 |
+| 10/08~ | **장 시작 판정**: 09:00~09:0N 거래대금 ≥ 평소 같은 시간대(20일 중앙) x3 → 다일 보유, 거래대금이 죽으면(`vol_alive`) 판다 | 당일 청산은 모든 설정에서 P(30일 +100%) 0.00% |
+| 11/10~ | 매매 대상을 코스피200·코스닥150(309종목)으로 | 대회 안내 확인 — 지수 밖 종목은 모의투자 서버가 거부했다 |
+| 11/19~20 | **마지막 이틀 목표 = 이틀 누적 +10%**: 판정 통과 종목 중 10일 평균 고저폭(ATR10) 1위를 사서 +10% 지정가를 걸어 둔다 | 이틀 안에 +b 에 닿을 확률은 변동성이 좌우한다(반사 원리) |
+
+마지막 이틀 규칙의 측정(지수 286종목 · 연속 2거래일 433번):
+
+| 선택 · 매도 | P(이틀 ≥ +10%) | 이틀 평균 |
+|---|---|---|
+| 배수 1위 · 이틀 보유 | 12.0% | +0.88% |
+| 배수 1위 · +10% 지정가 | 22.9% | +0.61% |
+| **ATR10 1위 · +10% 지정가(채택)** | **26.6%** | +0.89% |
+
+변동성 예측·미시구조·행동재무·ML 순위 등 101개 설정을 별도 연구로 시험했지만, 미리 봉인해 둔 기간(71일)에서
+채택 기준을 넘은 후보는 없었다. 상세는 [docs/매매전략.md](docs/매매전략.md) 12-13·12-14절.
+
+---
+
+## 설계 원칙
+
+1. **Mock ↔ 실서버는 `.env` 한 줄.** `USE_MOCK_MODE`에 따라 가상 체결 엔진과 KIS 클라이언트가 같은 인터페이스·같은 응답 스키마로 갈린다.
+   계좌가 없어도 전 경로를 검증할 수 있다.
+2. **리스크 매니저는 조언자가 아니라 관문.** 모든 주문 수량은 `RiskManager.evaluate_entry()`가 정한다.
+3. **유량 제어는 우회 불가.** Mock까지 모든 REST 호출이 우선순위 토큰 버킷을 지난다(주문 P0 > 계좌 P1 > 시세 P2).
+4. **측정과 실거래가 같은 함수를 쓴다.** 판정 함수는 순수 함수(`strategy/opening.py` 등)이고, 측정 스크립트가 그 함수를 import한다.
+   셀프테스트가 함수 객체 동일성까지 확인한다.
+5. **수치는 교차검증한다.** 데이터 지문(정렬된 종가 MD5)이 다른 실행끼리는 비교하지 않고, 시간 순 교차검증·봉인 구간으로
+   선택 편향을 막는다(단일 백테스트 Sharpe는 실제의 두 배까지 부풀었다: 1.71 vs CPCV 0.78).
+
+```
+config/settings.py (.env) ── USE_MOCK_MODE / KIS_ENV → 도메인 · TR_ID 분기
+        │
+  [복수시세 30종목/호출] ─┐
+  [WS 체결·체결통보]    ─┼─▶ TradingEngine(main.py) ─▶ strategy/opening.py   장 시작 판정(순수 함수)
+  [REST 잔고·미체결]    ─┘        │                     strategy/exit_rules.py 청산 규칙(순수 함수)
+                                 ▼
+                     strategy/risk_manager.py  ★ 모든 주문의 단일 관문
+                                 ▼
+                     core/rate_limiter.py  토큰 버킷 + 우선순위 힙
+                                 ▼
+              api/mock_client.py (가상 체결)  ◀─ 같은 인터페이스 ─▶  api/client.py (KIS)
+                                 ▼
+                체결 → Portfolio → 원장(JSONL) → 관제 화면(FastAPI · /metrics)
+```
+
+---
+
+## 빠른 시작 (계좌 없이)
+
+```bash
+pip install -r requirements.txt
+copy .env.example .env               # 기본값 USE_MOCK_MODE=true
+
+python scripts/selftest.py           # 27개 항목 — 네트워크 없이 전 모듈 검증
+python main.py --duration 120        # Mock 실시간 루프 + 관제 화면(http://127.0.0.1:8500)
+python main.py --health-only         # 연결·인증·계좌 점검만
+```
+
+측정 데이터(분봉·일봉)는 저장소에 없다. 수집 스크립트(`scripts/collect_*.py`)로 받는다 — 토스증권 Open API 키와
+등록된 IP가 필요하다. KRX 지수 구성 CSV는 [data.krx.co.kr](http://data.krx.co.kr)에서 내려 `data/krx/`에 둔다.
+
+### 실서버로 바꾸기
+
+`.env`만 고친다.
+
+```ini
+USE_MOCK_MODE=false
+KIS_ENV=vts                 # 모의투자 서버
+KIS_APP_KEY=발급받은키
+KIS_APP_SECRET=발급받은시크릿
+KIS_ACCOUNT_NO=12345678-01
+KIS_HTS_ID=본인HTS아이디     # 체결통보 WebSocket 구독용
+REST_RATE_LIMIT=1           # 모의투자는 문서상 초당 2건이지만 실측 실효 한도가 약 1건
+```
+
+`python main.py --health-only`로 토큰·시세·잔고 3단계가 모두 `ok: true`인지 본 뒤, `DRY_RUN=true`로 주문 직전까지 리허설한다.
+
+---
 
 ## 대회 조건
 
 | 구분 | 내용 |
 |---|---|
-| 기간 | **2026-10-12 ~ 11-20 = 거래일 30일** |
-| 심사 | **절대수익률 top10** (지난 대회 10위권 +100%) |
-| 초기자본 | 1억원 |
-| 매매 가능 | **KOSPI·KOSDAQ 전 개별 종목** (지수 제한 없음) |
-| **단일 종목 한도** | **자산의 50%** |
-| 매수 불가 | 현재가 1,000원 미만 / 발행주식수 10만주 미만 / 관리종목·거래정지 |
-| 금지 | 신용거래·공매도 (현금 매수/매도만) |
-| 최소 요건 | OpenAPI 5회 · 매매금액 5억원 · 매매일수 5영업일 · 코스피200·코스닥150 중 5종목 |
-| 수익률 초기화 | 10/12~10/16 중 **단 1회** |
-
-규정 판정은 `strategy/eligibility.py`, 요건 추적은 `strategy/compliance.py`,
-국면 전환과 초기화 권고는 `strategy/phase.py`가 담당한다.
-**초기화는 코드가 실행하지 않는다** — 되돌릴 수 없는 1회성 행위라 권고만 띄운다.
+| 기간 | 2026-10-12 ~ 11-20, 거래일 30일 |
+| 심사 | 절대수익률 순위 |
+| 초기자본 | 1억 원 |
+| 매매 대상 | 코스피200 · 코스닥150 구성 종목(현금 매수·매도만) |
+| 종목 비율 | 제한 없음 |
+| 최소 요건 | OpenAPI 매매 · 매매금액 5억 원 · 매매일수 5일 · 지수 종목 5개 |
 
 ---
 
-## 1. 빠른 시작 (계좌 발급 전)
+## 디렉터리
 
-```bash
-copy .env.example .env          # 기본값이 USE_MOCK_MODE=true
-
-python scripts/selftest.py      # 전 모듈 스모크 테스트 (26개 항목)
-python scripts/train_model.py   # AI 모델 학습 → models/alpha_gbdt.pkl
-python scripts/run_backtest.py  # 백테스트 → reports/ 에 지표·차트 저장
-python main.py                  # Mock 실시간 매매 루프 + 대시보드
+```
+main.py                  엔진(TradingEngine) — 판정·관문·주문·대조·관제 배선
+config/settings.py       .env 로딩, 환경별 도메인·TR_ID, 모든 설정값
+core/                    인증(토큰 캐시) · 유량 제어 · WebSocket(체결통보 AES 복호화) · 이벤트·포트폴리오
+api/                     AbstractBroker · KIS 클라이언트 · Mock 가상 체결 엔진(같은 JSON)
+strategy/                장 시작 판정 · 청산 규칙 · 리스크 관문 · 대회 규정 · (초기) AI 모델·피처
+backtest/                이벤트 기반 백테스터(룩어헤드 차단·비용 반영) · 지표
+monitor/                 FastAPI 관제 화면 · 지수 종목 순위판
+scripts/                 셀프테스트 · 수집 · 측정 · 교차검증 · 사전 점검(preflight)
+deploy/oracle/           서버 설치·배포 스크립트(멱등)
+docs/                    설계·전략·운영 문서
 ```
 
-**단일 백테스트 숫자를 믿지 않는다.** 대회 기간이 30거래일이므로 **30봉 구간**으로 평가한다.
-
-```bash
-# 설정군별 절제 실험 — 구간당 학습 1회로 여러 설정을 동시 평가 (약 30분)
-python scripts/ablate_exits.py --source data/cache --set exits --step 30
-python scripts/ablate_exits.py --source data/cache --set sizing --step 30
-
-python scripts/validate_strategy.py   # CPCV 경로 분포 + PSR/DSR
-python scripts/walkforward.py         # 재학습하며 과거만 보고 평가
-```
-
-실데이터 21구간 out-of-sample 측정 결과 (데이터 지문 `30d0cafd15bc1a5f`, 수급 미사용):
-
-| 설정 | Sharpe | 누적수익 | MDD | 익스포저 |
-|---|---|---|---|---|
-| 동일가중 매수보유(벤치마크) | 0.869 | +61.8% | 22.2% | — |
-| 원 설정(손절 3.5% / 익절 9%) | −0.147 | −5.2% | 13.9% | 29.7% |
-| **손절 12%만 ← 현재 설정** | **0.425** | **+12.1%** | 16.4% | 35.8% |
-| 손절12 + 익절제거 | 0.263 | +7.0% | 17.9% | 38.4% |
-
-**손절을 넓히는 것이 검증된 단일 최대 개선이다.** 손절 3.5%가 유니버스 일간 변동성
-3.3%와 거의 같아 무작위 진입에서도 10봉 내 62.6%가 노이즈로 손절됐다.
-
-반면 **익절·트레일링·보유기간은 건드리지 않는다** — 익절 제거는 단독으로도(−0.163)
-조합에서도(0.425 → 0.263) 나빴고, 트레일링 제거 −0.089, 보유 10봉 단축 −0.560이었다.
-
-> **절대 수치는 데이터 지문마다 다르다.** 같은 설정이 데이터 재수집 전후로 Sharpe
-> 0.873과 0.263으로 갈린 적이 있다. 코드·시드·평가 구간 가격이 모두 동일함을 확인했고
-> 학습 구간 데이터만 남는 설명이었다. 그래서 `ablate_exits.py`가 실행마다 패널 지문을
-> 기록한다. **지문이 다른 실행의 수치는 비교하지 않는다.**
-
-**아직 절대수익이 벤치마크에 밀린다**(+12.1% vs +61.8%). 대회 심사가 절대수익이므로
-이 격차가 본질이며, 진행 상황은 [docs/TODO-대회준비.md](docs/TODO-대회준비.md)에 있다.
-
-## 유니버스 갱신
-
-지수 구성종목은 정기변경이 6월·12월 두 번뿐인 참조 데이터이므로 런타임에 받지 않는다.
-`data.krx.co.kr`에서 CSV를 내려 재생성한다(pykrx 1.2.9의 목록성 조회는 KRX 계정을 요구한다).
-
-```bash
-python scripts/refresh_universe.py     --all-stocks data/krx/<전종목시세>.csv     --kospi200   data/krx/<코스피200>.csv     --kosdaq150   data/krx/<코스닥150>.csv     --min-trading-value 3e9
-python scripts/collect_data.py          # 토스에서 일봉·수급 수집
-```
-
-전종목 2,872 → 규정 필터 통과 2,429 → 거래대금 30억 이상 **284종목**
-(지수 소속 173 + 지수 외 111). 결과는 `config/universe.json`에 `as_of`·필터 조건·
-제외 사유와 함께 저장된다.
-
-대시보드: <http://127.0.0.1:8500>
-
-추가 옵션
-
-```bash
-python main.py --duration 120      # 120초만 구동(스모크)
-python main.py --no-dashboard
-python main.py --health-only       # 연결/인증/계좌 점검만
-python scripts/run_backtest.py --no-model   # AI 기여도 비교(기술적 팩터만)
-```
-
-### 실데이터 수집 (토스증권 API)
-
-```bash
-# .env 에 TOSS_CLIENT_ID / TOSS_CLIENT_SECRET 를 채운 뒤
-python scripts/collect_data.py --probe     # 연결·응답 필드명 확인 (먼저 이것부터)
-python scripts/collect_data.py             # data/cache/ 에 일봉·수급 저장
-python scripts/train_model.py --source data/cache
-```
-
-토스는 **학습 데이터 전용**이다. 장중 시세와 주문은 KIS로 간다(대회 계좌가 KIS이므로).
-
-## 2. 문서
+## 문서
 
 | 문서 | 내용 |
 |---|---|
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 코드 구조, 비동기 설계, 유량 제어, 데이터 계약, 코드 읽는 순서 |
-| [docs/매매전략.md](docs/매매전략.md) | 피처 44종, 삼중배리어 라벨링, 앙상블, 포지션 사이징, 청산 규칙 |
-| [docs/architecture.html](docs/architecture.html) | 인터랙티브 구조 다이어그램 |
-| [docs/TODO-대회준비.md](docs/TODO-대회준비.md) | 대회 진행 상황, 측정 결과와 지문, 남은 일 |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 코드 구조, 비동기 설계, 유량 제어, 데이터 계약, 개발 중 잡은 버그 |
+| [docs/매매전략.md](docs/매매전략.md) | 진입·청산 규칙, 측정 방법과 결과, 기각한 시도 |
 | [docs/서버-운영-설계.md](docs/서버-운영-설계.md) | 서버·트래픽 운영 설계, 장애 기록 |
-| [docs/기술노트.md](docs/기술노트.md) | 이 저장소로 배우는 백엔드·운영 기술 노트 |
+| [docs/네트워크-전송계층-분석.md](docs/네트워크-전송계층-분석.md) | 지연 분해, 전송 계층 분석 |
+| [docs/기술노트.md](docs/기술노트.md) | 이 저장소로 배우는 백엔드·운영 기술 |
+| [docs/TODO-대회준비.md](docs/TODO-대회준비.md) | 날짜순 진행 기록 — 측정 결과, 데이터 지문, 결정과 이유 |
+| [docs/포트폴리오-자기소개서.md](docs/포트폴리오-자기소개서.md) | 운영 중 마주친 문제 9건의 진단·해결 정리 |
+| [docs/architecture.html](docs/architecture.html) | 인터랙티브 구조 다이어그램 |
 | [deploy/oracle/README.md](deploy/oracle/README.md) | 서버 배포 절차 |
 
-## 3. 아키텍처
+## 라이선스
 
-```
-                    ┌──────────────── config/settings.py (.env) ───────────────┐
-                    │  USE_MOCK_MODE / KIS_ENV → 도메인·TR_ID 자동 분기          │
-                    └──────────────────────────────────────────────────────────┘
-                                             │
-  [WS 실시간 체결/호가] ──┐                    ▼
-                         ├──→ MarketData ──→ strategy/features.py (44개 피처)
-  [REST 시세 폴링] ───────┘                    │
-                                              ├─ Alpha1: GBDT P(상승)       ─┐
-                                              ├─ Alpha2: 기술적 팩터 스코어  ─┼─ 앙상블
-                                              ├─ Alpha3: 횡단면 랭크        ─┤   ×
-                                              └─ Regime Filter(0.15~1.0)   ─┘ 레짐
-                                                            │
-                                                            ▼
-                                       ┌─────────────────────────────────────┐
-                                       │  strategy/risk_manager.py           │
-                                       │  ★ 모든 주문의 단일 관문 (거부권)    │
-                                       │  · 변동성타게팅 × Kelly 배수         │
-                                       │  · 손절/트레일링/익절/시간손절       │
-                                       │  · MDD 2단계 (DERISK → HALT)        │
-                                       │  · 섹터·종목·총익스포저 상한         │
-                                       └─────────────────────────────────────┘
-                                                            │
-                                                            ▼
-                              core/rate_limiter.py (토큰버킷 + 우선순위 큐)
-                                        주문 P0 > 계좌 P1 > 시세 P2
-                                                            │
-                          ┌─────────────────────────────────┴──────────────────┐
-                          ▼                                                    ▼
-              api/mock_client.py (가상 체결 엔진)                api/client.py (실 KIS 서버)
-                          └─────────────────────────────────┬──────────────────┘
-                                                            ▼
-                                            체결 → Portfolio → 원장(JSONL) → 대시보드
-```
-
-### 기술 선택 이유
-
-| 영역 | 선택 | 이유 |
-|---|---|---|
-| 비동기 | `asyncio` + `httpx` | 유량 제한이 병목이므로 단일 루프 + 큐가 제어에 유리 |
-| 지표 | 자체 numpy 구현 | TA-Lib의 Windows C 빌드 의존성 제거, 백테스트/실시간 동일 코드 |
-| AI | sklearn HistGBDT ↔ LightGBM | 동일 계열 알고리즘. lightgbm 설치 시 자동 승격 |
-| 검증 | PurgedKFold + embargo | 삼중배리어 라벨의 구간 중첩으로 인한 정보 누수 차단 |
-| 로깅 | loguru ↔ stdlib shim | loguru 미설치 환경에서도 동일 API로 동작 |
-| 암복호 | `cryptography` | 체결통보 AES-256-CBC 복호화 |
-
-## 4. 계좌 발급 후 실전 전환
-
-1. **`.env` 수정** — 이것이 전부다.
-   ```ini
-   USE_MOCK_MODE=false
-   KIS_ENV=vts
-   KIS_APP_KEY=발급받은키
-   KIS_APP_SECRET=발급받은시크릿
-   KIS_ACCOUNT_NO=12345678-01
-   KIS_HTS_ID=본인HTS아이디
-   REST_RATE_LIMIT=1          # 모의투자는 문서상 초당 2건이지만 실측 실효 한도가 약 1건(2026-10-13)
-   ```
-2. **연결 점검** — `python main.py --health-only`
-   → 토큰 발급 / 시세 조회 / 잔고 조회 3단계가 모두 `ok: true`여야 한다.
-3. **무주문 리허설** — `.env`에 `DRY_RUN=true` 후 `python main.py --duration 600`
-   → 주문 직전까지 전 과정이 돌고 전송만 생략된다. 로그의 `[DRY_RUN]` 라인으로 주문 내용 확인.
-4. **실주문 시작** — `DRY_RUN=false`로 되돌리고 `python main.py`
-5. **실데이터 재학습** (권장) — 실서버에서 받은 일봉을 `data/cache/<종목코드>.csv`로 저장 후
-   `python scripts/train_model.py --source data/cache`
-
-### 전환 시 주의사항
-
-- **유량**: 모의투자 계정은 초당 2건이다. `REST_RATE_LIMIT`을 올리면 `EGW00201`이 발생하고
-  최악의 경우 손절 주문이 거부된다.
-- **토큰**: 접근토큰은 24시간 유효하고 짧은 간격의 재발급이 거부된다. `.tokens/`에 캐싱되므로
-  이 디렉토리를 지우고 반복 재시작하지 말 것.
-- **모의투자 도메인 제약**: 일부 순위/조건검색 API가 지원되지 않는다. 유니버스는
-  `config/settings.py`의 `DEFAULT_UNIVERSE`에서 일봉 거래대금 랭킹으로 선정한다.
-- **체결통보**: `KIS_HTS_ID`가 없으면 WebSocket 체결통보 구독을 건너뛰고 REST 폴링으로 동작한다
-  (체결 반영이 수 초 늦어질 뿐 매매는 정상).
-
-## 5. 디렉토리
-
-```
-config/settings.py        .env 로딩, 도메인·TR_ID 환경 분기
-core/auth.py              OAuth2 토큰 발급·디스크 캐시·선제 재발급
-core/rate_limiter.py      토큰 버킷 + 우선순위 큐 + 적응형 백오프
-core/websocket_client.py  실시간 체결/호가/체결통보(AES 복호화)
-core/events.py            이벤트 정의 + Portfolio/Position + EventBus
-api/base.py               AbstractBroker(공통 인터페이스·응답 파싱)
-api/mock_client.py        가상 호가/체결 엔진 (KIS와 동일 JSON)
-api/client.py             실 KIS REST 클라이언트
-strategy/features.py      44개 피처 파이프라인(종목 + 횡단면)
-strategy/ai_model.py      삼중배리어 라벨·PurgedKFold·GBDT·앙상블 전략
-strategy/risk_manager.py  사이징·손절·MDD 방어 (단일 관문)
-backtest/engine.py        이벤트 기반 백테스터(룩어헤드 차단·비용 반영)
-backtest/metrics.py       Sharpe/Sortino/MDD/Calmar/PF
-backtest/data.py          합성 시세 생성기 + 로컬 로더
-monitor/app.py            FastAPI 대시보드 (/ /health /api/state /metrics)
-utils/                    지표·로거·KRX 캘린더·시장 규칙
-scripts/                  selftest / train_model / run_backtest
-main.py                   엔트리포인트
-```
-
-## 6. 파라미터 튜닝 가이드
-
-대회 심사 항목별로 조정할 `.env` 값:
-
-| 목표 | 조정 항목 |
-|---|---|
-| Sharpe ↑ | `TARGET_VOLATILITY` ↓, `SIGNAL_BUY_THRESHOLD` ↑(신호 선별), `MAX_POSITIONS` ↑(분산) |
-| MDD ↓ | `MDD_SOFT_LIMIT`·`MDD_HARD_LIMIT` ↓, `STOP_LOSS_PCT` ↓, `MAX_GROSS_EXPOSURE` ↓ |
-| 예측 정확도 ↑ | `LABEL_HORIZON`·`LABEL_PT_ATR`/`LABEL_SL_ATR` 조정 후 재학습, 학습 기간 확대 |
-| 회전율 ↓ (비용 절감) | `TAKE_PROFIT_PCT` ↑, `MAX_HOLDING_BARS` ↑, `SIGNAL_BUY_THRESHOLD` ↑ |
-
-변경 후에는 반드시 `python scripts/run_backtest.py`로 Sharpe/MDD를 재확인한다.
-자세한 튜닝 지침과 각 파라미터의 의미는 [docs/매매전략.md](docs/매매전략.md)에 있다.
+[MIT](LICENSE)
