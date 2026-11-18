@@ -506,16 +506,18 @@ def main() -> int:
                 arms["j2h_1519"] = _multi([119, 239, 359, 379])
                 arms["j8"] = _multi([14, 29, 59, 179, 239, 299, 359])      # 09:00(아침)·09:15·09:30·10:00·12:00·13:00·14:00·15:00
 
-                def _istop(k_s: float, d1_only: bool, tv_fade: Optional[float] = None, k_daily: float = 0.03) -> Dict[str, Any]:
+                def _istop(k_s: float, d1_only: bool, tv_fade: Optional[float] = None, k_daily: float = 0.03,
+                           morning: bool = True) -> Dict[str, Any]:
                     """장중 가격 손절(11/16): 분봉 종가 ≤ 매수가 x(1-k) 이면 다음 분 시가 매도. d1_only 면 진입일만 본다(실패 돌파 잡기),
                     아니면 매일 본다(하드스톱). tv_fade 가 있으면 가격 조건에 더해 '직전 5분 거래대금 < 발동 창 분당 평균 x tv_fade'
-                    (거래가 식으며 빠질 때만). 그 밖의 날·시간은 지금 규칙(아침 판정: 종가 −k_daily · vol_alive → 시가)과 같다."""
+                    (거래가 식으며 빠질 때만). 그 밖의 날·시간은 지금 규칙(아침 판정: 종가 −k_daily · vol_alive → 시가)과 같다.
+                    morning=False 면 아침 판정을 하지 않는다(하드스톱만, 11/17 마지막 2일 설계용)."""
                     jr0 = jrow.get(i)
                     rate0 = (TV[jr0, :entry_mi].sum() / max(1, entry_mi)) if jr0 is not None else np.nan
                     for t_ in range(i, i + args.max_hold):
                         if t_ >= len(c):
                             break
-                        if t_ > i:
+                        if t_ > i and morning:
                             pc_ = c[t_ - 1]
                             hit_ = bool(np.isfinite(pc_) and pc_ > 0 and
                                         ((args.stop > 0 and pc_ / entry_px - 1.0 <= -args.stop) or pc_ <= entry_px * (1.0 - k_daily)))
@@ -570,6 +572,16 @@ def main() -> int:
                 arms["istop10"] = _istop(0.10, False)
                 arms["befade_d1"] = _istop(0.0, True, tv_fade=0.3)
                 arms["be1fade_d1"] = _istop(0.01, True, tv_fade=0.3)
+                # 마지막 2일 설계(11/17): 아침 판정 없이 하드스톱만 / 청산 없이 보유 / 진입일 종가 매도 / 진입일 종가 < 매수가면 종가 매도
+                arms["istop5_only"] = _istop(0.05, False, morning=False)
+                arms["istop7_only"] = _istop(0.07, False, morning=False)
+                arms["istop10_only"] = _istop(0.10, False, morning=False)
+                e_h = min(i + args.max_hold, len(c) - 1)
+                arms["hold_only"] = {"exit_d": cal[ts[e_h]], "when": "close", "exit_min": EOD_MIN,
+                                     "ret": float(c[e_h]) / entry_px - 1.0 - cost}
+                arms["eod_d1"] = ({"exit_d": cal[ts[i]], "when": "close", "exit_min": EOD_MIN, "ret": float(c[i]) / entry_px - 1.0 - cost}
+                                  if np.isfinite(c[i]) and c[i] > 0 else arms["hold_only"])
+                arms["d1fail_close"] = arms["eod_d1"] if (np.isfinite(c[i]) and 0 < c[i] < entry_px) else arms["hold_only"]
                 # 조건부용: 진입일에 매수가 아래로 처음 내려온 분과 그 다음 분 시가(없으면 NaN)
                 jr0 = jrow.get(i)
                 touch_m, touch_px = -1, np.nan
@@ -606,6 +618,56 @@ def main() -> int:
                 arms["below20p"] = _mma(20, False, slope=False, min_ret=0.0)
                 arms["turn20p3"] = _mma(20, False, slope=True, min_ret=0.03)
                 arms["turn60p3"] = _mma(60, False, slope=True, min_ret=0.03)
+
+                def _xcross(fast: int, slow: int, min_ret: Optional[float] = None, hard: Optional[float] = None,
+                            price_below: bool = False) -> Dict[str, Any]:
+                    """분봉 이평 데드크로스 매도(11/17 사용자 제안, 마지막 2일 설계용): 1분봉 종가 이평 fast 가 slow 아래로 내려오는 분
+                    (직전 분은 위) → 다음 분 시가 매도. 진입일은 진입 분 뒤·09:10 이후부터, 이후 매일 본다. 이평은 그날 분봉 안에서만 계산한다
+                    (날을 넘겨 이어 붙이지 않는다 — 30분봉 5이평=150분은 오후부터 생긴다). min_ret 이 있으면 수익률 > min_ret 일 때만(이익 확정형),
+                    hard 가 있으면 종가 ≤ 매수가 x(1-hard) 도 매도(하드스톱 결합). price_below 면 크로스 대신 '종가 < slow 이평'(5분봉·30분봉 환산용).
+                    아침 판정(vol_alive·종가 손절)은 넣지 않는다 — 보유만(hold_only)과 같은 바탕에서 비교한다."""
+                    for t_ in range(i, i + args.max_hold):
+                        g = intraday.get(ts[t_])
+                        if g is None or len(g) < slow + 1:
+                            continue
+                        # 벡터화(11/17 — 분 단위 파이썬 루프가 2시간 넘게 걸려 바꿨다. 판정 내용은 같다)
+                        cl_ = g["close"].to_numpy(float); op_ = g["open"].to_numpy(float); mi_ = g["mi"].to_numpy()
+                        maf_ = pd.Series(cl_).rolling(fast, min_periods=fast).mean().to_numpy()
+                        mas_ = pd.Series(cl_).rolling(slow, min_periods=slow).mean().to_numpy()
+                        with np.errstate(invalid="ignore"):
+                            if price_below:
+                                sig_ = cl_ < mas_
+                            else:
+                                prev_f, prev_s = np.roll(maf_, 1), np.roll(mas_, 1)
+                                sig_ = (maf_ < mas_) & (prev_f >= prev_s)
+                                sig_[0] = False
+                            if min_ret is not None:
+                                sig_ &= cl_ / entry_px - 1.0 > min_ret
+                            if hard is not None:
+                                sig_ |= cl_ <= entry_px * (1.0 - hard)
+                        ok_ = (mi_ >= 10) & (mi_ <= LAST_ENTRY_MIN + 30)
+                        if t_ == i:
+                            ok_ &= mi_ > entry_mi
+                        sig_ &= ok_
+                        idx_ = np.flatnonzero(sig_)
+                        if len(idx_):
+                            j_ = int(idx_[0]); m_ = int(mi_[j_])
+                            px_ = float(op_[j_ + 1]) if j_ + 1 < len(op_) and op_[j_ + 1] > 0 else float(cl_[j_])
+                            return {"exit_d": cal[ts[t_]], "when": "intra", "exit_min": m_ + 1,
+                                    "ret": px_ / entry_px - 1.0 - cost}
+                    e_ = min(i + args.max_hold, len(c) - 1)
+                    return {"exit_d": cal[ts[e_]], "when": "close", "exit_min": EOD_MIN, "ret": float(c[e_]) / entry_px - 1.0 - cost}
+                arms["x5_20"] = _xcross(5, 20)
+                arms["x5_60"] = _xcross(5, 60)
+                arms["x20_60"] = _xcross(20, 60)
+                arms["x5_20p"] = _xcross(5, 20, min_ret=0.0)
+                arms["x5_60p"] = _xcross(5, 60, min_ret=0.0)
+                arms["x20_60p"] = _xcross(20, 60, min_ret=0.0)
+                arms["x5_20_h7"] = _xcross(5, 20, hard=0.07)
+                arms["x20_60_h7"] = _xcross(20, 60, hard=0.07)
+                arms["x25_100"] = _xcross(25, 100)                      # 5분봉 5↓20 크로스의 1분 환산
+                arms["px150"] = _xcross(5, 150, price_below=True)       # 30분봉 5이평(150분) 아래로 종가
+                arms["px150_h7"] = _xcross(5, 150, price_below=True, hard=0.07)
             if args.vwap_variants:
                 for key, (bl, vm, cb) in VWAP_VARIANTS.items():
                     xi, xpx, xw, xh, _ = vwap_exit(entry_px, i, entry_mi, args.max_hold, args.stop, o, c, burst,

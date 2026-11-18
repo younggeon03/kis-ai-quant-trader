@@ -58,3 +58,4 @@ docs/snapshot.json
 !.env.example
 # 기술노트 HTML 판(결과물)
 .tech-note/out/
+reports/last2days_events.pkl
