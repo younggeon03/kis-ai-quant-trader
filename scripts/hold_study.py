@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from config.settings import get_settings  # noqa: E402
 from monitor.ranking import cross_rows  # noqa: E402
+from strategy.opening import rank_triggers, same_window_ratio  # noqa: E402
 from strategy.opening import minute_index  # noqa: E402
 from utils.logger import enable_utf8_console  # noqa: E402
 
@@ -36,6 +37,9 @@ END_MIN = 370                # 15:10
 HORIZONS = {"0930": (0, 30), "1000": (0, 60), "d1_1510": (0, END_MIN), "d2_1510": (1, END_MIN)}
 STOPS = ["none", "hs3", "hs5", "hs7", "hs10", "cs0", "cs3", "be5"]
 PICKS = [("3분", 3, 2), ("누적", 0, 2), ("3분·09:10", 3, 9), ("3분·09:30", 3, 29), ("무작위", -1, 2)]
+
+
+DCLOSE: Dict[str, Dict[str, float]] = {}
 
 
 def _path(sym: str) -> Path:
@@ -54,6 +58,7 @@ def load_all(syms: List[str]):
             continue
         dd = pd.read_csv(dp, dtype={"ts": str}).sort_values("ts")
         pcs[sym] = dict(zip(dd["ts"].astype(str).str[:8], dd["close"].astype(float).shift(1)))
+        DCLOSE[sym] = dict(zip(dd["ts"].astype(str).str[:8], dd["close"].astype(float)))
         fd = pd.read_csv(p, dtype={"ts": str})
         fd = fd.assign(mi=minute_index(fd["ts"]), day=fd["ts"].str[:8])
         fd = fd[(fd["mi"] >= 0) & (fd["mi"] <= 390)]
@@ -95,11 +100,55 @@ def picks_for_day(data, pcs, day: str, win: int, m: int, rng) -> Optional[str]:
     return cr[0]["symbol"] if cr else None
 
 
+def engine_picks(data, pcs, days: List[str], n: int = 4, mult: float = 3.0, max_run3: float = 0.20) -> Dict[str, List[str]]:
+    """엔진 장 시작 판정(서버 .env 그대로, 엔진과 같은 함수): 09:00~09:0(n-1) 거래대금 ÷ 지난 20일 같은 n분 중앙 ≥ mult,
+    배수 큰 순 · 전일 종가 위 · 당일 VWAP 위(판정 시각 = n-1 분 종가) · 직전 3일 상승 < max_run3. 매수 = n 분 시가."""
+    wtv: Dict[str, Dict[str, float]] = {}
+    for sym, per in data.items():
+        wtv[sym] = {d: float(np.nansum(a[3, :n].astype(float) * np.nan_to_num(a[4, :n].astype(float)))) for d, a in per.items()}
+    out: Dict[str, List[str]] = {}
+    for j, d in enumerate(days):
+        ratios: Dict[str, float] = {}
+        for sym, per in data.items():
+            a = per.get(d)
+            if a is None:
+                continue
+            hist = [wtv[sym][x] for x in days[max(0, j - 40):j] if x in wtv[sym]][-20:]
+            r = same_window_ratio(wtv[sym][d], hist)
+            if r > 0:
+                ratios[sym] = r
+        picks = []
+        for sym, _r in rank_triggers(ratios, mult):
+            a = data[sym][d]
+            pc = pcs[sym].get(d)
+            px = float(a[3, n - 1])
+            vol = float(np.nansum(a[4, :n]))
+            vwap = wtv[sym][d] / vol if vol > 0 else 0.0
+            if not (pc and np.isfinite(pc) and px > pc):
+                continue
+            if not (vwap > 0 and px >= vwap):
+                continue
+            ks = sorted(x for x in DCLOSE[sym] if x < d)
+            if len(ks) >= 4:
+                c1, c4 = DCLOSE[sym][ks[-1]], DCLOSE[sym][ks[-4]]
+                if c4 > 0 and c1 / c4 - 1.0 >= max_run3:
+                    continue
+            if not np.isfinite(a[0, n]):
+                continue
+            picks.append(sym)
+        out[d] = picks
+    return out
+
+
 def run_trade(arrs: List[np.ndarray], entry_m: int, horizon: Tuple[int, int], stop: str, cost: float) -> Optional[float]:
     """arrs[0]=진입일, arrs[1]=다음 날. 매수 = 진입일 entry_m 분 시가."""
     d_last, m_last = horizon
     if d_last >= len(arrs):
         return None
+    tp = None
+    if stop.startswith("tp5"):
+        tp = 0.05
+        stop = stop.split("+", 1)[1] if "+" in stop else "none"
     a0 = arrs[0]
     entry = float(a0[0, entry_m])
     if not np.isfinite(entry) or entry <= 0:
@@ -128,6 +177,12 @@ def run_trade(arrs: List[np.ndarray], entry_m: int, horizon: Tuple[int, int], st
                 return o / entry - 1.0 - cost
             if lo <= hs:
                 return hs / entry - 1.0 - cost
+            if tp is not None:
+                tpx = entry * (1 + tp)
+                if np.isfinite(o) and o >= tpx:
+                    return o / entry - 1.0 - cost
+                if h >= tpx:
+                    return tpx / entry - 1.0 - cost
             if stop == "be5":
                 if peak >= entry * 1.05 and lo <= entry:
                     px = o if np.isfinite(o) and o <= entry else entry
@@ -158,7 +213,7 @@ def main() -> int:
     print(f"지문 {fp} · 분봉 {len(data)}종목 · {len(days)}일 {days[0]}~{days[-1]} · 왕복 {cost:.4%} · 적재 {time.time() - t0:.0f}s", flush=True)
 
     results = []
-    for plabel, win, m in PICKS:
+    for plabel, win, m in (PICKS if "--engine-only" not in sys.argv else []):
         rng = np.random.default_rng(11)
         pick = {d: picks_for_day(data, pcs, d, win, m, rng) for d in days}
         for hz, (d_last, m_last) in HORIZONS.items():
@@ -187,6 +242,37 @@ def main() -> int:
                     two = single
                 results.append({"pick": plabel, "horizon": hz, "stop": stop, "single": stats(single), "two_days": stats(two)})
         print(f"  {plabel} 끝 ({time.time() - t0:.0f}s)", flush=True)
+
+    # 엔진 장 시작 판정(11/18 사용자 요청 "전에 엔진 돌렸을 때 방식") — 1자리(자금 전부) / 2자리 x 49%. 발동 없는 날은 현금(0)
+    ep = engine_picks(data, pcs, days)
+    trig_days = sum(1 for d in days[:-1] if ep.get(d))
+    print(f"  엔진 판정: 발동일 {trig_days}/{len(days) - 1} ({trig_days / max(1, len(days) - 1):.0%}) · 2종목 이상 "
+          f"{sum(1 for d in days[:-1] if len(ep.get(d, [])) >= 2)}일", flush=True)
+    for slots, w in ((1, 1.0), (2, 0.49)):
+        plabel = f"엔진 {slots}자리"
+        for hz, (d_last, m_last) in HORIZONS.items():
+            for stop in STOPS + ["tp5", "tp5+hs7", "tp5+cs0", "tp5+hs5"]:
+                if stop.endswith(("cs0", "cs3")) and d_last == 0:
+                    continue
+                per_day: Dict[str, float] = {}
+                for j, d in enumerate(days[:-1]):
+                    rs = []
+                    for sym in ep.get(d, [])[:slots]:
+                        arrs = [data[sym].get(d), data[sym].get(days[j + 1])]
+                        if d_last == 1 and arrs[1] is None:
+                            continue
+                        r = run_trade(arrs, 4, (d_last, m_last), stop, cost)
+                        if r is not None:
+                            rs.append(r)
+                    per_day[d] = float(sum(w * r for r in rs))      # 발동 없거나 자리 남으면 그 몫은 현금
+                single = np.array(list(per_day.values()))
+                if d_last == 0:
+                    two = np.array([(1 + per_day[d]) * (1 + per_day[days[j + 1]]) - 1.0
+                                    for j, d in enumerate(days[:-1]) if d in per_day and days[j + 1] in per_day])
+                else:
+                    two = single
+                results.append({"pick": plabel, "horizon": hz, "stop": stop, "single": stats(single), "two_days": stats(two)})
+    print(f"  엔진 끝 ({time.time() - t0:.0f}s)", flush=True)
 
     hz_name = {"0930": "09:30 매도", "1000": "10:00 매도", "d1_1510": "당일 15:10", "d2_1510": "다음날 15:10"}
     print("\n선택 | 보유 | 떨어지면 | [이틀 기준] 평균 | 중앙 | 손실 확률 | −5%↓ | −10%↓ | +10%↑ | +20%↑ | 하위5% | 상위5%")
