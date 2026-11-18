@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-python scripts/selftest.py                    # 전체 검증 (26개 항목) — 변경 후 필수로 실행
+python scripts/selftest.py                    # 전체 검증 (27개 항목) — 변경 후 필수로 실행
 python scripts/train_model.py --days 1500     # AI 모델 학습 → models/alpha_gbdt.pkl
 python scripts/train_model.py --source data/cache --no-flow   # 수급 피처 제외(측정용)
 python scripts/run_backtest.py --days 1000    # 백테스트 → reports/
@@ -46,6 +46,13 @@ BANKIS_SSH_USER=root bash deploy/oracle/deploy.sh $BANKIS_SERVER status
 scripts/open_dashboard.cmd                    # SSH 터널(8500) + 관제 화면(localhost:8500)
 ```
 
+- **직접 매매 기간(2026-11-18~, 사용자 결정)**: 엔진 매수 차단은 서버에 `state/NO_BUY` 파일을 만들면 된다(재시작 불필요,
+  지우면 풀린다 · `.env` `ENGINE_NO_BUY=true`도 같다). 청산(손절 25%·`vol_alive`·11/20 15:10 전량 매도)은 계속 돌고
+  **직접 산 종목도 잔고 대조로 편입돼 같은 규칙을 받는다.** 관제 화면에 지수 종목 거래대금·등락률 순위와
+  관심 종목(`config/dash_picks.json`)을 띄운다(`monitor/ranking.py`, 60초 복수시세 — 매매에는 안 쓴다).
+  ```bash
+  ssh -i ~/.ssh/bankis_oracle root@$BANKIS_SERVER "touch ~/bankis/state/NO_BUY"   # 매수 차단
+  ```
 - `code`는 git HEAD만 보낸다 — **커밋하지 않은 변경은 안 간다.** 데이터·`.env`는 보내지 않는다.
 - `switch`는 노트북 원장·상태 파일까지 서버에 덮어쓴다. 서버가 실거래 중인 지금은 쓰지 않는다.
   기준선 표(`data/cache/turnover_profile_w5/w10.json`)만 바꿀 때는 서버 파일을 `.bak`으로 남기고 `scp`한다 —

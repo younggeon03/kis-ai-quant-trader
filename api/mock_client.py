@@ -230,6 +230,8 @@ class MockKISClient(AbstractBroker):
             price = self.sim.current_price(code)
             rows.append({
                 "inter_shrn_iscd": code,
+                "inter_kor_isnm": f"MOCK{code}",
+                "inter2_prdy_clpr": str(int(self._base_price(code))),
                 "inter2_prpr": str(int(price)),
                 "acml_vol": str(int(bar["volume"])),
                 "acml_tr_pbmn": str(int(bar["volume"] * price)),

@@ -56,6 +56,7 @@ from core.events import (
     Signal,
 )
 from monitor.app import DashboardServer
+from monitor.ranking import build_rank_rows, pick_rows
 from strategy.ai_model import EnsembleAlphaStrategy
 from strategy.exit_rules import daily_alive_burst, vwap_fade
 from strategy.sliding import (LAST_ENTRY_MIN, SlidingWatcher, minute_turnover, rolling_sum,
@@ -193,6 +194,12 @@ class TradingEngine:
         self._lock_seen: Optional[dt.datetime] = None     # 목표 첫 확인 시각(시세 튐 방지용 확인 대기)
         # 관제 화면용 오늘의 진입 판정 — 장 시작 판정 결과와 장중 발동, 각각 무엇이 됐는지(매매에는 안 쓴다)
         self._board: Dict[str, Any] = {"day": "", "opening": None, "slide": []}
+        # 관제 화면 순위판 — 지수 종목 거래대금·등락률(매매에는 안 쓴다, `monitor/ranking.py`)
+        self._rank: Dict[str, Any] = {"time": None, "rows": [], "picks": []}
+        self._rank_task: Optional[asyncio.Task] = None
+        self._rank_last_poll: float = 0.0
+        self._dash_picks: List[str] = self._load_dash_picks()
+        self._no_buy_logged: Optional[bool] = None        # 매수 차단 상태가 바뀔 때만 로그
         # same_window 기준선 — 종목 → 지난 거래일들의 09:00~09:0N 거래대금(오래된 것부터, 최대 20)
         self._opening_hist: Dict[str, List[float]] = {}
         # 종목 → 분봉 파일의 마지막 날짜. 같은 날을 두 번 기록하지 않으려고 들고 있다.
@@ -514,12 +521,29 @@ class TradingEngine:
     def _comp_end(self) -> str:
         return (self.s.COMP_END or "").strip()
 
+    def _no_buy_switch(self) -> bool:
+        """직접 매매 스위치 — `ENGINE_NO_BUY` 또는 `STATE_DIR/NO_BUY` 파일. 켜져 있으면 엔진은 사지 않는다.
+
+        파일은 재시작 없이 켜고 끄려는 것이다(기동 일봉 적재가 12분이라 장중 재시작을 피한다).
+        청산(손절·vol_alive·마지막 날 전량 매도)은 그대로 돈다 — 직접 산 종목도 잔고 대조로 편입돼 같은 규칙을 받는다.
+        """
+        on = bool(self.s.ENGINE_NO_BUY) or (Path(self.s.STATE_DIR) / "NO_BUY").exists()
+        if on != self._no_buy_logged:
+            self._no_buy_logged = on
+            if on:
+                logger.warning("[매수 차단] 엔진 신규 매수 중지(ENGINE_NO_BUY 또는 state/NO_BUY) — 청산·관제만 한다")
+            elif self._loops > 0:
+                logger.warning("[매수 차단] 해제 — 엔진이 다시 산다")
+        return on
+
     def _entries_closed(self, now: dt.datetime) -> bool:
-        """새로 사지 않는 날인가 — 대회 종료 뒤, 그리고 전량 매도를 켠 마지막 날.
+        """새로 사지 않는가 — 직접 매매 스위치, 대회 종료 뒤, 그리고 전량 매도를 켠 마지막 날.
 
         종료 뒤에는 단계가 '대회 기간 외'로 바뀔 뿐 엔진이 계속 사고판다(11/04 확인). 마지막 날에
         사면 그날 팔게 되는데 당일 청산은 측정에서 P(+100%) 0.00%였다 — 비용만 든다.
         """
+        if self._no_buy_switch():
+            return True
         end, today = self._comp_end(), now.strftime("%Y-%m-%d")
         if not end:
             return False
@@ -787,6 +811,56 @@ class TradingEngine:
             mark(symbol, "매수 주문" if ok else "주문 실패")
             if ok:
                 free -= 1
+
+    def _load_dash_picks(self) -> List[str]:
+        """관제 화면 관심 종목(`DASH_PICKS_FILE`). 없거나 깨졌으면 빈 목록 — 화면 전용이라 매매에 영향이 없다."""
+        path = Path(self.s.DASH_PICKS_FILE)
+        if not path.is_absolute():
+            path = Path(__file__).resolve().parent / path
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        return [str(x).zfill(6) for x in (data.get("symbols") or []) if str(x).strip()]
+
+    def _rank_kick(self, now: dt.datetime) -> None:
+        """조회 간격이 됐으면 지수 종목 복수시세를 태스크로 띄운다(루프를 막지 않는다 — 12호출 약 12초)."""
+        if not self.s.DASH_RANK or self.dashboard is None:
+            return
+        if self._rank_task is not None and not self._rank_task.done():
+            return
+        t = now.timestamp()
+        if t - self._rank_last_poll < float(self.s.DASH_RANK_POLL_SEC):
+            return
+        self._rank_last_poll = t
+        self._rank_task = asyncio.create_task(self._rank_poll(now))
+
+    async def _rank_poll(self, now: dt.datetime) -> None:
+        """지수 종목 + 관심 종목의 누적 거래대금·현재가를 받아 순위판을 만든다. 화면 전용(시세 P2)."""
+        index_of = {sym: name for name, lst in self.s.index_members().items() for sym in lst}
+        if not index_of:
+            return
+        syms = sorted(set(index_of) | set(self._dash_picks))
+        try:
+            snap = await self.broker.get_turnovers(syms)
+        except Exception as exc:
+            logger.debug(f"[순위판] 복수시세 실패: {exc}")
+            return
+        blob = self.s._universe_blob()
+        rows = build_rank_rows(
+            snap, index_of, names=blob.get("names") or {}, market_cap=blob.get("market_cap") or {},
+            prev_close={s_: v[0] for s_, v in self._prev_daily.items() if v},
+            held=self.portfolio.open_positions())
+        # 관심 종목은 지수 밖이어도 보이게 따로 만든다(지수 순위에는 안 들어간다)
+        extra = {s_: q for s_, q in snap.items() if s_ in self._dash_picks and s_ not in index_of}
+        extra_rows = build_rank_rows(extra, {s_: "-" for s_ in extra}, names=blob.get("names") or {},
+                                     market_cap=blob.get("market_cap") or {},
+                                     held=self.portfolio.open_positions())
+        picks = pick_rows(rows, self._dash_picks)
+        by_extra = {r["symbol"]: r for r in extra_rows}
+        picks = [dict(by_extra[p["symbol"]], tv_rank=None, chg_rank=None)
+                 if p["symbol"] in by_extra else p for p in picks]
+        self._rank = {"time": self._now().strftime("%H:%M:%S"), "rows": rows, "picks": picks}
 
     def _vts_live(self) -> bool:
         """모의투자 실서버에 붙어 있는가(매매불가 종목 거름이 필요한 곳)."""
@@ -2065,6 +2139,7 @@ class TradingEngine:
 
         # --- 시세 갱신 ---
         await self._refresh_quotes()
+        self._rank_kick(now)           # 관제 화면 순위판(별도 태스크 · 시세 P2 · 매매에 안 쓴다)
         # 일봉 재적재는 **장중 전략에서는 하지 않는다.**
         #
         # `_refresh_bars()`는 유니버스 전체(284종목) 일봉을 받으며 블로킹한다.
@@ -2635,6 +2710,8 @@ class TradingEngine:
             self._slide_task.cancel()          # 장중 추가 매수 조회 — 종료 중에는 주문을 내지 않는다
         if self._sl_task is not None and not self._sl_task.done():
             self._sl_task.cancel()
+        if self._rank_task is not None and not self._rank_task.done():
+            self._rank_task.cancel()           # 순위판 조회 — 화면 전용
         self._flush_sliding_bars()             # 오늘 받은 분봉을 남긴다(내일 기준선)
         if not self._running:
             return
@@ -2860,11 +2937,13 @@ class TradingEngine:
             "strategy": self.strategy.snapshot(),
             "triggers": (self._board if self._board["day"] == self._now().strftime("%Y%m%d")
                          else {"day": "", "opening": None, "slide": []}),
+            "rank": self._rank,
             "recent_fills": self.recent_fills[-20:],
             "history": list(self.equity_history),
             "rps_history": list(self.rps_history),
             "system": {
                 "running": self._running,
+                "no_buy": bool(self._no_buy_logged),
                 "mode": "MOCK(가상체결)" if self.s.USE_MOCK_MODE
                         else ("실전" if self.s.is_prod else "KIS 모의투자"),
                 "session": self._session().value,

@@ -696,6 +696,20 @@ class Settings(BaseSettings):
                     "거부됐다 — 거부 한 건이 약 3초라 진입이 최대 2분 늦었다(10/26). 그래서 현재가 "
                     "응답의 증거금률로 판정 단계에서 빼고 다음 순위로 바로 내려간다(11/04)")
 
+    # 직접 매매 기간(2026-11-18, 사용자 결정) — 엔진은 청산·관제만 하고 새로 사지 않는다.
+    # `STATE_DIR/NO_BUY` 파일이 있어도 같은 효과다 — 재시작 없이 서버에서 `touch`/`rm` 으로 켜고 끈다.
+    ENGINE_NO_BUY: bool = Field(
+        default=False,
+        description="엔진의 모든 신규 매수(장 시작·장중·요건 매매)를 막는다. 청산(손절·vol_alive·마지막 날 "
+                    "전량 매도)은 그대로 돈다. state/NO_BUY 파일로도 켤 수 있다")
+    # 관제 화면 순위 패널 — 지수(코스피200·코스닥150) 종목 거래대금·등락률 순위(복수시세, 시세 P2)
+    DASH_RANK: bool = Field(default=True, description="관제 화면에 지수 종목 거래대금·등락률 순위를 띄운다")
+    DASH_RANK_POLL_SEC: float = Field(
+        default=60.0, description="순위 조회 간격(초). 348종목이면 복수시세 12호출 — 모의 유량(초당 1건)으로 약 12초")
+    DASH_PICKS_FILE: str = Field(
+        default="config/dash_picks.json",
+        description="관제 화면 관심 종목 목록(JSON: {\"symbols\": [...]}) — 순위 조회에 같이 넣어 시세를 본다")
+
     # 대회 최소 요건 — 못 채우면 수익률과 무관하게 실격이다(모두 체결 기준).
     MIN_TRADE_COUNT: int = Field(default=0, description="최소 거래 횟수")
     MIN_TRADE_AMOUNT: float = Field(default=0.0, description="최소 매매금액(원)")
