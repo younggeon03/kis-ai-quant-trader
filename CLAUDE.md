@@ -43,7 +43,7 @@ python scripts/final_review.py              # 에이전트 후보 봉인 구간 
 python -m compileall -q config core api strategy backtest utils monitor scripts main.py
 ```
 
-**실거래는 NCP 서버에서 돈다(2026-10-13~).** 노트북에서 `main.py`·`run_live.ps1`을 켜지 않는다(같은 계좌 이중 주문).
+**실거래는 NCP 서버에서 돈다(2026-10-13~).** 서버 IP는 저장소에 두지 않는다 — `deploy/server.local`(git 제외)에 한 줄로 두고 `export BANKIS_SERVER=$(cat deploy/server.local)`로 쓴다. 노트북에서 `main.py`·`run_live.ps1`을 켜지 않는다(같은 계좌 이중 주문).
 
 ```bash
 BANKIS_SSH_USER=root bash deploy/oracle/deploy.sh $BANKIS_SERVER code    # HEAD 코드 반영 + 엔진 재시작
