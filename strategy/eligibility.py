@@ -38,7 +38,7 @@ from config.settings import Settings, get_settings
 # 대회 규정 상수. `scripts/refresh_universe.py`의 필터와 같은 값을 쓴다.
 MIN_BUY_PRICE = 1_000.0        # 현재가 1,000원 미만 매수 불가(동전주)
 MIN_SHARES = 100_000.0         # 발행주식수 10만주 미만 거래 불가
-MAX_SINGLE_WEIGHT = 0.50       # 단일 종목 최대 투자 한도
+MAX_SINGLE_WEIGHT = 1.00       # 단일 종목 한도 — 규정에 없다(11/17 사용자 확인, 예전 50%는 오해). 설정 MAX_POSITION_WEIGHT 가 실제 상한
 
 BLOCKED_SECTIONS = ("관리종목", "투자주의환기", "SPAC", "외국기업")
 ALLOWED_MARKETS = ("KOSPI", "KOSDAQ", "KOSDAQ GLOBAL")

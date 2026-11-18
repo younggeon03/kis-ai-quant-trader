@@ -155,6 +155,17 @@ def main() -> int:
         oof_base[test] = res[base][test]
         print(f"  조각 {f_ + 1} ({days[lo]}~{days[hi - 1]}): 고른 설정 {lab(best)} | 학습 {p10(res[best][train]):.1%} → "
               f"검증 {p10(res[best][test]):.1%} (기준 {p10(res[base][test]):.1%})")
+    # 고정 설정끼리 조각별 비교(11/18) — 배수 1위 vs 변동성 점수
+    fixed = [((), "B", "none"), (("점수(ATR10)",), "B", "none"), (("점수(변동성 예측 + 시총 + 회전율)",), "B", "none"),
+             (("점수(회전율)",), "B", "none"), (("점수(변동성 예측: 20일·ATR·전일폭·개장폭)",), "B", "none")]
+    print()
+    print("[고정 설정 조각별 P(≥+10%)]")
+    for k in fixed:
+        if k not in res:
+            continue
+        vals = [p10(res[k][edges[f_]:edges[f_ + 1]]) for f_ in range(K)]
+        means = [float(np.nanmean(res[k][edges[f_]:edges[f_ + 1]])) for f_ in range(K)]
+        print(f"  {lab(k)} | " + " · ".join(f"{v:.1%}" for v in vals) + f" | 조각 평균 수익 " + " · ".join(f"{m:+.1%}" for m in means))
     fin = np.isfinite(oof)
     print(f"\n  교차검증 합계 P(≥+10%): 고르는 방식 {p10(oof):.1%} vs 기준 {p10(oof_base):.1%} · "
           f"평균 {np.nanmean(oof):+.2%} vs {np.nanmean(oof_base):+.2%} · 손실 {(oof[fin] < 0).mean():.0%} vs {(oof_base[np.isfinite(oof_base)] < 0).mean():.0%}")

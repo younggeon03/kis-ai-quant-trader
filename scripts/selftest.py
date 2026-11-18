@@ -385,10 +385,12 @@ def test_risk_manager():
     from strategy.eligibility import is_buyable, position_weight_cap
     if s._universe_blob():
         assert not is_buyable("999999", 50_000, s)[0], "유니버스 외 종목이 통과했다"
-    # 단일 종목 한도는 규정 50%를 넘지 못한다
+    # 단일 종목 한도 = 설정값(규정 상한 없음 — 11/17 확인). 설정을 1.0 넘게 줘도 100%에서 멈춘다
     s_over = s.model_copy(deep=True)
     s_over.MAX_POSITION_WEIGHT = 0.80
-    assert position_weight_cap(s_over) == 0.50, position_weight_cap(s_over)
+    assert position_weight_cap(s_over) == 0.80, position_weight_cap(s_over)
+    s_over.MAX_POSITION_WEIGHT = 1.20
+    assert position_weight_cap(s_over) == 1.00, position_weight_cap(s_over)
 
     # 최대 보유 종목 수 제한.
     # 진입 후보는 규정 관문을 먼저 통과해야 하므로 실제 유니버스 종목을 쓴다
@@ -747,10 +749,12 @@ def test_competition_rules():
     assert is_buyable(sym, MIN_BUY_PRICE, s)[0], is_buyable(sym, MIN_BUY_PRICE, s)
     assert is_sellable(sym, s)[0], "매도가 막히면 손절이 불가능하다"
 
-    # 단일 종목 한도는 규정 50%를 넘지 못한다
+    # 단일 종목 한도 = min(설정, 규정 상수). 규정 상수는 1.0(11/17 확인 — 종목 비율 제한 없음)
     over = s.model_copy(deep=True)
     over.MAX_POSITION_WEIGHT = 0.90
-    assert position_weight_cap(over) == MAX_SINGLE_WEIGHT, position_weight_cap(over)
+    assert position_weight_cap(over) == min(0.90, MAX_SINGLE_WEIGHT), position_weight_cap(over)
+    over.MAX_POSITION_WEIGHT = 1.50
+    assert position_weight_cap(over) == MAX_SINGLE_WEIGHT == 1.0, position_weight_cap(over)
 
     # 유니버스 파일이 있으면 목록 외 종목을 차단한다
     blob = s._universe_blob()
@@ -2726,6 +2730,15 @@ async def test_server_reliability():
             of_sells.clear()
             await eng._take_profit_exits({"NEW1": 200.0})
             assert not of_sells, "EXIT_TAKE_PROFIT_PCT=0 인데 팔았다"
+            # 장 시작 판정 순서 — atr10 이면 10일 고저폭 큰 순(모르면 뒤, 같으면 배수 순), ratio 면 그대로
+            saved_rank, saved_atr = s.OPENING_RANK_BY, dict(eng._atr10)
+            pk_ = [("A", 9.0), ("B", 5.0), ("C", 4.0), ("D", 3.5)]
+            eng._atr10 = {"B": 0.08, "C": 0.08, "A": 0.03}
+            s.OPENING_RANK_BY = "ratio"
+            assert eng._order_opening_picks(pk_) == pk_, "ratio 면 배수 순 그대로"
+            s.OPENING_RANK_BY = "atr10"
+            assert [x[0] for x in eng._order_opening_picks(pk_)] == ["B", "C", "A", "D"],                 f"atr10 순서: {eng._order_opening_picks(pk_)}"
+            s.OPENING_RANK_BY, eng._atr10 = saved_rank, saved_atr
             s.OPEN_FLATTEN_DATE = ""
             eng._open_flatten_day, eng._open_flatten_syms = "", set()
             await eng._open_flatten(d(2026, 11, 19, 9, 0), {"OLD1": 100.0})
@@ -2799,7 +2812,7 @@ async def test_server_reliability():
     return ("주문 읽기 타임아웃·5xx 재시도 안 함(결과 불명) · 접속 실패 재시도 · 조회 재시도 · "
             "무손실 체결 채널 · 히스토그램 분위수·Prometheus · Date 헤더 시계 오차 · "
             "장중 VWAP 청산(판정·배관) · 장중 추가 매수(첫 발동·배수 순·빈자리·당일 매도 제외·전일 대비 하한) · 체결통보로 미체결 추적 정리 · 날짜 변경 시 전날 미체결·요건 표시 정리 · 목표 도달 잠금(확인 대기·요건 제외) · 제한폭 밖 가격 버림 · 매수 지정가 상한가 클립 · "
-            "미체결 매도 취소·재대조 · 대회 마지막 날 전량 매도·종료 뒤 매수 금지 · 장 시작 정리(그날 전 종목만·넉넉한 지정가·자리 면제)·익절 · WS 여러 건 체결가 파싱·미구독 종목 버림·멈춘 연결 재연결 모두 작동")
+            "미체결 매도 취소·재대조 · 대회 마지막 날 전량 매도·종료 뒤 매수 금지 · 장 시작 정리(그날 전 종목만·넉넉한 지정가·자리 면제)·익절·판정 순서(atr10) · WS 여러 건 체결가 파싱·미구독 종목 버림·멈춘 연결 재연결 모두 작동")
 
 
 @check("27. 직접 매매 스위치(매수·매도) · 지수 종목 순위판")

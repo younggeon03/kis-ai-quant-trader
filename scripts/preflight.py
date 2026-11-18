@@ -139,13 +139,13 @@ def check(settings, live: bool) -> List[Tuple[str, str, str, str]]:
             f"{s.MAX_POSITIONS} x {s.FIXED_POSITION_WEIGHT:.0%} = {gross:.0%} "
             f"(상한 {s.MAX_GROSS_EXPOSURE:.0%})",
             "여유가 없으면 부분 체결 중 두 번째 진입이 '주문가능금액 부족'으로 거부된다")
-        add(FATAL, "단일 종목 규정", s.FIXED_POSITION_WEIGHT <= 0.50,
-            f"{s.FIXED_POSITION_WEIGHT:.0%} (규정 50%)",
-            "슬리피지로 넘치면 규정 위반이다")
+        # 종목 비율 제한은 규정에 없다(11/17 사용자 확인 — 예전 50%는 오해). 종목당 상한이 고정 비중을 막지 않는지만 본다
+        add(FATAL, "종목당 상한", s.FIXED_POSITION_WEIGHT <= min(1.0, s.MAX_POSITION_WEIGHT),
+            f"고정 {s.FIXED_POSITION_WEIGHT:.0%} · 상한 {s.MAX_POSITION_WEIGHT:.0%}",
+            "상한이 고정 비중보다 작으면 상한에서 잘린다")
     else:
-        add(FATAL, "단일 종목 규정", s.MAX_POSITION_WEIGHT <= 0.50,
-            f"{s.MAX_POSITION_WEIGHT:.0%} (규정 50%)",
-            "슬리피지로 넘치면 규정 위반이다")
+        add(FATAL, "종목당 상한", s.MAX_POSITION_WEIGHT <= 1.0,
+            f"{s.MAX_POSITION_WEIGHT:.0%}", "100%를 넘으면 미수가 된다")
 
     # --- 리스크 해제 (intraday · catalyst 공통) ---
     # 셋 다 꼬리를 사는 전략이라 상승을 자르는 규칙을 전부 끈다.

@@ -156,6 +156,7 @@ class TradingEngine:
         self._scan_task: Optional[asyncio.Task] = None
         # 전일 종가·거래량. 패널은 실시간 가격으로 덮어써지므로 한 번만 떠서 보관한다.
         self._prev_daily: Dict[str, tuple] = {}
+        self._atr10: Dict[str, float] = {}               # 전일까지 10일 평균 고저폭 ÷ 종가(OPENING_RANK_BY=atr10)
         # --- 다일 보유 청산(`vol_alive`) — 하루 한 번, 확정 일봉으로 판정한다 ---
         # 종목 → 어제 확정 거래대금 / 그 전일까지 20봉 중앙값(`daily_alive_burst`).
         # 장중 누적으로 판정하면 매일 아침 시가에 팔린다(함수 주석 참고).
@@ -301,6 +302,14 @@ class TradingEngine:
                 ) if len(tail) >= 10 else 0.0
                 self._prev_daily[symbol] = (float(prev["close"]), float(prev["volume"]),
                                             med20)
+                # 10일 평균 고저폭(전일까지) — 장 시작 판정 순위(OPENING_RANK_BY=atr10, 11/18 교차검증 채택)
+                t10 = hist.tail(10)
+                if len(t10) >= 10 and {"high", "low"} <= set(t10.columns):
+                    c10 = t10["close"].astype(float)
+                    hl10 = (t10["high"].astype(float) - t10["low"].astype(float)) / c10.where(c10 > 0)
+                    v10 = float(hl10.mean())
+                    if np.isfinite(v10) and v10 > 0:
+                        self._atr10[symbol] = v10
         primed = 0
         no_med = 0
         for symbol, vals in self._prev_daily.items():
@@ -514,6 +523,7 @@ class TradingEngine:
             await self._refresh_bars()
         await self._load_held_bars()
         self._prev_daily = {}
+        self._atr10 = {}
         self._prime_intraday()
         self._refresh_alive(today)
         self._load_opening_history(today)
@@ -1263,6 +1273,15 @@ class TradingEngine:
         """전략 자리 수에서 빼는 종목 — 요건 전용 소액 매매 포지션과 장 시작 정리 중인 종목."""
         return set(self._compliance_syms) | set(getattr(self, "_open_flatten_syms", set()))
 
+    def _order_opening_picks(self, picks: List[Tuple[str, float]]) -> List[Tuple[str, float]]:
+        """장 시작 판정 발동 종목의 매수 순서. 기본은 배수 큰 순(`rank_triggers`).
+        `OPENING_RANK_BY=atr10`이면 **10일 평균 고저폭 큰 순**(11/18 이틀 +10% 교차검증 — 장벽 도달 확률은 변동성에 비례,
+        5조각 중 4조각에서 배수 순보다 P(이틀 ≥ +10%)가 높았다). 고저폭을 모르는 종목은 뒤로, 같으면 배수 순.
+        필터(전일 종가·VWAP·3일 과열·매매불가)는 진입 루프가 이 순서대로 거르므로 측정과 같다."""
+        if str(self.s.OPENING_RANK_BY).lower() != "atr10":
+            return picks
+        return sorted(picks, key=lambda x: (-self._atr10.get(x[0], -1.0), -x[1], x[0]))
+
     def _strategy_held(self) -> set:
         # 장 시작 정리 중인 종목은 곧 팔리므로 전략 자리로 세지 않는다(09:04 판정이 자리를 찾게)
         return set(self.portfolio.open_positions()) - self._compliance_exempt() - self._open_flatten_syms
@@ -1483,7 +1502,7 @@ class TradingEngine:
                  else opening_ratio(tv, med20, n))
             if r > 0:
                 ratios[symbol] = r
-        picks = rank_triggers(ratios, float(self.s.OPENING_MULT))
+        picks = self._order_opening_picks(rank_triggers(ratios, float(self.s.OPENING_MULT)))
         self._opening_picks = picks
         self._board_day(day)["opening"] = {
             "time": self._now().strftime("%H:%M:%S"), "window": n,

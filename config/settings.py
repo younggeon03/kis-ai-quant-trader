@@ -732,6 +732,9 @@ class Settings(BaseSettings):
         default="1510",
         description="마지막 날 전량 매도 시작 시각. 15:20~15:30 동시호가에는 엔진이 주문을 내지 않으므로 "
                     "연속 매매 구간에서 시작해 안 팔린 잔량을 미체결 매도 재접수(60초)로 따라간다")
+    OPENING_RANK_BY: str = Field(
+        default="ratio",
+        description="장 시작 판정 발동 종목의 매수 순서 — ratio(배수 큰 순) | atr10(10일 평균 고저폭 큰 순, 11/18 이틀 +10% 교차검증)")
     OPEN_FLATTEN_DATE: str = Field(
         default="",
         description="이 날(YYYY-MM-DD) OPEN_FLATTEN_HHMM부터 **그날 전에 산 종목**을 전부 판다(11/18 사용자 결정 — "
