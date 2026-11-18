@@ -753,6 +753,8 @@ class Settings(BaseSettings):
     DASH_RANK: bool = Field(default=True, description="관제 화면에 지수 종목 거래대금·등락률 순위를 띄운다")
     DASH_RANK_POLL_SEC: float = Field(
         default=60.0, description="순위 조회 간격(초). 348종목이면 복수시세 12호출 — 모의 유량(초당 1건)으로 약 12초")
+    DASH_CROSS_WINDOW_SEC: float = Field(
+        default=180.0, description="관제 동시 상위 순위의 거래대금 창(초) — 직전 3분 거래대금(순간 거래대금). 0 = 장 시작부터 누적(11/18)")
     DASH_PICKS_FILE: str = Field(
         default="config/dash_picks.json",
         description="관제 화면 관심 종목 목록(JSON: {\"symbols\": [...]}) — 순위 조회에 같이 넣어 시세를 본다")

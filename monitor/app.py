@@ -265,7 +265,7 @@ _HTML = r"""<!DOCTYPE html>
       <label>지수 <select id="rankIdx"><option value="">전체</option><option>KOSPI200</option><option>KOSDAQ150</option></select></label>
       <label>표시 <select id="rankTop"><option>10</option><option selected>20</option><option>30</option></select></label>
     </div>
-    <h2>거래대금 · 등락률 동시 상위 5 <em id="pickNote">두 순위 중 나쁜 쪽이 작은 순 · 지수 전체 · 상승 종목만</em></h2>
+    <h2>거래대금 · 등락률 동시 상위 5 <em id="pickNote"></em></h2>
     <table id="pickTbl"></table>
   </section>
   <div class="cols">
@@ -464,9 +464,11 @@ function renderRank(rk) {
     byChg.slice(0, top).map((r, i) => [String(i + 1), rankName(r), chgCell(r.chg_pct), eok(r.turnover),
                                        num(r.price), eok(r.mcap)]), '데이터 없음');
   // 관심 종목 자리 — 거래대금·등락률 동시 상위 5(11/18 사용자 요청, 관심 종목 표 대신)
-  $('pickTbl').innerHTML = rows(['#', '종목', '지수', '현재가', '등락률', '거래대금', '거래대금 순위', '등락률 순위', '시총'],
+  const basis = rk.cross_basis || '누적';
+  $('pickNote').textContent = `거래대금 ${basis} 기준 · 두 순위 중 나쁜 쪽이 작은 순 · 지수 전체 · 상승 종목만`;
+  $('pickTbl').innerHTML = rows(['#', '종목', '지수', '현재가', '등락률', `거래대금(${basis})`, '거래대금 순위', '등락률 순위', '누적 거래대금', '시총'],
     (rk.cross || []).slice(0, 5).map((r, i) => [String(i + 1), rankName(r), esc(idxShort(r.index)), num(r.price), chgCell(r.chg_pct),
-                    eok(r.turnover), r.tv_rank + '위', r.chg_rank + '위', eok(r.mcap)]), '장중에 갱신됩니다');
+                    eok(r.tv_win), r.tv_rank + '위', r.chg_rank + '위', eok(r.turnover), eok(r.mcap)]), '장중에 갱신됩니다');
 }
 ['rankSmall', 'rankIdx', 'rankTop'].forEach(id => $(id).addEventListener('change', () => renderRank()));
 

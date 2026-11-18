@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Mapping, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 SMALL_CAP_KRW = 1e12          # 화면의 "소형주" 기준 — 시가총액 1조 원 이하
 
@@ -74,13 +74,14 @@ def pick_rows(rows: List[Dict[str, Any]], picks: Iterable[str]) -> List[Dict[str
     return out
 
 
-def cross_rows(rows: List[Dict[str, Any]], k: int = 10) -> List[Dict[str, Any]]:
+def cross_rows(rows: List[Dict[str, Any]], k: int = 10, key: str = "turnover") -> List[Dict[str, Any]]:
     """거래대금 상위 ∩ 등락률 상위 k종목(11/18 사용자 요청).
 
     두 순위 중 나쁜 쪽(`max(거래대금 순위, 등락률 순위)`)이 작은 순으로 k개 — "상위 N 두 목록의 교집합이 k개가 되는
     가장 작은 N"의 교집합과 같다. 같으면 두 순위 합, 그다음 거래대금 순위. 등락률이 0 이하(하락·보합)는 넣지 않는다.
+    `key` 로 거래대금 기준을 고른다 — "turnover"(09:00부터 누적) 또는 "tv_win"(직전 N분, `recent_turnover`).
     """
-    by_tv = sorted(rows, key=lambda r: (-float(r["turnover"] or 0.0), r["symbol"]))
+    by_tv = sorted(rows, key=lambda r: (-float(r.get(key) or 0.0), r["symbol"]))
     tv_rank = {r["symbol"]: i + 1 for i, r in enumerate(by_tv)}
     ranked_chg = sorted((r for r in rows if r["chg_pct"] is not None),
                         key=lambda r: (-r["chg_pct"], r["symbol"]))
@@ -89,3 +90,26 @@ def cross_rows(rows: List[Dict[str, Any]], k: int = 10) -> List[Dict[str, Any]]:
     cand.sort(key=lambda r: (max(tv_rank[r["symbol"]], chg_rank[r["symbol"]]),
                              tv_rank[r["symbol"]] + chg_rank[r["symbol"]], tv_rank[r["symbol"]]))
     return [dict(r, tv_rank=tv_rank[r["symbol"]], chg_rank=chg_rank[r["symbol"]]) for r in cand[:k]]
+
+
+def recent_turnover(history: List[Tuple[float, Dict[str, float]]], now: float, cur: Mapping[str, float],
+                    win_sec: float, open_ts: Optional[float] = None) -> Tuple[Dict[str, float], float]:
+    """직전 `win_sec`초 거래대금(순간 거래대금) = 지금 누적 − `win_sec`초 전 누적(11/18 사용자 요청: 누적 대신 "그 당시").
+
+    `history`는 (시각, {종목: 누적 거래대금}) 과거→최신. 기준은 `now - win_sec` 이전의 가장 최근 스냅숏이다.
+    그런 스냅숏이 없으면: 장 시작(`open_ts`) 뒤 `win_sec`초가 안 지났으면 0(=누적이 곧 창), 아니면 가장 오래된 스냅숏(창이 짧다).
+    돌려주는 두 번째 값은 실제 창 길이(초) — 화면에 "몇 분 기준"인지 쓴다.
+    """
+    base: Optional[Dict[str, float]] = None
+    span = 0.0
+    for t, snap in history:
+        if t <= now - win_sec:
+            base, span = snap, now - t
+    if base is None:
+        if open_ts is not None and now - open_ts <= win_sec:
+            base, span = {}, max(0.0, now - open_ts)
+        elif history:
+            base, span = history[0][1], now - history[0][0]
+        else:
+            base, span = {}, 0.0
+    return {s_: max(0.0, float(v or 0.0) - float(base.get(s_, 0.0) or 0.0)) for s_, v in cur.items()}, span

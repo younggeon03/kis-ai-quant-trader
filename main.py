@@ -56,7 +56,7 @@ from core.events import (
     Signal,
 )
 from monitor.app import DashboardServer
-from monitor.ranking import build_rank_rows, pick_rows, cross_rows
+from monitor.ranking import build_rank_rows, cross_rows, pick_rows, recent_turnover
 from strategy.ai_model import EnsembleAlphaStrategy
 from strategy.exit_rules import daily_alive_burst, vwap_fade
 from strategy.sliding import (LAST_ENTRY_MIN, SlidingWatcher, minute_turnover, rolling_sum,
@@ -214,6 +214,7 @@ class TradingEngine:
         # 관제 화면 순위판 — 지수 종목 거래대금·등락률(매매에는 안 쓴다, `monitor/ranking.py`)
         self._rank: Dict[str, Any] = {"time": None, "rows": [], "picks": []}
         self._rank_task: Optional[asyncio.Task] = None
+        self._rank_hist: List[Tuple[float, Dict[str, float]]] = []   # 순위판 누적 거래대금 스냅숏(직전 3분 계산용)
         self._rank_last_poll: float = 0.0
         self._dash_picks: List[str] = self._load_dash_picks()
         self._no_buy_logged: Optional[bool] = None        # 매수 차단 상태가 바뀔 때만 로그
@@ -974,8 +975,27 @@ class TradingEngine:
         by_extra = {r["symbol"]: r for r in extra_rows}
         picks = [dict(by_extra[p["symbol"]], tv_rank=None, chg_rank=None)
                  if p["symbol"] in by_extra else p for p in picks]
-        self._rank = {"time": self._now().strftime("%H:%M:%S"), "rows": rows, "picks": picks,
-                      "cross": cross_rows(rows, 10)}
+        # 동시 상위는 **직전 N분 거래대금**으로 순위를 매긴다(11/18 사용자 요청 — 누적은 아침에 몰렸다 식은 종목이 남는다).
+        # 장 밖에는 창 안 거래가 없어 누적으로 보여 준다.
+        t_now = self._now()
+        win = float(self.s.DASH_CROSS_WINDOW_SEC)
+        regular = self._session() is MarketSession.REGULAR
+        if self._rank_hist and dt.datetime.fromtimestamp(self._rank_hist[-1][0]).date() != t_now.date():
+            self._rank_hist = []
+        cur = {r["symbol"]: float(r["turnover"]) for r in rows}
+        basis = "누적"
+        if regular and win > 0:
+            open_ts = t_now.replace(hour=9, minute=0, second=0, microsecond=0).timestamp()
+            tv_win, span = recent_turnover(self._rank_hist, t_now.timestamp(), cur, win, open_ts)
+            self._rank_hist.append((t_now.timestamp(), cur))
+            self._rank_hist = [h for h in self._rank_hist if h[0] >= t_now.timestamp() - win - 600]
+            rows_w = [dict(r, tv_win=tv_win.get(r["symbol"], 0.0)) for r in rows]
+            cross = cross_rows(rows_w, 10, key="tv_win")
+            basis = f"직전 {span / 60:.1f}분"
+        else:
+            cross = [dict(r, tv_win=r["turnover"]) for r in cross_rows(rows, 10)]
+        self._rank = {"time": t_now.strftime("%H:%M:%S"), "rows": rows, "picks": picks,
+                      "cross": cross, "cross_basis": basis}
 
     def _vts_live(self) -> bool:
         """모의투자 실서버에 붙어 있는가(매매불가 종목 거름이 필요한 곳)."""

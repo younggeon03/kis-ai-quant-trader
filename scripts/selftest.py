@@ -2765,7 +2765,7 @@ async def test_rank_board():
     import datetime as dt
 
     from main import TradingEngine
-    from monitor.ranking import build_rank_rows, cross_rows, pick_rows
+    from monitor.ranking import build_rank_rows, cross_rows, pick_rows, recent_turnover
 
     snap = {
         "A": {"price": 11000.0, "turnover": 5e10, "prev_close": 10000.0, "name": "에이"},
@@ -2792,6 +2792,14 @@ async def test_rank_board():
     cr = cross_rows(cr_rows, 3)
     assert [r["symbol"] for r in cr] == ["R", "S", "P"], f"교집합 순서: {cr}"
     assert cr[0]["tv_rank"] == 2 and cr[0]["chg_rank"] == 3, f"교집합 순위 표시: {cr[0]}"
+    # 직전 3분 거래대금(11/18): 3분 전 스냅숏을 뺀다 · 장 시작 3분 안이면 누적 그대로 · 창 기준 교집합
+    hist = [(100.0, {"P": 10.0, "R": 50.0}), (160.0, {"P": 20.0, "R": 60.0}), (220.0, {"P": 30.0, "R": 61.0})]
+    w_, span_ = recent_turnover(hist, 340.0, {"P": 90.0, "R": 62.0}, 180.0)
+    assert w_ == {"P": 70.0, "R": 2.0} and span_ == 180.0, f"직전 3분 거래대금: {w_} {span_}"
+    w_, span_ = recent_turnover([], 120.0, {"P": 5.0}, 180.0, open_ts=0.0)
+    assert w_ == {"P": 5.0} and span_ == 120.0, "장 시작 3분 안에는 누적이 곧 창"
+    cw = cross_rows([dict(r, tv_win={"P": 1.0, "R": 9.0, "S": 5.0}.get(r["symbol"], 0.0)) for r in cr_rows], 2, key="tv_win")
+    assert [r["symbol"] for r in cw] == ["S", "R"], f"창 기준 교집합: {cw}"
 
     s = make_settings()
     saved = {k: getattr(s, k) for k in ("ENGINE_NO_BUY", "COMP_END", "FINAL_FLATTEN", "DASH_PICKS_FILE")}
@@ -2874,7 +2882,7 @@ async def test_rank_board():
             setattr(s, k, v)
         (Path(s.STATE_DIR) / "NO_BUY").unlink(missing_ok=True)
         (Path(s.STATE_DIR) / "NO_SELL").unlink(missing_ok=True)
-    return ("순위판(지수 종목만·거래대금 순·전일 종가 모르면 등락률 없음·소형·보유 표시) · 관심 종목 순위·지수 밖 표시 · 거래대금·등락률 동시 상위 · "
+    return ("순위판(지수 종목만·거래대금 순·전일 종가 모르면 등락률 없음·소형·보유 표시) · 관심 종목 순위·지수 밖 표시 · 거래대금·등락률 동시 상위(누적·직전 3분) · "
             "state/NO_BUY·ENGINE_NO_BUY 매수 차단과 해제 · 마지막 날 매수 금지 유지 · "
             "state/NO_SELL 매도 차단(청산·마지막 날 전량 매도·앱 주문 취소·매도 재접수 없음)과 해제 모두 작동")
 
