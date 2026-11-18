@@ -741,8 +741,17 @@ class Settings(BaseSettings):
                     "직접 산 종목을 09:00에 팔고 09:04 장 시작 판정으로 갈아탄다). 빈 값이면 끈다")
     OPEN_FLATTEN_HHMM: str = Field(default="0900", description="OPEN_FLATTEN_DATE 매도 시작 시각")
     OPEN_FLATTEN_BAND: float = Field(
-        default=0.02,
-        description="장 시작 정리 매도 지정가 = 현재가 x(1-이 값). 최우선 매수호가에 바로 맞게 넉넉히(시장가처럼)")
+        default=0.0,
+        description="장 시작 정리 매도 지정가 = 현재가 x(1-이 값). 0 = 현재가 그대로(최대한 높은 가격, 11/18 사용자)")
+    OPEN_FLATTEN_REPRICE_SEC: float = Field(
+        default=15.0, description="장 시작 정리 매도가 안 팔리면 취소하고 그때 현재가로 다시 내는 주기(초)")
+    OPEN_FLATTEN_LATE_SEC: int = Field(
+        default=40, description="장 시작 판정 시각 이 초 전부터는 현재가 x(1-OPEN_FLATTEN_LATE_BAND)로 내 판정 전에 판다")
+    OPEN_FLATTEN_LATE_BAND: float = Field(
+        default=0.01, description="장 시작 정리 판정 직전 매도 지정가 폭(최우선 매수호가에 바로 맞게)")
+    OPEN_FLATTEN_WAIT_SEC: int = Field(
+        default=120,
+        description="장 시작 판정 진입을 정리 매도 체결까지 기다리는 최대 시간(초) — 팔기 전에 사면 익스포저 상한에 걸린다")
     EXIT_TAKE_PROFIT_PCT: float = Field(
         default=0.0,
         description="전략 포지션 현재가 ≥ 평단 x(1+이 값)이면 판다(0 = 끔). 11/18 이틀 +10% 목표 측정: 순수익 +10% = 0.103 "

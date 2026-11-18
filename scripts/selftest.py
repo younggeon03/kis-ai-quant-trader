@@ -2693,43 +2693,114 @@ async def test_server_reliability():
             eng.portfolio.positions = saved_pos
             eng._compliance_syms = {}
 
-        # 장 시작 정리(11/18) — 그날 09:00부터 그날 전에 산 종목만 넉넉한 지정가로 팔고, 그 종목은 전략 자리로 세지 않는다
-        # · 익절 — 현재가 ≥ 평단 x(1+k)이면 판다(요건·정리 대상 제외, 0 = 끔)
-        saved_of = (s.OPEN_FLATTEN_DATE, s.OPEN_FLATTEN_HHMM, s.OPEN_FLATTEN_BAND, s.EXIT_TAKE_PROFIT_PCT)
+        # 장 시작 정리(11/18) — 그날 09:00부터 그날 전에 산 종목만 판다. 처음엔 현재가 그대로(최대한 높은 가격)·15초 재접수,
+        # 판정 40초 전부터 현재가 −1%. 정리 대상은 전략 자리로 세지 않고, 남아 있으면 판정 진입을 기다린다.
+        # · 익절 — 평단 x(1+k) 지정가를 걸어 두고(재접수 안 함, 부분 체결 남은 몫 추가), 마지막 날 매도 전에 취소한다.
+        #   현재가 감시(`_take_profit_exits`)는 백업. 장 밖 WS 체결가는 보유 종목 평가가격을 덮지 않는다.
+        from core.events import Quote
+        from utils.krx_calendar import MarketSession
+        saved_of = (s.OPEN_FLATTEN_DATE, s.OPEN_FLATTEN_HHMM, s.OPEN_FLATTEN_BAND, s.EXIT_TAKE_PROFIT_PCT,
+                    s.OPEN_FLATTEN_LATE_SEC, s.OPEN_FLATTEN_LATE_BAND, s.OPEN_FLATTEN_REPRICE_SEC,
+                    s.COMP_END, s.FINAL_FLATTEN, s.FINAL_FLATTEN_HHMM, s.OPENING_WINDOW_MIN, s.OPENING_LAG_MIN)
         saved_pos = eng.portfolio.positions
         saved_ed = dict(eng._entry_dates)
+        saved_oo = dict(eng.open_orders)
+        saved_pd = dict(eng._prev_daily)
+        saved_session = eng._session
         try:
             d = dt.datetime
-            s.OPEN_FLATTEN_DATE, s.OPEN_FLATTEN_HHMM, s.OPEN_FLATTEN_BAND = "2026-11-19", "0900", 0.02
+            s.OPEN_FLATTEN_DATE, s.OPEN_FLATTEN_HHMM, s.OPEN_FLATTEN_BAND = "2026-11-19", "0900", 0.0
+            s.OPEN_FLATTEN_LATE_SEC, s.OPEN_FLATTEN_LATE_BAND, s.OPEN_FLATTEN_REPRICE_SEC = 40, 0.01, 15.0
+            s.OPENING_WINDOW_MIN, s.OPENING_LAG_MIN = 4, 0          # 서버와 같은 09:04 판정
             eng.portfolio.positions = {"OLD1": Position(symbol="OLD1", qty=5, avg_price=100.0),
                                        "NEW1": Position(symbol="NEW1", qty=2, avg_price=100.0)}
             eng._entry_dates = {"OLD1": "20261117", "NEW1": "20261119"}
             eng._open_flatten_day, eng._open_flatten_syms = "", set()
-            of_sells: List[Tuple[str, int, float, str]] = []
+            eng.open_orders = {}
+            of_sells: List[Tuple[str, int, float, str, Any, Any]] = []
 
-            async def _submit_of(symbol, side, qty, price, reason):
-                of_sells.append((symbol, qty, price, reason.split("|")[0]))
+            async def _submit_of(symbol, side, qty, price, reason, limit=None, ttl=60.0):
+                of_sells.append((symbol, qty, price, reason.split("|")[0], limit, ttl))
                 return True
             saved_submit, eng._submit = eng._submit, _submit_of
             await eng._open_flatten(d(2026, 11, 18, 9, 0), {"OLD1": 100.0})
             await eng._open_flatten(d(2026, 11, 19, 8, 59), {"OLD1": 100.0})
             assert not of_sells, f"정리 날·시각 전에 팔았다: {of_sells}"
-            await eng._open_flatten(d(2026, 11, 19, 9, 0), {"OLD1": 100.0, "NEW1": 100.0})
+            await eng._open_flatten(d(2026, 11, 19, 9, 0, 5), {"OLD1": 100.0, "NEW1": 100.0})
             assert [x[:2] for x in of_sells] == [("OLD1", 5)], f"그날 전에 산 종목만 팔아야 한다: {of_sells}"
-            lim = of_sells[0][2] * (1 - s.SELL_LIMIT_BAND)
-            assert abs(lim - 98.0) < 1e-6, f"매도 지정가 = 현재가 x(1-0.02): {lim}"
+            assert abs(of_sells[0][4] - 100.0) < 1e-9 and of_sells[0][5] == 15.0, f"처음엔 현재가 그대로·15초 재접수: {of_sells[0]}"
+            of_sells.clear()
+            await eng._open_flatten(d(2026, 11, 19, 9, 3, 25), {"OLD1": 100.0})
+            assert abs(of_sells[0][4] - 99.0) < 1e-9, f"판정 40초 전(09:03:20)부터 현재가 −1%: {of_sells[0]}"
             assert "OLD1" not in eng._strategy_held() and "OLD1" in eng._compliance_exempt(), "정리 대상은 전략 자리로 세지 않는다"
-            # 익절
-            s.EXIT_TAKE_PROFIT_PCT = 0.103
+            assert eng._open_flatten_pending(), "정리 대상이 남았으면 판정 진입을 기다려야 한다"
+            # 재접수 — 정리 매도(ttl 15초)는 15초 뒤, 걸어 둔 익절(ttl None)은 재접수하지 않는다
+            t_old = d(2026, 11, 19, 9, 1, 0).isoformat()
+            eng.open_orders = {"F1": {"symbol": "OLD1", "side": "SELL", "qty": 5, "price": 100, "ts": t_old, "ttl": 15.0},
+                               "T1": {"symbol": "NEW1", "side": "SELL", "qty": 2, "price": 111, "ts": t_old, "ttl": None,
+                                      "reason": "TPLIMIT|익절"}}
+            cancels_: List[str] = []
+
+            async def _cancel_(org, no, all_qty=True):
+                cancels_.append(no)
+                return {"rt_cd": "0", "msg1": "ok"}
+
+            async def _sync_(initial=False):
+                return None
+            saved_broker2, saved_sync2 = eng.broker, eng._sync_portfolio
+            eng.broker = types.SimpleNamespace(cancel_order=_cancel_)
+            eng._sync_portfolio = _sync_
+            try:
+                await eng._reprice_stale_sells(d(2026, 11, 19, 9, 1, 16))
+                assert cancels_ == ["F1"], f"정리 매도만 15초 뒤 재접수, 익절은 그대로: {cancels_}"
+                # 익절 지정가 — 이미 건 주문(2주)이 수량을 잡고 있으면 더 걸지 않는다, 부분 체결로 늘어난 몫만 더 건다
+                s.EXIT_TAKE_PROFIT_PCT = 0.103
+                eng._prev_daily = {"NEW1": (100.0, 0.0, 0.0)}
+                of_sells.clear()
+                await eng._place_tp_orders(d(2026, 11, 19, 9, 5))
+                assert not of_sells, f"이미 건 익절이 수량을 잡고 있는데 또 걸었다: {of_sells}"
+                eng.portfolio.positions["NEW1"].qty = 3
+                await eng._place_tp_orders(d(2026, 11, 19, 9, 5))
+                assert [x[:2] + (x[3],) for x in of_sells] == [("NEW1", 1, "TPLIMIT")], f"늘어난 몫만 더 건다: {of_sells}"
+                assert abs(of_sells[0][4] - 110.3) < 1e-6 and of_sells[0][5] is None, f"평단 x1.103 · 재접수 없음: {of_sells[0]}"
+                # 마지막 날 매도 — 걸어 둔 익절을 먼저 취소하고 판다
+                s.COMP_END, s.FINAL_FLATTEN, s.FINAL_FLATTEN_HHMM = "2026-11-20", True, "1510"
+                eng.portfolio.positions["NEW1"].qty = 2
+                eng._open_flatten_syms = set()
+                cancels_.clear()
+                of_sells.clear()
+                await eng._place_tp_orders(d(2026, 11, 20, 15, 10))
+                assert not of_sells, "마지막 날 매도 시각부터는 익절을 걸지 않는다"
+                eng._final_flatten_day = ""
+                await eng._final_flatten(d(2026, 11, 20, 15, 10), {"NEW1": 105.0, "OLD1": 100.0})
+                assert "T1" in cancels_, f"마지막 날 매도 전에 익절 주문을 취소해야 한다: {cancels_}"
+                assert ("NEW1", 2) in [x[:2] for x in of_sells], f"취소 뒤 전량 매도: {of_sells}"
+            finally:
+                eng.broker, eng._sync_portfolio = saved_broker2, saved_sync2
+            # 현재가 감시(백업)
+            eng.open_orders = {}
+            eng._open_flatten_syms = {"OLD1"}
             of_sells.clear()
             await eng._take_profit_exits({"NEW1": 110.2, "OLD1": 200.0})
             assert not of_sells, f"익절선 아래(또는 정리 대상)에서 팔았다: {of_sells}"
             await eng._take_profit_exits({"NEW1": 110.3})
-            assert [x[:2] + (x[3],) for x in of_sells] == [("NEW1", 2, "TP")], f"익절: {of_sells}"
+            assert [x[:2] + (x[3],) for x in of_sells] == [("NEW1", 2, "TP")], f"익절 백업: {of_sells}"
             s.EXIT_TAKE_PROFIT_PCT = 0.0
             of_sells.clear()
             await eng._take_profit_exits({"NEW1": 200.0})
+            await eng._place_tp_orders(d(2026, 11, 19, 9, 5))
             assert not of_sells, "EXIT_TAKE_PROFIT_PCT=0 인데 팔았다"
+            # 장 밖 WS 체결가는 보유 종목 가격을 덮지 않는다(미보유는 덮는다) — 장중에는 덮는다
+            eng.latest_prices["NEW1"] = 95.0
+            eng._session = lambda: MarketSession.CLOSED
+            await eng._on_ws_quote(Quote(symbol="NEW1", price=99.0))
+            await eng._on_ws_quote(Quote(symbol="ZZZ9", price=50.0))
+            assert eng.latest_prices["NEW1"] == 95.0 and eng.latest_prices.get("ZZZ9") == 50.0, \
+                "장 밖 WS 체결가가 보유 종목 평가가격을 덮었다"
+            eng._session = lambda: MarketSession.REGULAR
+            await eng._on_ws_quote(Quote(symbol="NEW1", price=99.0))
+            assert eng.latest_prices["NEW1"] == 99.0, "장중 WS 체결가는 반영해야 한다"
+            eng._session = saved_session
             # 장 시작 판정 순서 — atr10 이면 10일 고저폭 큰 순(모르면 뒤, 같으면 배수 순), ratio 면 그대로
             saved_rank, saved_atr = s.OPENING_RANK_BY, dict(eng._atr10)
             pk_ = [("A", 9.0), ("B", 5.0), ("C", 4.0), ("D", 3.5)]
@@ -2737,7 +2808,8 @@ async def test_server_reliability():
             s.OPENING_RANK_BY = "ratio"
             assert eng._order_opening_picks(pk_) == pk_, "ratio 면 배수 순 그대로"
             s.OPENING_RANK_BY = "atr10"
-            assert [x[0] for x in eng._order_opening_picks(pk_)] == ["B", "C", "A", "D"],                 f"atr10 순서: {eng._order_opening_picks(pk_)}"
+            assert [x[0] for x in eng._order_opening_picks(pk_)] == ["B", "C", "A", "D"], \
+                f"atr10 순서: {eng._order_opening_picks(pk_)}"
             s.OPENING_RANK_BY, eng._atr10 = saved_rank, saved_atr
             s.OPEN_FLATTEN_DATE = ""
             eng._open_flatten_day, eng._open_flatten_syms = "", set()
@@ -2745,9 +2817,14 @@ async def test_server_reliability():
             assert not of_sells, "OPEN_FLATTEN_DATE 빈 값인데 팔았다"
             eng._submit = saved_submit
         finally:
-            s.OPEN_FLATTEN_DATE, s.OPEN_FLATTEN_HHMM, s.OPEN_FLATTEN_BAND, s.EXIT_TAKE_PROFIT_PCT = saved_of
+            (s.OPEN_FLATTEN_DATE, s.OPEN_FLATTEN_HHMM, s.OPEN_FLATTEN_BAND, s.EXIT_TAKE_PROFIT_PCT,
+             s.OPEN_FLATTEN_LATE_SEC, s.OPEN_FLATTEN_LATE_BAND, s.OPEN_FLATTEN_REPRICE_SEC,
+             s.COMP_END, s.FINAL_FLATTEN, s.FINAL_FLATTEN_HHMM, s.OPENING_WINDOW_MIN, s.OPENING_LAG_MIN) = saved_of
             eng.portfolio.positions = saved_pos
             eng._entry_dates = saved_ed
+            eng.open_orders = saved_oo
+            eng._prev_daily = saved_pd
+            eng._session = saved_session
             eng._open_flatten_day, eng._open_flatten_syms = "", set()
 
         # WS 체결가 — 한 건 필드 수를 머리의 건수로 나눈다(모의서버가 46개가 아니라 두 번째 건부터
@@ -2812,7 +2889,7 @@ async def test_server_reliability():
     return ("주문 읽기 타임아웃·5xx 재시도 안 함(결과 불명) · 접속 실패 재시도 · 조회 재시도 · "
             "무손실 체결 채널 · 히스토그램 분위수·Prometheus · Date 헤더 시계 오차 · "
             "장중 VWAP 청산(판정·배관) · 장중 추가 매수(첫 발동·배수 순·빈자리·당일 매도 제외·전일 대비 하한) · 체결통보로 미체결 추적 정리 · 날짜 변경 시 전날 미체결·요건 표시 정리 · 목표 도달 잠금(확인 대기·요건 제외) · 제한폭 밖 가격 버림 · 매수 지정가 상한가 클립 · "
-            "미체결 매도 취소·재대조 · 대회 마지막 날 전량 매도·종료 뒤 매수 금지 · 장 시작 정리(그날 전 종목만·넉넉한 지정가·자리 면제)·익절·판정 순서(atr10) · WS 여러 건 체결가 파싱·미구독 종목 버림·멈춘 연결 재연결 모두 작동")
+            "미체결 매도 취소·재대조 · 대회 마지막 날 전량 매도·종료 뒤 매수 금지 · 장 시작 정리(그날 전 종목만·현재가→15초 재접수→판정 직전 −1%·자리 면제·진입 대기)·걸어 두는 익절(재접수 없음·남은 몫·마지막 날 취소)·장 밖 WS 가격 무시·판정 순서(atr10) · WS 여러 건 체결가 파싱·미구독 종목 버림·멈춘 연결 재연결 모두 작동")
 
 
 @check("27. 직접 매매 스위치(매수·매도) · 지수 종목 순위판")

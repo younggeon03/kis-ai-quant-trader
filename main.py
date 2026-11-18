@@ -211,6 +211,8 @@ class TradingEngine:
         self._final_flatten_day = ""                      # 마지막 날 전량 매도를 알린 날(로그·원장 1회)
         self._open_flatten_day = ""                       # 장 시작 정리를 시작한 날(OPEN_FLATTEN_DATE)
         self._open_flatten_syms: set = set()              # 장 시작 정리 대상(그날 전에 산 종목)
+        self._open_flatten_wait_logged = ""               # 정리 매도 대기 로그(하루 1회)
+        self._tp_backoff: Dict[str, float] = {}           # 익절 주문 거부 뒤 다시 걸 때까지(시각)
         self._lock_seen: Optional[dt.datetime] = None     # 목표 첫 확인 시각(시세 튐 방지용 확인 대기)
         # 관제 화면용 오늘의 진입 판정 — 장 시작 판정 결과와 장중 발동, 각각 무엇이 됐는지(매매에는 안 쓴다)
         self._board: Dict[str, Any] = {"day": "", "opening": None, "slide": []}
@@ -691,6 +693,8 @@ class TradingEngine:
             self.ledger.write("final_flatten", {"equity": self.portfolio.equity,
                                                 "positions": list(self.portfolio.open_positions())})
         for symbol, pos in list(self.portfolio.open_positions().items()):
+            if self._tp_orders(symbol):
+                await self._cancel_tp_orders(symbol)       # 걸어 둔 익절 주문이 수량을 잡고 있다
             qty = self._sellable_qty(symbol, pos.qty)
             if qty <= 0:
                 continue
@@ -703,8 +707,9 @@ class TradingEngine:
         """`OPEN_FLATTEN_DATE` 그날 `OPEN_FLATTEN_HHMM`부터 그날 전에 산 종목을 전부 판다(11/18 사용자 결정).
 
         대상은 처음 발동할 때 한 번 정한다 — 그날 엔진이 산 종목(`_entry_dates` = 오늘)은 넣지 않는다(재시작해도 같다).
-        매도 지정가는 현재가 x(1-OPEN_FLATTEN_BAND)로 넉넉히 내 최우선 매수호가에 바로 체결되게 한다.
-        안 팔린 잔량은 `_reprice_stale_sells`(60초)가 취소하고 여기서 지금 가격으로 다시 낸다.
+        매도 지정가는 현재가 x(1-OPEN_FLATTEN_BAND)(기본 0 = 현재가)로 내고, OPEN_FLATTEN_REPRICE_SEC(15초)마다
+        `_reprice_stale_sells`가 취소하면 여기서 그때 현재가로 다시 낸다. 판정 시각 OPEN_FLATTEN_LATE_SEC 전부터는
+        현재가 x(1-OPEN_FLATTEN_LATE_BAND)로 내 판정 전에 현금을 만든다.
         """
         day = now.strftime("%Y-%m-%d")
         if not self.s.OPEN_FLATTEN_DATE or day != str(self.s.OPEN_FLATTEN_DATE)                 or now.strftime("%H%M") < str(self.s.OPEN_FLATTEN_HHMM):
@@ -728,11 +733,81 @@ class TradingEngine:
             px = prices.get(symbol, pos.last_price or pos.avg_price)
             if px <= 0:
                 continue
-            # _submit 이 매도 지정가를 px x(1-SELL_LIMIT_BAND)로 만든다 — 그 위에 넉넉한 몫을 더 깎는다
-            ref = px * (1.0 - float(self.s.OPEN_FLATTEN_BAND)) / max(1e-9, 1.0 - float(self.s.SELL_LIMIT_BAND))
-            if await self._submit(symbol, Side.SELL, qty, ref, "OPENFLAT|장 시작 정리(갈아타기)"):
+            # 최대한 높은 가격에 판다(11/18 사용자): 처음엔 현재가 그대로, 안 팔리면 OPEN_FLATTEN_REPRICE_SEC 마다
+            # 그때 현재가로 다시 낸다. 판정 시각 OPEN_FLATTEN_LATE_SEC 전부터만 현재가 x(1-LATE_BAND)로 바로 맞춘다.
+            late = (now.hour * 3600 + now.minute * 60 + now.second) >= self._open_flatten_late_at()
+            band = float(self.s.OPEN_FLATTEN_LATE_BAND) if late else float(self.s.OPEN_FLATTEN_BAND)
+            tag = "OPENFLAT|장 시작 정리(갈아타기)" + (" · 판정 직전" if late else "")
+            if await self._submit(symbol, Side.SELL, qty, px, tag,
+                                  limit=px * (1.0 - band), ttl=float(self.s.OPEN_FLATTEN_REPRICE_SEC)):
                 self.ledger.write("exit", {"symbol": symbol, "qty": qty, "reason": "open_flatten",
                                            "detail": "장 시작 정리 — 그날 전에 산 종목"})
+
+    def _open_flatten_late_at(self) -> int:
+        """장 시작 정리의 '판정 직전' 시작 시각(자정부터 초) = 장 시작 판정 시각 − OPEN_FLATTEN_LATE_SEC."""
+        n = int(self.s.OPENING_WINDOW_MIN) + int(self.s.OPENING_LAG_MIN)
+        return 9 * 3600 + n * 60 - int(self.s.OPEN_FLATTEN_LATE_SEC)
+
+    def _open_flatten_pending(self) -> bool:
+        """장 시작 정리 대상이 아직 남아 있나(판정 진입을 잠깐 미룬다)."""
+        for s_ in self._open_flatten_syms:
+            pos = self.portfolio.positions.get(s_)
+            if pos is not None and pos.qty > 0:
+                return True
+        return False
+
+    def _tp_orders(self, symbol: str) -> List[str]:
+        return [no for no, o in self.open_orders.items()
+                if o.get("symbol") == symbol and o.get("side") == Side.SELL.value
+                and str(o.get("reason", "")).startswith("TPLIMIT")]
+
+    async def _place_tp_orders(self, now: dt.datetime) -> None:
+        """익절 지정가를 미리 걸어 둔다(11/18) — 평단 x(1+EXIT_TAKE_PROFIT_PCT) 올림 호가, 재접수하지 않는다.
+
+        거래소가 가격이 닿는 순간 체결하므로 측정(분봉 고가가 닿으면 그 가격)과 같다 — 현재가 감시(`_take_profit_exits`)는
+        루프 간격 사이의 순간 고가를 놓친다. 장 마감에 증권사가 취소하면 다음 날 정규장 첫 루프에 다시 건다.
+        가격제한폭 위면 오늘은 닿을 수 없어 걸지 않는다(현재가 감시가 백업). 마지막 날 전량 매도 시각부터는 걸지 않는다.
+        """
+        k = float(self.s.EXIT_TAKE_PROFIT_PCT)
+        if k <= 0:
+            return
+        end = self._comp_end()
+        if (self.s.FINAL_FLATTEN and end and now.strftime("%Y-%m-%d") == end
+                and now.strftime("%H%M") >= str(self.s.FINAL_FLATTEN_HHMM)):
+            return
+        for symbol, pos in list(self.portfolio.open_positions().items()):
+            if symbol in self._compliance_syms or symbol in self._open_flatten_syms or pos.avg_price <= 0:
+                continue
+            # 이미 건 익절이 있어도 체결 대기 매도를 뺀 남은 수량(부분 체결로 늘어난 몫)이 있으면 그 몫을 더 건다
+            qty = self._sellable_qty(symbol, pos.qty)
+            if qty <= 0:
+                continue
+            if self._tp_backoff.get(symbol, 0.0) > now.timestamp():
+                continue
+            tp = pos.avg_price * (1.0 + k)
+            prev_close = float((self._prev_daily.get(symbol) or (0.0,))[0] or 0.0)
+            if prev_close > 0 and tp > price_limits(prev_close)[1]:
+                continue
+            if await self._submit(symbol, Side.SELL, qty, tp, f"TPLIMIT|익절 지정가 +{k:.1%}", limit=tp, ttl=None):
+                logger.info(f"[익절] {symbol} {qty}주 지정가 {round_to_tick(tp, mode='up'):,} 걸어 둠"
+                            f"(평단 {pos.avg_price:,.0f})")
+                self._save_state()
+            else:
+                self._tp_backoff[symbol] = now.timestamp() + 60.0   # 거부(이미 건 주문이 수량을 잡고 있는 등) — 1분 쉰다
+
+    async def _cancel_tp_orders(self, symbol: str) -> None:
+        for no in self._tp_orders(symbol):
+            o = self.open_orders.get(no) or {}
+            try:
+                resp = await self.broker.cancel_order(str(o.get("org_no") or ""), no, all_qty=True)
+            except Exception as exc:  # noqa: BLE001
+                resp = {"msg1": str(exc)}
+            if is_ok(resp):
+                self.open_orders.pop(no, None)
+                logger.info(f"[익절] {symbol} 걸어 둔 익절 주문 취소 {no}")
+                self._save_state()
+            else:
+                logger.info(f"[익절] {symbol} 익절 주문 취소 실패 {no}: {resp.get('msg1')}")
 
     async def _take_profit_exits(self, prices: Dict[str, float]) -> None:
         """전략 포지션 익절 — 현재가 ≥ 평단 x(1+EXIT_TAKE_PROFIT_PCT)이면 판다(11/18 이틀 +10% 목표, 0 = 끔).
@@ -1574,6 +1649,16 @@ class TradingEngine:
         start = n + lag
         if now.strftime("%H%M") < f"{9 + start // 60:02d}{start % 60:02d}":
             return
+        # 장 시작 정리(갈아타기) 매도가 아직 안 끝났으면 판 돈이 들어올 때까지 최대 OPEN_FLATTEN_WAIT_SEC 기다린다 —
+        # 팔기 전에 사면 총 익스포저 상한에 걸려 그날 매수가 거부된다
+        if self._open_flatten_pending():
+            waited = (now.hour * 3600 + now.minute * 60 + now.second) - (9 * 3600 + start * 60)
+            if waited < int(self.s.OPEN_FLATTEN_WAIT_SEC):
+                if self._open_flatten_wait_logged != day:
+                    self._open_flatten_wait_logged = day
+                    logger.info(f"[장중·개장] 장 시작 정리 매도가 남아 진입을 기다린다(최대 {self.s.OPEN_FLATTEN_WAIT_SEC}초)")
+                return
+            logger.warning("[장중·개장] 장 시작 정리 매도가 아직 남았지만 기다림 한도를 넘어 진입한다")
         self._opening_done_day = day
         late = (now.hour - 9) * 60 + now.minute - start
         if late > 0 and self._opening_picks:
@@ -1928,6 +2013,10 @@ class TradingEngine:
     # ================================================================== 이벤트 핸들러
     async def _on_ws_quote(self, quote: Quote) -> None:
         if quote.price > 0:
+            # 장 밖에는 보유 종목 가격을 덮지 않는다(11/18) — WS 재연결 때 증권사가 마지막 체결가(실제 종가)를 한 번 보내
+            # 잔고 대조가 맞춘 모의투자 평가가격(prpr)을 덮었다(엔진 자산이 순자산보다 156만 5천 원 높게 보임).
+            if quote.symbol in self.portfolio.positions and self._session() is not MarketSession.REGULAR:
+                return
             self.latest_prices[quote.symbol] = quote.price
             self._quote_seen[quote.symbol] = self._now()
             self.latest_volumes[quote.symbol] = float(quote.volume or 0.0)
@@ -2254,7 +2343,10 @@ class TradingEngine:
         return snap
 
     # ================================================================== 주문
-    async def _submit(self, symbol: str, side: Side, qty: int, price: float, reason: str) -> bool:
+    async def _submit(self, symbol: str, side: Side, qty: int, price: float, reason: str,
+                      limit: Optional[float] = None, ttl: Optional[float] = SELL_REPRICE_SEC) -> bool:
+        """주문 접수. `limit`을 주면 지정가 폭(BUY/SELL_LIMIT_BAND) 대신 그 가격(호가단위 정렬)으로 낸다.
+        `ttl`은 미체결 매도를 취소·재접수할 나이(초) — None 이면 재접수하지 않는다(걸어 두는 익절 주문)."""
         if qty <= 0:
             return False
         # 직접 매매 스위치 — 모든 엔진 주문이 지나는 한 곳에서 막는다(매수는 `_entries_closed`에 이은 두 번째 문).
@@ -2285,8 +2377,12 @@ class TradingEngine:
         # 매도: 가격이 내려가는 중에도 **아래로** 걸어 양보하는 쪽이라
         # −0.4%에서 체결률 **99.71%**(마감구간 99.84%)다. 넓힐 이유가 없다.
         band = self.s.BUY_LIMIT_BAND if side is Side.BUY else self.s.SELL_LIMIT_BAND
-        limit_price = round_to_tick(price * (1.0 + band if side is Side.BUY
-                                             else 1.0 - band))
+        if limit is not None:
+            # 걸어 두는 익절처럼 "그 가격 이상"이어야 하는 매도는 올림, 그 밖은 가까운 호가
+            limit_price = round_to_tick(float(limit), mode="up" if side is Side.SELL else "nearest")
+        else:
+            limit_price = round_to_tick(price * (1.0 + band if side is Side.BUY
+                                                 else 1.0 - band))
         # 가격제한폭(전일 종가 ±30%) 안으로 자른다. 상한가 근처에서 +2%를 얹으면 상한을 넘어
         # `40270000 상/하한가 오류`로 거부된다 — 10/27 1위(x434.5) 050110을 이렇게 놓쳤다.
         # 기준(전일 종가)이 지금 가격과 안 맞으면(병합·분할 직후 등) 자르지 않는다.
@@ -2328,7 +2424,7 @@ class TradingEngine:
             self._sold_today[symbol] = self._now().strftime("%Y%m%d")
         self.open_orders[ack.order_no] = {
             "symbol": symbol, "side": side.value, "qty": qty, "price": limit_price,
-            "org_no": ack.org_no, "ts": self._now().isoformat(), "reason": reason,
+            "org_no": ack.org_no, "ts": self._now().isoformat(), "reason": reason, "ttl": ttl,
         }
         await self.bus.publish(TOPIC_ORDER, request)
         logger.info(f"[주문접수] {side.value} {symbol} {qty}주 @{limit_price:,} ({reason})")
@@ -2408,7 +2504,9 @@ class TradingEngine:
                     age = 0.0
             # 매도 차단(직접 매매) 중에는 취소하지 않는다 — 이 목록에는 앱에서 낸 주문도 섞여 있고,
             # 처음 보는 주문은 지금 시각으로 추적을 시작하므로 180초 뒤 엔진이 그 주문을 취소한다
-            if age > max_age_seconds and not self._no_sell_switch():
+            # 걸어 두는 익절 주문(ttl=None)은 오래 기다리는 것이 정상이다 — 장기 미체결 취소에서 뺀다(11/18)
+            keep = "ttl" in prev and prev.get("ttl") is None
+            if age > max_age_seconds and not self._no_sell_switch() and not keep:
                 try:
                     await self.broker.cancel_order(org_no, order_no, all_qty=True)
                     logger.info(f"[Orders] 장기 미체결 취소: {prev.get('symbol', '')} {order_no} "
@@ -2449,7 +2547,10 @@ class TradingEngine:
                 age = (now - dt.datetime.fromisoformat(o["ts"])).total_seconds()
             except (KeyError, TypeError, ValueError):
                 continue
-            if age >= SELL_REPRICE_SEC:
+            ttl = o.get("ttl", SELL_REPRICE_SEC)
+            if ttl is None:
+                continue            # 걸어 두는 익절 주문 — 재접수하지 않는다
+            if age >= float(ttl):
                 stale.append((order_no, o))
         if not stale:
             return
@@ -2679,6 +2780,7 @@ class TradingEngine:
         # --- 대회 마지막 날 전량 매도 (설정 FINAL_FLATTEN) ---
         await self._final_flatten(now, prices)
         await self._open_flatten(now, prices)
+        await self._place_tp_orders(now)
         await self._take_profit_exits(prices)
         no_buy = self._locked or self._entries_closed(now)
 
@@ -3184,6 +3286,8 @@ class TradingEngine:
                 "compliance_syms": self._compliance_syms,
                 "sold_today": self._sold_today,
                 "locked": self._locked,
+                "tp_orders": {no: o for no, o in self.open_orders.items()
+                              if str(o.get("reason", "")).startswith("TPLIMIT")},
             }
             self._state_path().write_text(
                 json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
@@ -3215,6 +3319,13 @@ class TradingEngine:
             # 오늘 판 종목 — 장중 재시작 뒤 같은 날 다시 사지 않게(날짜를 같이 저장하므로 어제 것은 무해)
             sold = data.get("sold_today") or {}
             self._sold_today = {str(k): str(v) for k, v in sold.items()}
+            # 오늘 건 익절 주문 — 정상 종료는 미체결을 취소하지만, 비정상 종료면 증권사에 남아 수량을 잡는다(11/18).
+            # 오늘 것만 다시 추적한다(어제 것은 장 마감에 증권사가 취소했다). 이미 체결·취소된 것은 대조가 정리한다.
+            today0 = self._now().strftime("%Y-%m-%d")
+            for no, o in (data.get("tp_orders") or {}).items():
+                if str(o.get("ts", ""))[:10] == today0 and no not in self.open_orders:
+                    self.open_orders[str(no)] = dict(o)
+                    logger.info(f"[State] 오늘 건 익절 주문 복원 {o.get('symbol')} {no} @{o.get('price')}")
             # 상태 파일은 조건부 저장이라 크래시 시점에 따라 오늘 판 종목이 빠질 수 있다 — 원장의 오늘 매도 체결로 보강(11/15)
             today_ = self._now().strftime("%Y%m%d")
             for sym_ in self._sold_today_from_ledger(today_):
