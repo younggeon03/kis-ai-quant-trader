@@ -54,7 +54,12 @@ def daily_features(sym: str) -> pd.DataFrame:
     f["vol20"] = r.rolling(20).std()
     f["run5"] = c / c.shift(5) - 1.0
     f["run3"] = c / c.shift(3) - 1.0
+    f["mom20"] = c / c.shift(20) - 1.0
     f["ma20"] = c / c.rolling(20).mean() - 1.0
+    hl = (dd["high"].astype(float) - dd["low"].astype(float)) / c
+    f["rng1"] = hl                                   # 고저폭(변동성 군집 — Engle 1982)
+    f["atr10"] = hl.rolling(10).mean()
+    f["absr1"] = r.abs()
     f["close"] = c
     f["volume"] = dd["volume"].astype(float)
     sh = f.drop(columns=["ts"]).shift(1)          # 전일까지
@@ -93,11 +98,22 @@ def main() -> int:
     # 같은 4분 거래대금
     wtv = {sym: {d: float(np.nansum(a[3, :N].astype(float) * np.nan_to_num(a[4, :N].astype(float)))) for d, a in per.items()}
            for sym, per in data.items()}
+    # 업종(KRX KIND 상장법인목록 11/18 — 업종은 잘 안 바뀌어 지금 분류를 전 기간에 쓴다)
+    import csv as _csv
+    kind = ROOT / "data" / "krx" / "kind_corplist_20261118.csv"
+    ind_of: Dict[str, str] = {}
+    if kind.exists():
+        rows_ = list(_csv.reader(open(kind, encoding="utf-8")))
+        ind_of = {r[2].zfill(6): r[3] for r in rows_[1:] if len(r) > 3}
+    mom20_tbl = pd.DataFrame({sym: f["mom20"] for sym, f in feats.items()})
+    blob = s._universe_blob()
+    mcap_of, shares_of, mkt_of = blob.get("market_cap") or {}, blob.get("shares") or {}, blob.get("sectors") or {}
     cands: List[Dict[str, Any]] = []
     for j, d in enumerate(days[:-1]):
         nxt = days[j + 1]
         ups, tot = 0, 0
         ratios = {}
+        up_of: Dict[str, bool] = {}
         for sym, per in data.items():
             a = per.get(d)
             pc = pcs[sym].get(d)
@@ -107,11 +123,22 @@ def main() -> int:
             if np.isfinite(px):
                 tot += 1
                 ups += px > pc
+                up_of[sym] = px > pc
             hist = [wtv[sym][x] for x in days[max(0, j - 40):j] if x in wtv[sym]][-20:]
             r = same_window_ratio(wtv[sym][d], hist)
             if r > 0:
                 ratios[sym] = r
         breadth = ups / tot if tot else np.nan
+        ind_up: Dict[str, List[bool]] = {}
+        for sym_, u_ in up_of.items():
+            ind_up.setdefault(ind_of.get(sym_, "?"), []).append(u_)
+        m20row = mom20_tbl.loc[d] if d in mom20_tbl.index else None
+        ind_m20: Dict[str, List[float]] = {}
+        if m20row is not None:
+            for sym_, v_ in m20row.items():
+                if np.isfinite(v_):
+                    ind_m20.setdefault(ind_of.get(sym_, "?"), []).append(float(v_))
+        day_start = len(cands)
         for rank_i, (sym, ratio) in enumerate(rank_triggers(ratios, MULT)):
             a = data[sym][d]
             pc = pcs[sym][d]
@@ -145,7 +172,23 @@ def main() -> int:
                 "gap": o0 / pc - 1.0 if np.isfinite(o0) else np.nan,
                 "mkt20": mkt20.get(d, np.nan), "breadth": breadth,
                 "fi1": fi / v_prev if np.isfinite(fi) and v_prev and v_prev > 0 else np.nan,
+                "rng1": fr["rng1"], "atr10": fr["atr10"], "absr1": fr["absr1"],
+                "range4": (float(np.nanmax(a[1, :N])) - float(np.nanmin(a[2, :N]))) / o0 if o0 and np.isfinite(o0) else np.nan,
+                "mcap": float(mcap_of.get(sym) or np.nan),
+                "turn1": v_prev / float(shares_of[sym]) if shares_of.get(sym) else np.nan,
+                "kosdaq": 1.0 if mkt_of.get(sym) == "KOSDAQ" else 0.0,
+                "price": pc,
+                "ind": ind_of.get(sym, "?"),
+                "ind_up": (sum(ind_up.get(ind_of.get(sym, "?"), [])) - bool(up_of.get(sym, False)))
+                          / max(1, len(ind_up.get(ind_of.get(sym, "?"), [])) - 1),
+                "ind_mom20": float(np.mean(ind_m20[ind_of.get(sym, "?")])) if ind_of.get(sym, "?") in ind_m20 else np.nan,
             })
+        today = cands[day_start:]
+        cnt: Dict[str, int] = {}
+        for c_ in today:
+            cnt[c_["ind"]] = cnt.get(c_["ind"], 0) + 1
+        for c_ in today:
+            c_["ind_trig"] = cnt[c_["ind"]] - 1
         if (j + 1) % 100 == 0:
             print(f"  후보 {j + 1}/{len(days) - 1} ({time.time() - t0:.0f}s)", flush=True)
     df = pd.DataFrame(cands)
@@ -156,7 +199,8 @@ def main() -> int:
     # 1) 피처별 5분위(학습=2025 분위 경계를 검증에 그대로) — 후보 모집단의 평균 r2
     print("\n[피처별 5분위 평균 이틀 수익률] 학습 2025 | 검증 2026  (경계는 2025 기준)")
     tr, te = df[df.year == "2025"], df[df.year == "2026"]
-    feat_cols = ["ratio", "mom120", "near52", "max20", "vol20", "run5", "ma20", "ret4", "gap", "mkt20", "breadth", "fi1"]
+    feat_cols = ["ratio", "mom120", "near52", "max20", "vol20", "run5", "ma20", "ret4", "gap", "mkt20", "breadth", "fi1",
+                 "rng1", "atr10", "absr1", "range4", "mcap", "turn1", "price", "ind_up", "ind_mom20", "ind_trig"]
     for col in feat_cols:
         x = tr[col].dropna()
         if len(x) < 100:

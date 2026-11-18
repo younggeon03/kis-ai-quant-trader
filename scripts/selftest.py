@@ -2689,6 +2689,54 @@ async def test_server_reliability():
             eng.portfolio.positions = saved_pos
             eng._compliance_syms = {}
 
+        # 장 시작 정리(11/18) — 그날 09:00부터 그날 전에 산 종목만 넉넉한 지정가로 팔고, 그 종목은 전략 자리로 세지 않는다
+        # · 익절 — 현재가 ≥ 평단 x(1+k)이면 판다(요건·정리 대상 제외, 0 = 끔)
+        saved_of = (s.OPEN_FLATTEN_DATE, s.OPEN_FLATTEN_HHMM, s.OPEN_FLATTEN_BAND, s.EXIT_TAKE_PROFIT_PCT)
+        saved_pos = eng.portfolio.positions
+        saved_ed = dict(eng._entry_dates)
+        try:
+            d = dt.datetime
+            s.OPEN_FLATTEN_DATE, s.OPEN_FLATTEN_HHMM, s.OPEN_FLATTEN_BAND = "2026-11-19", "0900", 0.02
+            eng.portfolio.positions = {"OLD1": Position(symbol="OLD1", qty=5, avg_price=100.0),
+                                       "NEW1": Position(symbol="NEW1", qty=2, avg_price=100.0)}
+            eng._entry_dates = {"OLD1": "20261117", "NEW1": "20261119"}
+            eng._open_flatten_day, eng._open_flatten_syms = "", set()
+            of_sells: List[Tuple[str, int, float, str]] = []
+
+            async def _submit_of(symbol, side, qty, price, reason):
+                of_sells.append((symbol, qty, price, reason.split("|")[0]))
+                return True
+            saved_submit, eng._submit = eng._submit, _submit_of
+            await eng._open_flatten(d(2026, 11, 18, 9, 0), {"OLD1": 100.0})
+            await eng._open_flatten(d(2026, 11, 19, 8, 59), {"OLD1": 100.0})
+            assert not of_sells, f"정리 날·시각 전에 팔았다: {of_sells}"
+            await eng._open_flatten(d(2026, 11, 19, 9, 0), {"OLD1": 100.0, "NEW1": 100.0})
+            assert [x[:2] for x in of_sells] == [("OLD1", 5)], f"그날 전에 산 종목만 팔아야 한다: {of_sells}"
+            lim = of_sells[0][2] * (1 - s.SELL_LIMIT_BAND)
+            assert abs(lim - 98.0) < 1e-6, f"매도 지정가 = 현재가 x(1-0.02): {lim}"
+            assert "OLD1" not in eng._strategy_held() and "OLD1" in eng._compliance_exempt(), "정리 대상은 전략 자리로 세지 않는다"
+            # 익절
+            s.EXIT_TAKE_PROFIT_PCT = 0.103
+            of_sells.clear()
+            await eng._take_profit_exits({"NEW1": 110.2, "OLD1": 200.0})
+            assert not of_sells, f"익절선 아래(또는 정리 대상)에서 팔았다: {of_sells}"
+            await eng._take_profit_exits({"NEW1": 110.3})
+            assert [x[:2] + (x[3],) for x in of_sells] == [("NEW1", 2, "TP")], f"익절: {of_sells}"
+            s.EXIT_TAKE_PROFIT_PCT = 0.0
+            of_sells.clear()
+            await eng._take_profit_exits({"NEW1": 200.0})
+            assert not of_sells, "EXIT_TAKE_PROFIT_PCT=0 인데 팔았다"
+            s.OPEN_FLATTEN_DATE = ""
+            eng._open_flatten_day, eng._open_flatten_syms = "", set()
+            await eng._open_flatten(d(2026, 11, 19, 9, 0), {"OLD1": 100.0})
+            assert not of_sells, "OPEN_FLATTEN_DATE 빈 값인데 팔았다"
+            eng._submit = saved_submit
+        finally:
+            s.OPEN_FLATTEN_DATE, s.OPEN_FLATTEN_HHMM, s.OPEN_FLATTEN_BAND, s.EXIT_TAKE_PROFIT_PCT = saved_of
+            eng.portfolio.positions = saved_pos
+            eng._entry_dates = saved_ed
+            eng._open_flatten_day, eng._open_flatten_syms = "", set()
+
         # WS 체결가 — 한 건 필드 수를 머리의 건수로 나눈다(모의서버가 46개가 아니라 두 번째 건부터
         # 어긋나 가짜 종목코드·가격이 들어왔다, 10/20~29). 구독하지 않은 종목은 버린다.
         from core.websocket_client import WS_TR_TRADE, KISWebSocketClient, Subscription
@@ -2751,7 +2799,7 @@ async def test_server_reliability():
     return ("주문 읽기 타임아웃·5xx 재시도 안 함(결과 불명) · 접속 실패 재시도 · 조회 재시도 · "
             "무손실 체결 채널 · 히스토그램 분위수·Prometheus · Date 헤더 시계 오차 · "
             "장중 VWAP 청산(판정·배관) · 장중 추가 매수(첫 발동·배수 순·빈자리·당일 매도 제외·전일 대비 하한) · 체결통보로 미체결 추적 정리 · 날짜 변경 시 전날 미체결·요건 표시 정리 · 목표 도달 잠금(확인 대기·요건 제외) · 제한폭 밖 가격 버림 · 매수 지정가 상한가 클립 · "
-            "미체결 매도 취소·재대조 · 대회 마지막 날 전량 매도·종료 뒤 매수 금지 · WS 여러 건 체결가 파싱·미구독 종목 버림·멈춘 연결 재연결 모두 작동")
+            "미체결 매도 취소·재대조 · 대회 마지막 날 전량 매도·종료 뒤 매수 금지 · 장 시작 정리(그날 전 종목만·넉넉한 지정가·자리 면제)·익절 · WS 여러 건 체결가 파싱·미구독 종목 버림·멈춘 연결 재연결 모두 작동")
 
 
 @check("27. 직접 매매 스위치(매수·매도) · 지수 종목 순위판")

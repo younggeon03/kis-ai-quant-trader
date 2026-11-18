@@ -208,6 +208,8 @@ class TradingEngine:
         self._stale_warned: Dict[str, dt.datetime] = {}
         self._locked = False                              # 목표 도달 잠금(LOCK_RETURN) — 켜지면 끝까지 유지
         self._final_flatten_day = ""                      # 마지막 날 전량 매도를 알린 날(로그·원장 1회)
+        self._open_flatten_day = ""                       # 장 시작 정리를 시작한 날(OPEN_FLATTEN_DATE)
+        self._open_flatten_syms: set = set()              # 장 시작 정리 대상(그날 전에 산 종목)
         self._lock_seen: Optional[dt.datetime] = None     # 목표 첫 확인 시각(시세 튐 방지용 확인 대기)
         # 관제 화면용 오늘의 진입 판정 — 장 시작 판정 결과와 장중 발동, 각각 무엇이 됐는지(매매에는 안 쓴다)
         self._board: Dict[str, Any] = {"day": "", "opening": None, "slide": []}
@@ -686,6 +688,62 @@ class TradingEngine:
             if await self._submit(symbol, Side.SELL, qty, px, "FINAL|대회 마지막 날 전량 매도"):
                 self.ledger.write("exit", {"symbol": symbol, "qty": qty, "reason": "final",
                                            "detail": "대회 마지막 날 전량 매도"})
+
+    async def _open_flatten(self, now: dt.datetime, prices: Dict[str, float]) -> None:
+        """`OPEN_FLATTEN_DATE` 그날 `OPEN_FLATTEN_HHMM`부터 그날 전에 산 종목을 전부 판다(11/18 사용자 결정).
+
+        대상은 처음 발동할 때 한 번 정한다 — 그날 엔진이 산 종목(`_entry_dates` = 오늘)은 넣지 않는다(재시작해도 같다).
+        매도 지정가는 현재가 x(1-OPEN_FLATTEN_BAND)로 넉넉히 내 최우선 매수호가에 바로 체결되게 한다.
+        안 팔린 잔량은 `_reprice_stale_sells`(60초)가 취소하고 여기서 지금 가격으로 다시 낸다.
+        """
+        day = now.strftime("%Y-%m-%d")
+        if not self.s.OPEN_FLATTEN_DATE or day != str(self.s.OPEN_FLATTEN_DATE)                 or now.strftime("%H%M") < str(self.s.OPEN_FLATTEN_HHMM):
+            return
+        today = now.strftime("%Y%m%d")
+        if self._open_flatten_day != day:
+            self._open_flatten_day = day
+            self._open_flatten_syms = {s_ for s_ in self.portfolio.open_positions()
+                                       if self._entry_dates.get(s_) != today}
+            logger.warning(f"[장 시작 정리] {day} {self.s.OPEN_FLATTEN_HHMM} — 그 전에 산 {len(self._open_flatten_syms)}종목 매도 "
+                           f"{sorted(self._open_flatten_syms)}")
+            self.ledger.write("open_flatten", {"symbols": sorted(self._open_flatten_syms), "equity": self.portfolio.equity})
+        for symbol in sorted(self._open_flatten_syms):
+            pos = self.portfolio.positions.get(symbol)
+            if pos is None or pos.qty <= 0:
+                self._open_flatten_syms.discard(symbol)
+                continue
+            qty = self._sellable_qty(symbol, pos.qty)
+            if qty <= 0:
+                continue
+            px = prices.get(symbol, pos.last_price or pos.avg_price)
+            if px <= 0:
+                continue
+            # _submit 이 매도 지정가를 px x(1-SELL_LIMIT_BAND)로 만든다 — 그 위에 넉넉한 몫을 더 깎는다
+            ref = px * (1.0 - float(self.s.OPEN_FLATTEN_BAND)) / max(1e-9, 1.0 - float(self.s.SELL_LIMIT_BAND))
+            if await self._submit(symbol, Side.SELL, qty, ref, "OPENFLAT|장 시작 정리(갈아타기)"):
+                self.ledger.write("exit", {"symbol": symbol, "qty": qty, "reason": "open_flatten",
+                                           "detail": "장 시작 정리 — 그날 전에 산 종목"})
+
+    async def _take_profit_exits(self, prices: Dict[str, float]) -> None:
+        """전략 포지션 익절 — 현재가 ≥ 평단 x(1+EXIT_TAKE_PROFIT_PCT)이면 판다(11/18 이틀 +10% 목표, 0 = 끔).
+        요건 매매·장 시작 정리 대상은 보지 않는다. 체결 대기 잔량은 빼고 낸다."""
+        k = float(self.s.EXIT_TAKE_PROFIT_PCT)
+        if k <= 0:
+            return
+        for symbol, pos in list(self.portfolio.open_positions().items()):
+            if symbol in self._compliance_syms or symbol in self._open_flatten_syms or pos.avg_price <= 0:
+                continue
+            px = prices.get(symbol, 0.0)
+            if px <= 0 or px < pos.avg_price * (1.0 + k):
+                continue
+            qty = self._sellable_qty(symbol, pos.qty)
+            if qty <= 0:
+                continue
+            gain = px / pos.avg_price - 1.0
+            if await self._submit(symbol, Side.SELL, qty, px, f"TP|익절 {gain:+.2%}"):
+                logger.success(f"[익절] {symbol} {gain:+.2%} ≥ {k:.1%} — {qty}주 매도")
+                self.ledger.write("exit", {"symbol": symbol, "qty": qty, "reason": "take_profit",
+                                           "detail": f"현재가 {px:,.0f} ≥ 평단 {pos.avg_price:,.0f} x{1 + k:.3f}"})
 
     async def _vwap_exits(self, now: dt.datetime) -> None:
         """보유 종목을 장중 VWAP 청산 규칙으로 본다(`vwap_fade`). 복수시세 한 번으로 보유 종목을 다 본다.
@@ -1202,11 +1260,12 @@ class TradingEngine:
                 inflight = self.open_orders_symbols()
 
     def _compliance_exempt(self) -> set:
-        """전략 자리 수에서 빼는 종목 — 요건 전용 소액 매매 포지션."""
-        return set(self._compliance_syms)
+        """전략 자리 수에서 빼는 종목 — 요건 전용 소액 매매 포지션과 장 시작 정리 중인 종목."""
+        return set(self._compliance_syms) | set(getattr(self, "_open_flatten_syms", set()))
 
     def _strategy_held(self) -> set:
-        return set(self.portfolio.open_positions()) - self._compliance_exempt()
+        # 장 시작 정리 중인 종목은 곧 팔리므로 전략 자리로 세지 않는다(09:04 판정이 자리를 찾게)
+        return set(self.portfolio.open_positions()) - self._compliance_exempt() - self._open_flatten_syms
 
     async def _compliance_trades(self, now: dt.datetime, prices: Dict[str, float]) -> None:
         """지수 종목 요건 — 모자라면 소액으로 사서 당일 판다(2026-10-10, 사용자 결정).
@@ -2600,6 +2659,8 @@ class TradingEngine:
 
         # --- 대회 마지막 날 전량 매도 (설정 FINAL_FLATTEN) ---
         await self._final_flatten(now, prices)
+        await self._open_flatten(now, prices)
+        await self._take_profit_exits(prices)
         no_buy = self._locked or self._entries_closed(now)
 
         # --- 장중 VWAP 청산 (설정 VWAP_EXIT) ---

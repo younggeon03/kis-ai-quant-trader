@@ -732,6 +732,18 @@ class Settings(BaseSettings):
         default="1510",
         description="마지막 날 전량 매도 시작 시각. 15:20~15:30 동시호가에는 엔진이 주문을 내지 않으므로 "
                     "연속 매매 구간에서 시작해 안 팔린 잔량을 미체결 매도 재접수(60초)로 따라간다")
+    OPEN_FLATTEN_DATE: str = Field(
+        default="",
+        description="이 날(YYYY-MM-DD) OPEN_FLATTEN_HHMM부터 **그날 전에 산 종목**을 전부 판다(11/18 사용자 결정 — "
+                    "직접 산 종목을 09:00에 팔고 09:04 장 시작 판정으로 갈아탄다). 빈 값이면 끈다")
+    OPEN_FLATTEN_HHMM: str = Field(default="0900", description="OPEN_FLATTEN_DATE 매도 시작 시각")
+    OPEN_FLATTEN_BAND: float = Field(
+        default=0.02,
+        description="장 시작 정리 매도 지정가 = 현재가 x(1-이 값). 최우선 매수호가에 바로 맞게 넉넉히(시장가처럼)")
+    EXIT_TAKE_PROFIT_PCT: float = Field(
+        default=0.0,
+        description="전략 포지션 현재가 ≥ 평단 x(1+이 값)이면 판다(0 = 끔). 11/18 이틀 +10% 목표 측정: 순수익 +10% = 0.103 "
+                    "(scripts/two_day_study.py B, P(이틀 ≥ +10%) 22.9%)")
     VTS_BLOCK_FULL_MARGIN: bool = Field(
         default=True,
         description="증거금률 100% 종목을 주문 전에 건너뛸지. 10/19~10/30 막지 않고 주문해 봤는데 "
