@@ -490,7 +490,8 @@ async function refresh() {
   const el = Math.round(sys.elapsed_sec||0);
   $('meta').innerHTML = [
     `<b>${esc(sys.mode||'—')}</b>`,
-    sys.no_buy ? '<span class="nobuy">엔진 매수 차단(직접 매매)</span>' : '엔진 매수 중',
+    sys.no_buy ? '<span class="nobuy">엔진 매수 차단</span>' : '엔진 매수 중',
+    sys.no_sell ? '<span class="nobuy">엔진 매도 차단(손절·마감 매도 없음)</span>' : '엔진 매도 중',
     `장 ${esc({REGULAR:'정규장',PRE_AUCTION:'장전 동시호가',CLOSING_AUCTION:'마감 동시호가',AFTER_HOURS:'시간외',CLOSED:'휴장'}[sys.session]||sys.session||'—')}`,
     `유니버스 <b>${num(sys.universe)}</b>종목`,
     `루프 <b>${num(sys.loops)}</b>`,

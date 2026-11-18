@@ -200,6 +200,8 @@ class TradingEngine:
         self._rank_last_poll: float = 0.0
         self._dash_picks: List[str] = self._load_dash_picks()
         self._no_buy_logged: Optional[bool] = None        # 매수 차단 상태가 바뀔 때만 로그
+        self._no_sell_logged: Optional[bool] = None       # 매도 차단 상태가 바뀔 때만 로그
+        self._blocked_logged: Dict[str, str] = {}          # (매도|매수:종목) → 날짜 — 막힌 주문 로그는 하루 한 번
         # same_window 기준선 — 종목 → 지난 거래일들의 09:00~09:0N 거래대금(오래된 것부터, 최대 20)
         self._opening_hist: Dict[str, List[float]] = {}
         # 종목 → 분봉 파일의 마지막 날짜. 같은 날을 두 번 기록하지 않으려고 들고 있다.
@@ -534,6 +536,22 @@ class TradingEngine:
                 logger.warning("[매수 차단] 엔진 신규 매수 중지(ENGINE_NO_BUY 또는 state/NO_BUY) — 청산·관제만 한다")
             elif self._loops > 0:
                 logger.warning("[매수 차단] 해제 — 엔진이 다시 산다")
+        return on
+
+    def _no_sell_switch(self) -> bool:
+        """직접 매매 스위치(매도) — `ENGINE_NO_SELL` 또는 `STATE_DIR/NO_SELL` 파일. 켜져 있으면 엔진은 팔지도
+        주문을 취소하지도 않는다(2026-11-18 사용자 결정 — 직접 산 종목을 엔진 청산 규칙이 팔지 않게).
+
+        **손절 25%·마지막 날 15:10 전량 매도까지 전부 꺼진다** — 청산은 전부 사람이 한다.
+        """
+        on = bool(self.s.ENGINE_NO_SELL) or (Path(self.s.STATE_DIR) / "NO_SELL").exists()
+        if on != self._no_sell_logged:
+            self._no_sell_logged = on
+            if on:
+                logger.warning("[매도 차단] 엔진 매도·주문 취소 중지(ENGINE_NO_SELL 또는 state/NO_SELL) — "
+                               "손절·vol_alive·마지막 날 전량 매도 모두 사람이 한다")
+            elif self._loops > 0:
+                logger.warning("[매도 차단] 해제 — 엔진 청산 규칙이 다시 돈다")
         return on
 
     def _entries_closed(self, now: dt.datetime) -> bool:
@@ -1897,6 +1915,14 @@ class TradingEngine:
     async def _submit(self, symbol: str, side: Side, qty: int, price: float, reason: str) -> bool:
         if qty <= 0:
             return False
+        # 직접 매매 스위치 — 모든 엔진 주문이 지나는 한 곳에서 막는다(매수는 `_entries_closed`에 이은 두 번째 문).
+        # 청산 판정은 3초마다 다시 나오므로 로그는 종목당 하루 한 번만 남긴다.
+        if (self._no_sell_switch() if side is Side.SELL else self._no_buy_switch()):
+            key, day = f"{side.value}:{symbol}", self._now().strftime("%Y%m%d")
+            if self._blocked_logged.get(key) != day:
+                self._blocked_logged[key] = day
+                logger.info(f"[직접 매매] 엔진 {side.value} {symbol} {qty}주 막음 ({reason})")
+            return False
         # 지정가 폭은 **매수와 매도가 비대칭**이다 (실측 33,482 돌파 사건 · 13.4M 분봉)
         #
         # 매수: 가격이 올라가는 중에 그 아래로 걸어 추격해야 한다. +0.4%로는
@@ -2038,7 +2064,9 @@ class TradingEngine:
                     age = (now - dt.datetime.fromisoformat(placed)).total_seconds()
                 except ValueError:
                     age = 0.0
-            if age > max_age_seconds:
+            # 매도 차단(직접 매매) 중에는 취소하지 않는다 — 이 목록에는 앱에서 낸 주문도 섞여 있고,
+            # 처음 보는 주문은 지금 시각으로 추적을 시작하므로 180초 뒤 엔진이 그 주문을 취소한다
+            if age > max_age_seconds and not self._no_sell_switch():
                 try:
                     await self.broker.cancel_order(org_no, order_no, all_qty=True)
                     logger.info(f"[Orders] 장기 미체결 취소: {prev.get('symbol', '')} {order_no} "
@@ -2065,7 +2093,12 @@ class TradingEngine:
         `_sync_open_orders`의 장기 미체결 취소가 돌지 않는다.
 
         취소가 실패하면 대개 이미 다 팔린 것이다 — 잔고에 없으면 추적을 지운다.
+
+        매도 차단(직접 매매) 중에는 돌지 않는다 — 미체결 대조가 되는 서버에서는 앱에서 낸 매도도
+        `open_orders`에 들어와 60초 뒤 취소된다.
         """
+        if self._no_sell_switch():
+            return
         stale: List[Tuple[str, Dict[str, Any]]] = []
         for order_no, o in self.open_orders.items():
             if o.get("side") != Side.SELL.value:
@@ -2726,8 +2759,11 @@ class TradingEngine:
                         f"호가 {snap['symbols_ob']}종목 · 테이프 {snap['symbols_tape']}종목 · "
                         f"오류 {snap['errors']}")
 
-        # 1) 미체결 주문 취소
+        # 1) 미체결 주문 취소 — 매도 차단(직접 매매) 중에는 하지 않는다. 증권사 미체결 전량 취소는
+        #    앱에서 낸 주문까지 지운다(배포 재시작 때마다 사람이 걸어 둔 익절 지정가가 사라진다)
         try:
+            if self._no_sell_switch():
+                raise RuntimeError("매도 차단 중 — 미체결 취소 건너뜀(앱 주문 보존)")
             if hasattr(self.broker, "cancel_all_open_orders"):
                 await self.broker.cancel_all_open_orders()  # type: ignore[attr-defined]
             else:
@@ -2944,6 +2980,7 @@ class TradingEngine:
             "system": {
                 "running": self._running,
                 "no_buy": bool(self._no_buy_logged),
+                "no_sell": bool(self._no_sell_logged),
                 "mode": "MOCK(가상체결)" if self.s.USE_MOCK_MODE
                         else ("실전" if self.s.is_prod else "KIS 모의투자"),
                 "session": self._session().value,

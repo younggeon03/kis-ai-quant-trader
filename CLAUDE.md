@@ -47,11 +47,12 @@ scripts/open_dashboard.cmd                    # SSH 터널(8500) + 관제 화면
 ```
 
 - **직접 매매 기간(2026-11-18~, 사용자 결정)**: 엔진 매수 차단은 서버에 `state/NO_BUY` 파일을 만들면 된다(재시작 불필요,
-  지우면 풀린다 · `.env` `ENGINE_NO_BUY=true`도 같다). 청산(손절 25%·`vol_alive`·11/20 15:10 전량 매도)은 계속 돌고
-  **직접 산 종목도 잔고 대조로 편입돼 같은 규칙을 받는다.** 관제 화면에 지수 종목 거래대금·등락률 순위와
+  지우면 풀린다 · `.env` `ENGINE_NO_BUY=true`도 같다). **매도도 막는다**(`state/NO_SELL` · `ENGINE_NO_SELL`) — 손절 25%·
+  `vol_alive`·11/20 15:10 전량 매도·요건 청산·미체결 취소(앱 주문 포함)가 전부 꺼지고 청산은 사람이 한다
+  (사용자는 하루 +5% 단기 차익). 모든 엔진 주문이 지나는 `_submit`에서 막는다. 관제 화면에 지수 종목 거래대금·등락률 순위와
   관심 종목(`config/dash_picks.json`)을 띄운다(`monitor/ranking.py`, 60초 복수시세 — 매매에는 안 쓴다).
   ```bash
-  ssh -i ~/.ssh/bankis_oracle root@$BANKIS_SERVER "touch ~/bankis/state/NO_BUY"   # 매수 차단
+  ssh -i ~/.ssh/bankis_oracle root@$BANKIS_SERVER "touch ~/bankis/state/NO_BUY ~/bankis/state/NO_SELL"   # 매수·매도 차단
   ```
 - `code`는 git HEAD만 보낸다 — **커밋하지 않은 변경은 안 간다.** 데이터·`.env`는 보내지 않는다.
 - `switch`는 노트북 원장·상태 파일까지 서버에 덮어쓴다. 서버가 실거래 중인 지금은 쓰지 않는다.

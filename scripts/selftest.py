@@ -2541,7 +2541,7 @@ async def test_server_reliability():
             "미체결 매도 취소·재대조 · 대회 마지막 날 전량 매도·종료 뒤 매수 금지 · WS 여러 건 체결가 파싱·미구독 종목 버림·멈춘 연결 재연결 모두 작동")
 
 
-@check("27. 직접 매매 스위치 · 지수 종목 순위판")
+@check("27. 직접 매매 스위치(매수·매도) · 지수 종목 순위판")
 async def test_rank_board():
     """직접 매매 기간(2026-11-18~) — 엔진 매수 차단 스위치와 관제 화면 순위판.
 
@@ -2614,12 +2614,50 @@ async def test_rank_board():
         assert [p["symbol"] for p in rk["picks"]] == [mem[0], "999999"], "관심 종목 순서"
         assert rk["picks"][0]["tv_rank"] == 2 and rk["picks"][1]["chg_pct"] == 25.0, f"관심 종목 값: {rk['picks']}"
         assert eng.state_snapshot()["rank"] is rk, "상태 스냅샷에 순위판이 없다"
+
+        # --- 매도 차단: 모든 매도·취소가 막히고, 끄면 다시 판다 ---
+        from core.events import OrderAck
+        sent, cancels = [], []
+
+        class _Broker2:
+            async def submit_order(self, req):
+                sent.append((req.side.value, req.symbol))
+                return OrderAck(success=True, order_no=f"N{len(sent)}", symbol=req.symbol,
+                                side=req.side, qty=req.qty, price=req.price)
+
+            async def cancel_order(self, org_no, order_no, qty=0, all_qty=True):
+                cancels.append(order_no)
+                return {"rt_cd": "0"}
+
+            async def inquire_open_orders(self):        # 앱에서 낸 매도(엔진은 모르는 주문)
+                return {"rt_cd": "0", "output1": [{"odno": "APP1", "pdno": mem[0], "rmn_qty": "10"}]}
+
+            async def get_portfolio_state(self):
+                return eng.portfolio.cash, dict(eng.portfolio.positions)
+        eng.broker = _Broker2()
+        eng.portfolio.positions[mem[0]] = Position(symbol=mem[0], qty=10, avg_price=1000.0, last_price=1000.0)
+        nsell = Path(s.STATE_DIR) / "NO_SELL"
+        nsell.write_text("", encoding="utf-8")
+        assert not await eng._submit(mem[0], Side.SELL, 10, 1000.0, "STOP_LOSS|test"), "매도 차단 중 매도가 나갔다"
+        last_day = dt.datetime(2026, 11, 20, 15, 11)
+        await eng._final_flatten(last_day, {mem[0]: 1000.0})
+        eng.open_orders = {"APP1": {"symbol": mem[0], "side": "SELL", "qty": 10, "price": 1000.0,
+                                    "ts": (eng._now() - dt.timedelta(seconds=999)).isoformat()}}
+        await eng._sync_open_orders(max_age_seconds=1.0)
+        await eng._reprice_stale_sells(last_day)
+        assert not sent and not cancels, f"매도 차단 중 엔진이 팔거나 앱 주문을 취소했다: {sent} {cancels}"
+        assert eng.state_snapshot()["system"]["no_sell"], "관제 화면에 매도 차단 표시가 없다"
+        nsell.unlink()
+        assert await eng._submit(mem[0], Side.SELL, 10, 1000.0, "STOP_LOSS|test"), "차단을 풀었는데 못 판다"
+        assert sent == [("SELL", mem[0])], f"해제 뒤 매도: {sent}"
     finally:
         for k, v in saved.items():
             setattr(s, k, v)
         (Path(s.STATE_DIR) / "NO_BUY").unlink(missing_ok=True)
+        (Path(s.STATE_DIR) / "NO_SELL").unlink(missing_ok=True)
     return ("순위판(지수 종목만·거래대금 순·전일 종가 모르면 등락률 없음·소형·보유 표시) · 관심 종목 순위·지수 밖 표시 · "
-            "state/NO_BUY·ENGINE_NO_BUY 매수 차단과 해제 · 마지막 날 매수 금지 유지 모두 작동")
+            "state/NO_BUY·ENGINE_NO_BUY 매수 차단과 해제 · 마지막 날 매수 금지 유지 · "
+            "state/NO_SELL 매도 차단(청산·마지막 날 전량 매도·앱 주문 취소·매도 재접수 없음)과 해제 모두 작동")
 
 
 # ============================================================ 실행

@@ -702,6 +702,10 @@ class Settings(BaseSettings):
         default=False,
         description="엔진의 모든 신규 매수(장 시작·장중·요건 매매)를 막는다. 청산(손절·vol_alive·마지막 날 "
                     "전량 매도)은 그대로 돈다. state/NO_BUY 파일로도 켤 수 있다")
+    ENGINE_NO_SELL: bool = Field(
+        default=False,
+        description="엔진의 모든 매도(손절·vol_alive·마지막 날 전량 매도·요건 매매 청산)와 주문 취소를 막는다 — "
+                    "직접 매매 종목을 엔진이 팔거나 앱 주문을 취소하지 않게. state/NO_SELL 파일로도 켤 수 있다")
     # 관제 화면 순위 패널 — 지수(코스피200·코스닥150) 종목 거래대금·등락률 순위(복수시세, 시세 P2)
     DASH_RANK: bool = Field(default=True, description="관제 화면에 지수 종목 거래대금·등락률 순위를 띄운다")
     DASH_RANK_POLL_SEC: float = Field(
