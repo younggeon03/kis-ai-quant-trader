@@ -25,7 +25,7 @@
 | **스택** | Python 3.13 · asyncio · httpx · WebSocket · FastAPI · Prometheus 형식 지표 · scikit-learn |
 | **검증** | 셀프테스트 27개 항목(`scripts/selftest.py`) · Mock 브로커로 네트워크 없이 전 경로 재현 |
 
-### 운영하며 풀어 낸 문제 (수치는 [docs/포트폴리오-자기소개서.md](docs/포트폴리오-자기소개서.md) 7장에 출처)
+### 운영하며 풀어 낸 문제 (수치 출처는 [docs/서버-운영-설계.md](docs/서버-운영-설계.md) · [docs/TODO-대회준비.md](docs/TODO-대회준비.md))
 
 | 문제 | 해결 | 결과 |
 |---|---|---|
@@ -158,7 +158,6 @@ docs/                    설계·전략·운영 문서
 | [docs/네트워크-전송계층-분석.md](docs/네트워크-전송계층-분석.md) | 지연 분해, 전송 계층 분석 |
 | [docs/기술노트.md](docs/기술노트.md) | 이 저장소로 배우는 백엔드·운영 기술 |
 | [docs/TODO-대회준비.md](docs/TODO-대회준비.md) | 날짜순 진행 기록 — 측정 결과, 데이터 지문, 결정과 이유 |
-| [docs/포트폴리오-자기소개서.md](docs/포트폴리오-자기소개서.md) | 운영 중 마주친 문제 9건의 진단·해결 정리 |
 | [docs/architecture.html](docs/architecture.html) | 인터랙티브 구조 다이어그램 |
 | [deploy/oracle/README.md](deploy/oracle/README.md) | 서버 배포 절차 |
 
