@@ -35,6 +35,11 @@ python scripts/combo_study.py --slide-grid 5:10   # 지금 실거래 조합(장 
 python scripts/build_turnover_profile.py --window 10  # VWAP 청산 기준선 표(--window 5 = 장중 추가 매수용) — 분봉 수집 뒤 다시 만들어 서버에 보낸다
 python scripts/probe_warn.py <종목들>          # 모의투자 매매불가(증거금 100%) 확인 — 엔진과 같은 앱 키라 장 마감 후
 python scripts/widen_universe.py              # 거래대금 하한만 낮춘 유니버스(5억은 측정에서 기각, 10/16)
+python scripts/two_day_study.py             # 이틀 매매 방식 비교(+10% 목표, 11/18) · --filters 로 필터 적용판
+python scripts/two_day_cv.py                # 필터·점수제 x 방식 시간 순 5조각 교차검증(+10% 확률)
+python scripts/build_agent_data.py          # 에이전트 팀 공용 데이터(지수 x 날짜 09:03 피처 + 이틀 결과, reports/agent_data)
+python scripts/agent_eval.py                # 공통 평가기 기준선(개발 구간만 — 2026-07-01~ 봉인)
+python scripts/final_review.py              # 에이전트 후보 봉인 구간 심사(리더가 한 번만) · switch_review.py 갈아타기 재측정
 python -m compileall -q config core api strategy backtest utils monitor scripts main.py
 ```
 
@@ -49,7 +54,9 @@ scripts/open_dashboard.cmd                    # SSH 터널(8500) + 관제 화면
 - **마지막 이틀(11/19~20) 엔진 재가동 — 목표 이틀 누적 +10%(11/18 저녁, 사용자 결정)**: 서버 `.env`(백업 `.env.bak.20261118`)
   `MAX_POSITIONS=1` · `FIXED_POSITION_WEIGHT=0.98` · `MAX_POSITION_WEIGHT=1.0` · `OPENING_RANK_BY=atr10`(장 시작 판정 통과 종목 중
   10일 평균 고저폭 큰 순) · `OPEN_FLATTEN_DATE=2026-11-19`(09:00 그 전에 산 종목 매도 → 09:04 판정으로 갈아타기) ·
-  `EXIT_TAKE_PROFIT_PCT=0.103`(순수익 +10% 익절) · 11/20 15:10 `FINAL_FLATTEN`. 손절·`vol_alive`는 11/17부터 꺼져 있다. `NO_BUY`·`NO_SELL` 삭제.
+  `EXIT_TAKE_PROFIT_PCT=0.103`(순수익 +10% 익절, 체결 직후 지정가를 **걸어 둔다** — `TPLIMIT`, 상태 파일로 같은 날 복원) ·
+  11/20 15:10 `FINAL_FLATTEN`(걸어 둔 익절을 먼저 취소). 장 시작 정리는 현재가부터(15초 재접수, 판정 40초 전 −1%, 진입 최대 120초 대기).
+  손절·`vol_alive`는 11/17부터 꺼져 있다. `NO_BUY`·`NO_SELL` 삭제. 규칙 표는 `docs/매매전략.md` 12-14절.
   측정(`scripts/two_day_study.py`·`two_day_cv.py`, 지문 `d30cf1675546e7f8`): P(이틀 ≥ +10%) 배수 순 22.9% · ATR10 순 26.6%
   (시간 순 5조각 중 4조각 우세) · 이틀 평균 +0.6~0.9% · 손실 48%. 종목 비율 규정 상수 `MAX_SINGLE_WEIGHT`는 1.0(규정 없음, 11/17).
 - **직접 매매 기간(2026-11-18 낮, 사용자 결정 — 저녁에 위 재가동으로 바뀜)**: 엔진 매수 차단은 서버에 `state/NO_BUY` 파일을 만들면 된다(재시작 불필요,
