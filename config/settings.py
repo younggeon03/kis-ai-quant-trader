@@ -172,7 +172,7 @@ class Settings(BaseSettings):
     # 분봉 선정은 **무작위보다 나빴다**(선택 −0.366% vs 전체 −0.213%), 일봉 전략
     # 승구간 11/28 vs 동일가중 매수보유 21/28.
     #
-    # 대신 꼬리 확률이 가장 큰 **조건**을 쓴다. `scripts/tail_grid.py` 전수 탐색
+    # 대신 꼬리 확률이 가장 큰 **조건**을 쓴다. `scripts/research/tail_grid.py` 전수 탐색
     # (지문 22d557320d0e640d · 284종목 · 조건 6종 x 종목수 4 x 회전 5 · 시행 8만):
     #
     # | 조건 | 구조 | 30일 P(+100%) @스킬0 | P(-50%) |
@@ -331,14 +331,14 @@ class Settings(BaseSettings):
     # 누적 10배는 감지가 늦다(중앙 10:59, 이미 +7%). 그래서 장 시작 N분의 거래대금을
     # 평소 하루 거래대금(20봉 중앙)의 N/390 몫과 비교한다. 판정은 09:0N에 한 번,
     # 진입은 09:(N+지연)부터 — 284종목 분봉 조회(모의 유량 약 2.6분)가 끝나야 하고,
-    # 측정(`scripts/opening_study.py`)이 "구간 끝 + 지연분 시가"로 들어간다.
+    # 측정(`scripts/research/opening_study.py`)이 "구간 끝 + 지연분 시가"로 들어간다.
     OPENING_WINDOW_MIN: int = Field(
         default=5, description="opening 모드 판정 구간(09:00부터 N분)")
     OPENING_MULT: float = Field(
         default=10.0, description="opening 모드 배수 k(평소 N분 몫 대비). 측정 전 자리표시")
     OPENING_LAG_MIN: int = Field(
         default=3, description="판정 구간 끝 → 진입까지 지연(분). 분봉 조회 시간을 덮는다")
-    # 기준선 — 측정(2026-10-10, scripts/opening_study.py, 2025-01~): 현재 누적 10배 P(+100%)
+    # 기준선 — 측정(2026-10-10, scripts/research/opening_study.py, 2025-01~): 현재 누적 10배 P(+100%)
     # 6.60%에 대해 day_avg(하루 평균 N분 몫)는 4.3~7.4%로 낫지 않았고(장 초반 거래 집중 때문),
     # same_window(지난 20일 같은 구간 중앙)는 3~15분에서 8.4~9.9%였다(약한 증거 — 나은 창 반반).
     # 가격 필터 — 측정(2026-11-12, combo_study --ma-filters, 지수 281종목 · 6거래일 창 430개 · 2자리 x49%):
@@ -383,7 +383,7 @@ class Settings(BaseSettings):
         default="same_window",
         description="opening 모드 기준선: same_window=지난 20거래일 같은 09:00~09:0N 거래대금 중앙 / "
                     "day_avg=평소 하루 거래대금(20봉 중앙) x N/390")
-    # --- sliding 모드 (2026-10-10 구현, **측정 전** — scripts/sliding_study.py) ---
+    # --- sliding 모드 (2026-10-10 구현, **측정 전** — scripts/research/sliding_study.py) ---
     #
     # 장 전체 시간에 매 분 "직전 W분 거래대금 >= k x 기준선"이 되는 그날 첫 분을 잡는다.
     # 감시는 284종목 당일분봉(최근 30분)을 KIS로 돌아가며 받는다(한 바퀴 약 2.6분 —
@@ -702,7 +702,7 @@ class Settings(BaseSettings):
 
     # 요건 전용 소액 매매 (2026-10-10, 사용자 결정)
     #
-    # 측정(scripts/compliance_study.py): 폭증 진입은 소형주를 골라 30거래일에 지수
+    # 측정(scripts/research/compliance_study.py): 폭증 진입은 소형주를 골라 30거래일에 지수
     # (코스피200·코스닥150) 종목을 중앙 2개만 산다 — 5종목 요건 충족 10.7%. 그래서 전략과
     # 별개로 지수 대형주를 소액씩 사서 당일 판다. 전략 자리(MAX_POSITIONS)에서 빼고 센다.
     COMPLIANCE_TRADES: bool = Field(
@@ -721,7 +721,7 @@ class Settings(BaseSettings):
         default=0.0,
         description="목표 도달 잠금 — 누적 수익률이 이 값 이상이면 전략 포지션을 전량 팔고 대회 끝까지 "
                     "새로 사지 않는다(0이면 끔). 심사는 마지막 날 수익률만 보므로 중간에 목표를 찍고 "
-                    "내려오는 경로를 목표로 바꾼다. 측정 scripts/combo_study.py --lock-study (10/19)")
+                    "내려오는 경로를 목표로 바꾼다. 측정 scripts/research/combo_study.py --lock-study (10/19)")
     FINAL_FLATTEN: bool = Field(
         default=True,
         description="대회 마지막 날(COMP_END) FINAL_FLATTEN_HHMM부터 전 포지션을 팔고 그날은 새로 사지 않는다. "
@@ -755,7 +755,7 @@ class Settings(BaseSettings):
     EXIT_TAKE_PROFIT_PCT: float = Field(
         default=0.0,
         description="전략 포지션 현재가 ≥ 평단 x(1+이 값)이면 판다(0 = 끔). 11/18 이틀 +10% 목표 측정: 순수익 +10% = 0.103 "
-                    "(scripts/two_day_study.py B, P(이틀 ≥ +10%) 22.9%)")
+                    "(scripts/research/two_day_study.py B, P(이틀 ≥ +10%) 22.9%)")
     VTS_BLOCK_FULL_MARGIN: bool = Field(
         default=True,
         description="증거금률 100% 종목을 주문 전에 건너뛸지. 10/19~10/30 막지 않고 주문해 봤는데 "

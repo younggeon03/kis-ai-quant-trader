@@ -1364,7 +1364,7 @@ class TradingEngine:
     async def _compliance_trades(self, now: dt.datetime, prices: Dict[str, float]) -> None:
         """지수 종목 요건 — 모자라면 소액으로 사서 당일 판다(2026-10-10, 사용자 결정).
 
-        측정(scripts/compliance_study.py)에서 지금 진입 규칙은 30거래일에 지수 종목을 중앙
+        측정(scripts/research/compliance_study.py)에서 지금 진입 규칙은 30거래일에 지수 종목을 중앙
         2개만 샀다(5종목 요건 충족 10.7%). 요건을 놓치면 수익률과 무관하게 실격이다.
         """
         # 매도는 `COMPLIANCE_TRADES`를 꺼도 돈다 — 요건이 찬 뒤 끄면(10/19 사용자) 이미 산 요건 포지션이
@@ -1449,7 +1449,7 @@ class TradingEngine:
     def _load_opening_history(self, today: str) -> None:
         """same_window 기준선 — 종목별로 **오늘 이전** 거래일들의 09:00~09:0N 거래대금을 적재한다.
 
-        측정(`scripts/opening_study.py`)과 같은 함수(`window_turnover`)로 계산하고, 판정은
+        측정(`scripts/research/opening_study.py`)과 같은 함수(`window_turnover`)로 계산하고, 판정은
         `same_window_base`가 마지막 20일(최소 10일)의 중앙값으로 한다. 파일은 토스 수집분
         (`collect_opening.py`)에 대회 중 09:0N 판정 때 받은 KIS 분봉이 이어 붙는다.
         """
