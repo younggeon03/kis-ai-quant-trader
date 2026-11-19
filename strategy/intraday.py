@@ -446,7 +446,7 @@ class IntradayWatcher:
         """청산해야 하면 사유, 아니면 `None`.
 
         우선순위는 **손절 > 트레일링 > 목표 > 마감정리**다. 손절을 먼저 보는 것은
-        백테스트(`scripts/minute_exit_grid.py::simulate_rule`)와 같은 선택이고,
+        백테스트(`scripts/research/minute_exit_grid.py::simulate_rule`)와 같은 선택이고,
         같은 틱에서 양쪽이 충족될 때 유리한 쪽을 가정하면 결과가 부풀려진다.
         """
         w = self.watches.get(symbol)

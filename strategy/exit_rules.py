@@ -326,7 +326,7 @@ def vwap_fade(price: float, cum_turnover: float, cum_volume: float,
     """장중 VWAP 청산 — 가격이 당일 VWAP 아래로 밀렸고 직전 W분 거래대금이 평소보다 적으면 사유를 돌려준다.
 
     "오늘 산 사람 대부분이 손실인데 받아 줄 거래도 식고 있다"는 뜻이다. 측정
-    (`scripts/takeprofit_study.py --vwap`, 289종목, 2026-10-15): VWAP 아래 + 직전 10분 < 평소 x1 →
+    (`scripts/research/takeprofit_study.py --vwap`, 289종목, 2026-10-15): VWAP 아래 + 직전 10분 < 평소 x1 →
     P(+100%) 6.47% vs 장중 매도 없음 3.98%. 단, 이웃 칸(15·20·30분, VWAP 1~3% 아래)은 0~6%로 흩어져
     확인 측정을 통과하지 못했다 — 사용자 결정으로 넣었다(2026-10-15).
 

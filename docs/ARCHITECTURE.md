@@ -995,6 +995,7 @@ VWAP가 판 종목을 장중 추가 매수가 곧바로 되산다.
 - 진입 직전 `strategy/eligibility.py::vts_tradable`로 매매불가(증거금 100%·경보)를 거르고(11/04~ `VTS_BLOCK_FULL_MARGIN=true`),
   `40070000` 거부 종목은 그날 다시 내지 않는다.
 - 대회 마지막 날(`COMP_END`)은 매수를 막고 15:10부터 `_final_flatten()`이 요건 포지션까지 판다(`FINAL_FLATTEN`).
+  `FINAL_DAY_BUY=true`면 `_entries_closed()`가 그날 `FINAL_FLATTEN_HHMM` 전까지 진입을 열어 둔다(장 시작 판정이 평소처럼 돈다).
   종료 뒤에는 `_entries_closed()`가 설정과 무관하게 모든 진입 경로(장 시작·장중 추가·sliding·분봉·일봉·요건 매수)를 막는다.
   15:20 동시호가부터는 `_tick()`이 주문을 내지 않으므로 연속 매매 구간에서 시작한다.
 

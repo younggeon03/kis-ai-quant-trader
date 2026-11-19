@@ -541,7 +541,7 @@ class RiskManager:
             # 상태 기반 보유)과 다른 것이고, 백테스트에는 대회 날짜가 없어 어떤
             # 측정에도 나타나지 않았다.
             # 익절도 손절이 아니라 전략 청산이라 1단계에 돈다(2026-10-14 사용자 결정, 측정
-            # `scripts/takeprofit_study.py`). 측정은 진입가 x (1+익절) 지정가 매도다.
+            # `scripts/research/takeprofit_study.py`). 측정은 진입가 x (1+익절) 지정가 매도다.
             if not self.use_stop_loss:
                 if decay is not None:
                     exits.append(ExitOrder(symbol, pos.qty, _DECAY_REASON[decay.rule],

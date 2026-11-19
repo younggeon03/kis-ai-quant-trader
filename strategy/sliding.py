@@ -19,7 +19,7 @@
 
 ## 측정과 같은 코드
 
-`scripts/sliding_study.py`가 이 함수들을 그대로 쓴다(CLAUDE.md §11).
+`scripts/research/sliding_study.py`가 이 함수들을 그대로 쓴다(CLAUDE.md §11).
 주문도 포트폴리오도 모른다.
 """
 

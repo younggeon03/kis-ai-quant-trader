@@ -15,7 +15,7 @@
 
 ## 측정과 같은 코드
 
-`scripts/opening_study.py`가 **이 함수들을 그대로** 쓴다. 측정과 실거래가 각자
+`scripts/research/opening_study.py`가 **이 함수들을 그대로** 쓴다. 측정과 실거래가 각자
 구현하면 창이 한 칸만 어긋나도 다른 규칙을 실거래로 들고 간다(CLAUDE.md §11).
 
 ## 시각 표기 (실서버 확인 필요)
