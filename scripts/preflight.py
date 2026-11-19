@@ -264,7 +264,7 @@ def check(settings, live: bool) -> List[Tuple[str, str, str, str]]:
         add(FATAL, "장중 진입 모드", s.INTRADAY_ENTRY_MODE in ("burst", "opening"),
             f"{s.INTRADAY_ENTRY_MODE}",
             "breakout(가격 +3% 돌파)은 P(+100%) 0.00%로 측정됐다. sliding(장중 직전 W분)은 "
-            "구현만 됐고 **측정 전**이다(scripts/sliding_study.py) — 측정 후 이 점검을 고친다")
+            "구현만 됐고 **측정 전**이다(scripts/research/sliding_study.py) — 측정 후 이 점검을 고친다")
         if s.INTRADAY_ENTRY_MODE == "burst":
             add(WARN, "장중 폭증 배수", abs(s.INTRADAY_BURST_MULT - 10.0) < 1e-9,
                 f"x{s.INTRADAY_BURST_MULT:g}",
@@ -276,7 +276,7 @@ def check(settings, live: bool) -> List[Tuple[str, str, str, str]]:
         if s.INTRADAY_ENTRY_MODE == "opening":
             # --- 장 시작 구간 진입 (2026-10-10 채택, 사용자 결정) ---
             #
-            # 측정(scripts/opening_study.py, 2025-01~): 현재 누적 10배 P(+100%) 6.60%,
+            # 측정(scripts/research/opening_study.py, 2025-01~): 현재 누적 10배 P(+100%) 6.60%,
             # day_avg 4.3~7.4%(낫지 않음), same_window 3~15분 8.4~9.9%(약한 증거).
             add(FATAL, "opening 기준선", s.OPENING_BASELINE == "same_window",
                 f"{s.OPENING_BASELINE}",
@@ -372,7 +372,7 @@ def check(settings, live: bool) -> List[Tuple[str, str, str, str]]:
 
     # --- 지수 종목 요건 (2026-10-10) ---
     #
-    # 측정(scripts/compliance_study.py): 폭증 진입은 소형주를 골라 30거래일에 지수 종목을 중앙
+    # 측정(scripts/research/compliance_study.py): 폭증 진입은 소형주를 골라 30거래일에 지수 종목을 중앙
     # 2개만 산다 — 5종목 요건 충족 10.7%. 요건 전용 소액 매매가 꺼져 있으면 실격 위험이 크다.
     if s.MIN_TRADE_SYMBOLS > 0:
         add(FATAL, "요건 전용 소액 매매", bool(s.COMPLIANCE_TRADES),

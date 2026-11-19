@@ -1,6 +1,6 @@
 """장중 VWAP 청산의 기준선 — 종목별 '평소 같은 시각 직전 W분 거래대금'(지난 20일 중앙) 표를 만든다.
 
-측정(`scripts/takeprofit_study.py --vwap`)과 같은 정의다: 하루 전체 분봉에서 분 단위 거래대금을 만들고
+측정(`scripts/research/takeprofit_study.py --vwap`)과 같은 정의다: 하루 전체 분봉에서 분 단위 거래대금을 만들고
 (`strategy.sliding.minute_turnover`), 분 m 에서 직전 W분 합(`rolling_sum`)을 낸 뒤, 마지막 20일
 같은 분의 중앙값(최소 10일, `same_time_base`)을 기준선으로 쓴다.
 

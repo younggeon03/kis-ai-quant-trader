@@ -1744,14 +1744,14 @@ async def _check_live_vol_alive(s) -> str:
 async def test_opening_entry():
     """09:0N 분봉 판정 → 09:(N+지연)에 한 번 진입. **측정과 같은 순수 함수**를 쓴다.
 
-    측정(`scripts/opening_study.py`)과 실거래(`main.py::_opening_scan`)가 창을 각자
+    측정(`scripts/research/opening_study.py`)과 실거래(`main.py::_opening_scan`)가 창을 각자
     계산하면 한 칸만 어긋나도 다른 규칙을 실거래로 들고 간다. 그래서 (1) 창 경계,
     (2) 두 경로가 같은 함수 객체를 쓰는지, (3) KIS 분봉 파서, (4) 진입 배선을 본다.
     """
     import datetime as dt
     import types
 
-    import scripts.opening_study as study
+    import scripts.research.opening_study as study
     from main import TradingEngine
     from strategy import opening as op
     from strategy.intraday import IntradayWatcher
@@ -2036,7 +2036,7 @@ def test_sliding():
     창이 한 칸 어긋나면(분 m에서 m의 거래가 들어가는지) 측정이 미래를 보게 되거나 실거래가
     다른 규칙을 들고 간다. 경계와 기준선을 pandas 계산과 대조한다.
     """
-    import scripts.sliding_study as study
+    import scripts.research.sliding_study as study
     from strategy import sliding as sl
 
     tv = np.arange(1.0, 11.0)                                     # 분당 1,2,...,10

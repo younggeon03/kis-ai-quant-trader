@@ -168,7 +168,7 @@ _save_state()        → 상태 스냅샷을 state/engine_state.json에 저장
 | 9 | KIS 모의투자 서버 (`kis`) | `core/websocket_client.py`, `core/auth.py` | 실제 주문·체결·시세가 오가는 외부 시스템 |
 | 10 | 체결 원장 · 요건 (`ledger`) | `utils/logger.py`, `strategy/compliance.py` | 모든 체결을 남기고 대회 요건을 센다 |
 | 11 | 관제 화면 (`dash`) | `monitor/app.py` | 상태를 읽기만 해서 보여준다 |
-| 12 | 백테스트 · 검증 (`verify`) | `backtest/engine.py`, `walkforward.py`, `validation.py`, `scripts/ablate_exits.py` | 같은 객체로 과거를 재현해 측정한다 |
+| 12 | 백테스트 · 검증 (`verify`) | `backtest/engine.py`, `walkforward.py`, `validation.py`, `scripts/research/ablate_exits.py` | 같은 객체로 과거를 재현해 측정한다 |
 
 ---
 
@@ -297,7 +297,7 @@ score = clip(raw × 레짐스케일, −1, 1)
 | `strategy/intraday.py` | 돌파 감시·후보 명부·청산 판정. **순수 로직, 주문 없음** |
 | `strategy/minute_features.py` | 돌파 사건 피처 18종(학습용) |
 | `scripts/collect_minute.py` | 급등일 1분봉 수집(토스, 중단 후 이어받기) |
-| `scripts/replay_intraday.py` | 하루 재연 — **같은 감시기를 그대로 구동한다** |
+| `scripts/research/replay_intraday.py` | 하루 재연 — **같은 감시기를 그대로 구동한다** |
 
 **트리거.**
 
@@ -620,7 +620,7 @@ AES-256-CBC로 암호화되어 오므로 복호화가 필요하다.
 **주의점** 이 화면은 `main.py`가 돌 때만 떠 있다. `/architecture` 경로도 같다 — 다이어그램
 HTML은 자체 완결형이라 파일을 직접 열어도 된다.
 
-### 3.12 백테스트 · 검증 (`verify`) — `backtest/engine.py`, `walkforward.py`, `validation.py`, `scripts/ablate_exits.py`
+### 3.12 백테스트 · 검증 (`verify`) — `backtest/engine.py`, `walkforward.py`, `validation.py`, `scripts/research/ablate_exits.py`
 
 **무엇을 하는가** 과거 데이터로 같은 전략을 재현해 성과를 측정하고, 그 숫자가 운인지 실력인지
 교차 검증한다.
@@ -1223,7 +1223,7 @@ NaN으로 보고 학습한다. 그 상태로 백테스트에서만 수급을 채
 
 `train_on_bars`와 `segment_returns`, `run_walkforward`에 `flow_panel`을 관통시켜 고쳤다.
 그리고 절제 실험에서 수급을 **설정 차원**으로 다루도록 바꿨다 — 수급 모드마다 모델을
-따로 학습해야 학습·평가가 같은 입력을 본다(`scripts/ablate_exits.py`의 `_use_flow`).
+따로 학습해야 학습·평가가 같은 입력을 본다(`scripts/research/ablate_exits.py`의 `_use_flow`).
 
 교훈: **피처를 추가했다고 모델이 그것을 본다는 보장이 없다.** 학습 경로와 추론 경로가
 같은 입력을 받는지 따로 확인해야 한다. 이 결함은 예외도 경고도 내지 않았다.
@@ -1253,7 +1253,7 @@ NaN으로 보고 학습한다. 그 상태로 백테스트에서만 수급을 채
 수집이 40종목을 재수집했다. 이전 스냅샷이 없어 확정은 못 했다.
 
 핵심은 **왜 조용했는가**다. 벤치마크는 수익률(비율)만 보므로 가격 수준이 배수로 바뀌어도
-값이 같다. 그래서 "데이터는 같다"고 오판했다. 대응으로 `scripts/ablate_exits.py`가
+값이 같다. 그래서 "데이터는 같다"고 오판했다. 대응으로 `scripts/research/ablate_exits.py`가
 실행마다 **패널 지문**(정렬된 close의 해시 + 종목수·봉수·기간)을 로그와 JSON에 남기고
 "지문이 다른 실행과는 비교할 수 없다"를 명시한다.
 
@@ -1323,7 +1323,7 @@ bars`가 남아 전일 종가가 전부 0이 되고 거래 0건이 나왔다** �
 진단 수치를 **진입한 표본에서만** 모았기 때문이고, 슬롯이 09:00에 차서 진입 표본이
 전부 이른 돌파였다. 진단은 **모집단과 선택된 표본을 구분해서** 찍어야 한다.
 
-**측정 하네스에 체크포인트가 없어 세 번 전손했다.** `scripts/ablate_exits.py`는 모든
+**측정 하네스에 체크포인트가 없어 세 번 전손했다.** `scripts/research/ablate_exits.py`는 모든
 구간이 끝난 뒤에만 JSON을 쓴다. 가용 메모리가 2.4GB인 환경에서 측정이 세 번 중단됐고
 (8/31 · 5/28 · 14/31) 매번 수 시간이 사라졌다. 로그에도 **첫·마지막 설정만** 찍혀
 중간 설정은 복구할 수 없었다. 장시간 측정 도구는 **구간마다 부분 결과를 디스크에

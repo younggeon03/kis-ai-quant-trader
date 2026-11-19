@@ -1,165 +1,88 @@
 # KIS AI Quant Trader
 
-한국투자증권 Open API로 **실제 대회 계좌에 주문을 내는** 자동매매 엔진.
-제16회 뱅키스 대학생 모의투자대회(AI 부문, 2026-10-12 ~ 11-20, 30거래일)에 참가하며 1인이 설계·구현·배포·운영했다.
+한국투자증권 Open API로 대회 계좌에 실제 주문을 내는 자동매매 엔진입니다.
+제16회 뱅키스 대학생 모의투자대회(AI 부문, 2026-10-12 ~ 11-20)에 참가하며 혼자 설계·구현·배포·운영했습니다.
 
-> ## 면책
->
-> **이 코드는 모의투자 대회 참가용이며 투자 조언이 아니다.** 실제 주문을 내는 자동매매 시스템이므로, 실계좌에 연결해
-> 생기는 금전적 손실을 포함한 모든 결과는 사용자 책임이다. 저자는 어떠한 보증도 하지 않는다(MIT License).
->
-> 저장소의 성과 수치는 **과거 데이터에 대한 측정값**이며 미래 수익을 보장하지 않는다. 생존 편향(유니버스가 특정 시점의
-> 지수 구성으로 정해짐), 선택 편향(여러 설정을 시험해 고름), 표본 부족(30거래일로는 운과 실력을 가르기 어려움)을
-> 문서에 그대로 남겨 두었다.
->
-> API 키·계좌번호는 `.env`에만 두고 커밋하지 않는다(`.gitignore`가 막는다). `.env.example`을 복사해 쓴다.
+![Python](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)
+![asyncio](https://img.shields.io/badge/asyncio-httpx%20·%20WebSocket-555)
+![FastAPI](https://img.shields.io/badge/FastAPI-관제%20화면-009688?logo=fastapi&logoColor=white)
+![License](https://img.shields.io/badge/license-MIT-green)
 
----
+> 모의투자 대회용 코드이며 투자 조언이 아닙니다. 실계좌에 연결해 생기는 손실은 사용자 책임입니다.
 
-## 한눈에 보기
+![관제 화면](docs/dashboard-preview.png)
 
-| | |
+## 무엇을 했나
+
+- **실서버 운영** — 네이버 클라우드 서버(2vCPU · 3.8GB)에서 systemd로 30거래일 실거래(11/19 기준 누적 +16.1%)
+- **측정 = 실거래** — 진입·청산 판정은 순수 함수이고, 백테스트·측정 스크립트가 엔진과 같은 함수를 import 합니다
+- **Mock ↔ 실서버 한 줄 전환** — 가상 체결 엔진이 증권사와 같은 응답을 흉내내, 계좌 없이 셀프테스트 27개 항목으로 전 경로를 검증합니다
+
+## 운영 중 해결한 문제
+
+| 문제 | 원인 | 해결 | 결과 |
+|---|---|---|---|
+| 기동하자마자 유량 초과 | 문서 한도(초당 2건)와 실제 한도가 다름 | 거절률을 직접 재 토큰 버킷을 초당 1건·버스트 1로 | 6분간 74회 → 0~3회 |
+| 장 시작 판정이 305초 | 지연의 86%가 유량 대기 | 30종목 묶음 조회로 호출 수를 줄임 | 284호출 · 305초 → 10호출 · 19.8초 |
+| 체결 통보가 엿새 동안 끊김 | 연결은 살아 있고 메시지만 멈춤(반쯤 열린 연결) | 장중 무음 180초 유휴 타임아웃으로 재연결 | 하루 체결 기록 0건 → 46건 |
+
+자세한 진단 과정은 [docs/서버-운영-설계.md](docs/서버-운영-설계.md)·[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)에 있습니다.
+
+## 구조
+
+```
+시세(복수시세 · WebSocket) ─▶ TradingEngine ─▶ 판정(strategy/, 순수 함수)
+                                   │
+                                   ▼
+                     RiskManager — 모든 주문의 단일 관문
+                                   ▼
+                  우선순위 토큰 버킷(주문 > 계좌 > 시세)
+                                   ▼
+            Mock 가상 체결 엔진  ◀── 같은 인터페이스 ──▶  KIS REST
+                                   ▼
+                 체결 → 포트폴리오 → 원장(JSONL) → 관제 화면(/metrics)
+```
+
+| 영역 | 사용 |
 |---|---|
-| **무엇** | 장 시작 거래대금 폭증 종목을 사서 며칠 들고 가는 규칙 기반 엔진. 측정·백테스트·실거래가 같은 코드를 쓴다 |
-| **어디서** | 네이버 클라우드 서버(2vCPU · 3.8GB · 디스크 10GB) · systemd · 2026-10-13부터 실거래 |
-| **스택** | Python 3.13 · asyncio · httpx · WebSocket · FastAPI · Prometheus 형식 지표 · scikit-learn |
-| **검증** | 셀프테스트 27개 항목(`scripts/selftest.py`) · Mock 브로커로 네트워크 없이 전 경로 재현 |
+| 런타임 | Python 3.13 · asyncio · httpx · websockets |
+| 관제 | FastAPI · Prometheus 형식 지표 |
+| 분석 | pandas · numpy · scikit-learn |
+| 운영 | 네이버 클라우드 · systemd · chrony · logrotate |
 
-### 운영하며 풀어 낸 문제 (수치 출처는 [docs/서버-운영-설계.md](docs/서버-운영-설계.md) · [docs/TODO-대회준비.md](docs/TODO-대회준비.md))
-
-| 문제 | 해결 | 결과 |
-|---|---|---|
-| 기동 6분 동안 유량 초과 74회 | 문서 한도(초당 2건) 대신 거절률을 직접 재 실효 한도 초당 1건 · 버스트 1로 토큰 버킷 재조정 | 74회 → 0~3회 |
-| 284종목 장 시작 판정 305초 | 요청 지연을 분해(유량 대기 86% · 왕복 14%) → 30종목 묶음 조회로 호출 수를 줄임 | 284호출 · 305.0초 → 10호출 · 19.8초 |
-| WebSocket이 연결된 채 엿새 동안 메시지 0건 | 장중 무음 180초 유휴 타임아웃으로 재연결 | 하루 체결 기록 0건 → 46건 |
-| 판정 입력이 측정보다 평균 +15% | 유량 때문에 분 경계 뒤 평균 37초에 읽힘 → 읽은 시각으로 환산 | 실거래 환산 계수 x0.966~0.967 |
-| 외부 데이터 API의 IP 화이트리스트가 가정용 회선에서 끊김 | SSH SOCKS 터널로 출발 IP를 서버에 고정(코드 변경 0줄) | `403` 6회 → 0회 |
-
----
-
-## 전략은 어떻게 바뀌었나
-
-| 시기 | 규칙 | 바꾼 이유 |
-|---|---|---|
-| 개발 초기 | 일봉 AI 스윙(피처 44종 · 삼중배리어 라벨 · GBDT 앙상블) | 심사가 **절대수익 순위**라 평균보다 큰 상승 확률이 중요했다 |
-| 10/08~ | **장 시작 판정**: 09:00~09:0N 거래대금 ≥ 평소 같은 시간대(20일 중앙) x3 → 다일 보유, 거래대금이 죽으면(`vol_alive`) 판다 | 당일 청산은 모든 설정에서 P(30일 +100%) 0.00% |
-| 11/10~ | 매매 대상을 코스피200·코스닥150(309종목)으로 | 대회 안내 확인 — 지수 밖 종목은 모의투자 서버가 거부했다 |
-| 11/19~20 | **마지막 이틀 목표 = 이틀 누적 +10%**: 판정 통과 종목 중 10일 평균 고저폭(ATR10) 1위를 사서 +10% 지정가를 걸어 둔다 | 이틀 안에 +b 에 닿을 확률은 변동성이 좌우한다(반사 원리) |
-
-마지막 이틀 규칙의 측정(지수 286종목 · 연속 2거래일 433번):
-
-| 선택 · 매도 | P(이틀 ≥ +10%) | 이틀 평균 |
-|---|---|---|
-| 배수 1위 · 이틀 보유 | 12.0% | +0.88% |
-| 배수 1위 · +10% 지정가 | 22.9% | +0.61% |
-| **ATR10 1위 · +10% 지정가(채택)** | **26.6%** | +0.89% |
-
-변동성 예측·미시구조·행동재무·ML 순위 등 101개 설정을 별도 연구로 시험했지만, 미리 봉인해 둔 기간(71일)에서
-채택 기준을 넘은 후보는 없었다. 상세는 [docs/매매전략.md](docs/매매전략.md) 12-13·12-14절.
-
----
-
-## 설계 원칙
-
-1. **Mock ↔ 실서버는 `.env` 한 줄.** `USE_MOCK_MODE`에 따라 가상 체결 엔진과 KIS 클라이언트가 같은 인터페이스·같은 응답 스키마로 갈린다.
-   계좌가 없어도 전 경로를 검증할 수 있다.
-2. **리스크 매니저는 조언자가 아니라 관문.** 모든 주문 수량은 `RiskManager.evaluate_entry()`가 정한다.
-3. **유량 제어는 우회 불가.** Mock까지 모든 REST 호출이 우선순위 토큰 버킷을 지난다(주문 P0 > 계좌 P1 > 시세 P2).
-4. **측정과 실거래가 같은 함수를 쓴다.** 판정 함수는 순수 함수(`strategy/opening.py` 등)이고, 측정 스크립트가 그 함수를 import한다.
-   셀프테스트가 함수 객체 동일성까지 확인한다.
-5. **수치는 교차검증한다.** 데이터 지문(정렬된 종가 MD5)이 다른 실행끼리는 비교하지 않고, 시간 순 교차검증·봉인 구간으로
-   선택 편향을 막는다(단일 백테스트 Sharpe는 실제의 두 배까지 부풀었다: 1.71 vs CPCV 0.78).
-
-```
-config/settings.py (.env) ── USE_MOCK_MODE / KIS_ENV → 도메인 · TR_ID 분기
-        │
-  [복수시세 30종목/호출] ─┐
-  [WS 체결·체결통보]    ─┼─▶ TradingEngine(main.py) ─▶ strategy/opening.py   장 시작 판정(순수 함수)
-  [REST 잔고·미체결]    ─┘        │                     strategy/exit_rules.py 청산 규칙(순수 함수)
-                                 ▼
-                     strategy/risk_manager.py  ★ 모든 주문의 단일 관문
-                                 ▼
-                     core/rate_limiter.py  토큰 버킷 + 우선순위 힙
-                                 ▼
-              api/mock_client.py (가상 체결)  ◀─ 같은 인터페이스 ─▶  api/client.py (KIS)
-                                 ▼
-                체결 → Portfolio → 원장(JSONL) → 관제 화면(FastAPI · /metrics)
-```
-
----
-
-## 빠른 시작 (계좌 없이)
+## 실행
 
 ```bash
 pip install -r requirements.txt
-copy .env.example .env               # 기본값 USE_MOCK_MODE=true
+cp .env.example .env              # 기본값 USE_MOCK_MODE=true (계좌 없이 동작)
 
-python scripts/selftest.py           # 27개 항목 — 네트워크 없이 전 모듈 검증
-python main.py --duration 120        # Mock 실시간 루프 + 관제 화면(http://127.0.0.1:8500)
-python main.py --health-only         # 연결·인증·계좌 점검만
+python scripts/selftest.py        # 셀프테스트 27개 항목
+python main.py --duration 120     # Mock 실시간 루프 + 관제 화면 http://127.0.0.1:8500
 ```
 
-측정 데이터(분봉·일봉)는 저장소에 없다. 수집 스크립트(`scripts/collect_*.py`)로 받는다 — 토스증권 Open API 키와
-등록된 IP가 필요하다. KRX 지수 구성 CSV는 [data.krx.co.kr](http://data.krx.co.kr)에서 내려 `data/krx/`에 둔다.
+실서버는 `.env`의 `USE_MOCK_MODE=false`와 KIS 앱 키·계좌번호만 바꾸면 됩니다.
 
-### 실서버로 바꾸기
-
-`.env`만 고친다.
-
-```ini
-USE_MOCK_MODE=false
-KIS_ENV=vts                 # 모의투자 서버
-KIS_APP_KEY=발급받은키
-KIS_APP_SECRET=발급받은시크릿
-KIS_ACCOUNT_NO=12345678-01
-KIS_HTS_ID=본인HTS아이디     # 체결통보 WebSocket 구독용
-REST_RATE_LIMIT=1           # 모의투자는 문서상 초당 2건이지만 실측 실효 한도가 약 1건
-```
-
-`python main.py --health-only`로 토큰·시세·잔고 3단계가 모두 `ok: true`인지 본 뒤, `DRY_RUN=true`로 주문 직전까지 리허설한다.
-
----
-
-## 대회 조건
-
-| 구분 | 내용 |
-|---|---|
-| 기간 | 2026-10-12 ~ 11-20, 거래일 30일 |
-| 심사 | 절대수익률 순위 |
-| 초기자본 | 1억 원 |
-| 매매 대상 | 코스피200 · 코스닥150 구성 종목(현금 매수·매도만) |
-| 종목 비율 | 제한 없음 |
-| 최소 요건 | OpenAPI 매매 · 매매금액 5억 원 · 매매일수 5일 · 지수 종목 5개 |
-
----
-
-## 디렉터리
+## 폴더
 
 ```
-main.py                  엔진(TradingEngine) — 판정·관문·주문·대조·관제 배선
-config/settings.py       .env 로딩, 환경별 도메인·TR_ID, 모든 설정값
-core/                    인증(토큰 캐시) · 유량 제어 · WebSocket(체결통보 AES 복호화) · 이벤트·포트폴리오
-api/                     AbstractBroker · KIS 클라이언트 · Mock 가상 체결 엔진(같은 JSON)
-strategy/                장 시작 판정 · 청산 규칙 · 리스크 관문 · 대회 규정 · (초기) AI 모델·피처
-backtest/                이벤트 기반 백테스터(룩어헤드 차단·비용 반영) · 지표
-monitor/                 FastAPI 관제 화면 · 지수 종목 순위판
-scripts/                 셀프테스트 · 수집 · 측정 · 교차검증 · 사전 점검(preflight)
-deploy/oracle/           서버 설치·배포 스크립트(멱등)
-docs/                    설계·전략·운영 문서
+main.py            엔진
+config/            설정(.env)
+core/              인증 · 유량 제어 · WebSocket · 이벤트
+api/               증권사 클라이언트 · Mock 가상 체결 엔진
+strategy/          판정 · 청산 규칙 · 리스크 관문
+monitor/           관제 화면
+scripts/           셀프테스트 · 데이터 수집 · 사전 점검 · 백테스트
+scripts/research/  전략 측정·검증 실험(운영에는 쓰지 않음)
+deploy/            서버 설치·배포
+docs/              설계·전략·운영 문서
 ```
 
 ## 문서
 
-| 문서 | 내용 |
-|---|---|
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 코드 구조, 비동기 설계, 유량 제어, 데이터 계약, 개발 중 잡은 버그 |
-| [docs/매매전략.md](docs/매매전략.md) | 진입·청산 규칙, 측정 방법과 결과, 기각한 시도 |
-| [docs/서버-운영-설계.md](docs/서버-운영-설계.md) | 서버·트래픽 운영 설계, 장애 기록 |
-| [docs/네트워크-전송계층-분석.md](docs/네트워크-전송계층-분석.md) | 지연 분해, 전송 계층 분석 |
-| [docs/기술노트.md](docs/기술노트.md) | 이 저장소로 배우는 백엔드·운영 기술 |
-| [docs/TODO-대회준비.md](docs/TODO-대회준비.md) | 날짜순 진행 기록 — 측정 결과, 데이터 지문, 결정과 이유 |
-| [docs/architecture.html](docs/architecture.html) | 인터랙티브 구조 다이어그램 |
-| [deploy/oracle/README.md](deploy/oracle/README.md) | 서버 배포 절차 |
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — 코드 구조와 설계 결정
+- [docs/매매전략.md](docs/매매전략.md) — 매매 규칙과 측정 결과(기각한 시도 포함)
+- [docs/서버-운영-설계.md](docs/서버-운영-설계.md) — 서버·트래픽 운영과 장애 기록
+- [docs/TODO-대회준비.md](docs/TODO-대회준비.md) — 날짜순 진행 기록
 
 ## 라이선스
 

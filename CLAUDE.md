@@ -16,30 +16,30 @@ python scripts/validate_strategy.py           # CPCV + PSR/DSR 과적합 검증 
 python scripts/walkforward.py                 # 워크포워드 재학습 시뮬레이션 (약 8분)
 python scripts/collect_data.py --probe        # 토스 API 연결·필드명 확인
 python scripts/collect_minute.py              # 급등일 1분봉 수집(토스, 중단 후 이어받기)
-python scripts/replay_intraday.py --days 250  # 분봉 리플레이(장중 전략 검증·측정)
-python scripts/minute_exit_grid.py            # 분봉 청산 규칙 격자
-python scripts/minute_skill.py                # 분봉 모델 스킬(AUC·상위사분위 적중률)
-python scripts/surge_study.py                 # 급등 포착 조건별 선행 수익률 분포
-python scripts/tail_optimizer.py              # P(+100%) 최대 구조 탐색(조건 1종)
-python scripts/tail_grid.py                   # 꼬리 구조 전수 탐색(조건 6종 x 종목수 x 회전)
-python scripts/ablate_exits.py --set catalyst # catalyst 진입 구조를 실엔진으로 확인
-python scripts/intraday_entry_study.py        # 장중 진입 vs T+1 진입(다일 보유)
+python scripts/research/replay_intraday.py --days 250  # 분봉 리플레이(장중 전략 검증·측정)
+python scripts/research/minute_exit_grid.py            # 분봉 청산 규칙 격자
+python scripts/research/minute_skill.py                # 분봉 모델 스킬(AUC·상위사분위 적중률)
+python scripts/research/surge_study.py                 # 급등 포착 조건별 선행 수익률 분포
+python scripts/research/tail_optimizer.py              # P(+100%) 최대 구조 탐색(조건 1종)
+python scripts/research/tail_grid.py                   # 꼬리 구조 전수 탐색(조건 6종 x 종목수 x 회전)
+python scripts/research/ablate_exits.py --set catalyst # catalyst 진입 구조를 실엔진으로 확인
+python scripts/research/intraday_entry_study.py        # 장중 진입 vs T+1 진입(다일 보유)
 #   --burst-mult / --hold / --since 로 파인튜닝. --since 는 커버리지 편향 방지용
 python scripts/collect_minute.py --select turnover  # 거래대금 폭증일 분봉 수집
 python scripts/preflight.py                   # 대회 직전 점검 (--live 로 실서버까지 요구)
-python scripts/slot_sim.py                    # 달력 시간순 2슬롯 평가(라운드 근사 대신 — 보유일수가 다른 규칙 비교용)
+python scripts/research/slot_sim.py                    # 달력 시간순 2슬롯 평가(라운드 근사 대신 — 보유일수가 다른 규칙 비교용)
 python scripts/collect_opening.py             # 모든 거래일 09:00~09:30 분봉(토스 · 수집 전 현재 IP 확인)
-python scripts/opening_study.py               # 장 시작 구간 진입 격자 vs 현재 규칙(수집 완료 후)
-python scripts/combo_study.py --slide-grid 5:10   # 지금 실거래 조합(장 시작 + 장중 추가 x VWAP 청산)을 분 단위 자리 순서로 측정
+python scripts/research/opening_study.py               # 장 시작 구간 진입 격자 vs 현재 규칙(수집 완료 후)
+python scripts/research/combo_study.py --slide-grid 5:10   # 지금 실거래 조합(장 시작 + 장중 추가 x VWAP 청산)을 분 단위 자리 순서로 측정
 #   --vwap-variants 로 VWAP 청산 결합(AND·OR·단독) 비교 · --diag 로 원인 진단 · UNIVERSE_FILE 로 유니버스 지정
 python scripts/build_turnover_profile.py --window 10  # VWAP 청산 기준선 표(--window 5 = 장중 추가 매수용) — 분봉 수집 뒤 다시 만들어 서버에 보낸다
 python scripts/probe_warn.py <종목들>          # 모의투자 매매불가(증거금 100%) 확인 — 엔진과 같은 앱 키라 장 마감 후
 python scripts/widen_universe.py              # 거래대금 하한만 낮춘 유니버스(5억은 측정에서 기각, 10/16)
-python scripts/two_day_study.py             # 이틀 매매 방식 비교(+10% 목표, 11/18) · --filters 로 필터 적용판
-python scripts/two_day_cv.py                # 필터·점수제 x 방식 시간 순 5조각 교차검증(+10% 확률)
-python scripts/build_agent_data.py          # 에이전트 팀 공용 데이터(지수 x 날짜 09:03 피처 + 이틀 결과, reports/agent_data)
-python scripts/agent_eval.py                # 공통 평가기 기준선(개발 구간만 — 2026-07-01~ 봉인)
-python scripts/final_review.py              # 에이전트 후보 봉인 구간 심사(리더가 한 번만) · switch_review.py 갈아타기 재측정
+python scripts/research/two_day_study.py             # 이틀 매매 방식 비교(+10% 목표, 11/18) · --filters 로 필터 적용판
+python scripts/research/two_day_cv.py                # 필터·점수제 x 방식 시간 순 5조각 교차검증(+10% 확률)
+python scripts/research/build_agent_data.py          # 에이전트 팀 공용 데이터(지수 x 날짜 09:03 피처 + 이틀 결과, reports/agent_data)
+python scripts/research/agent_eval.py                # 공통 평가기 기준선(개발 구간만 — 2026-07-01~ 봉인)
+python scripts/research/final_review.py              # 에이전트 후보 봉인 구간 심사(리더가 한 번만) · switch_review.py 갈아타기 재측정
 python -m compileall -q config core api strategy backtest utils monitor scripts main.py
 ```
 
@@ -57,7 +57,7 @@ scripts/open_dashboard.cmd                    # SSH 터널(8500) + 관제 화면
   `EXIT_TAKE_PROFIT_PCT=0.103`(순수익 +10% 익절, 체결 직후 지정가를 **걸어 둔다** — `TPLIMIT`, 상태 파일로 같은 날 복원) ·
   11/20 15:10 `FINAL_FLATTEN`(걸어 둔 익절을 먼저 취소). 장 시작 정리는 현재가부터(15초 재접수, 판정 40초 전 −1%, 진입 최대 120초 대기).
   손절·`vol_alive`는 11/17부터 꺼져 있다. `NO_BUY`·`NO_SELL` 삭제. 규칙 표는 `docs/매매전략.md` 12-14절.
-  측정(`scripts/two_day_study.py`·`two_day_cv.py`, 지문 `d30cf1675546e7f8`): P(이틀 ≥ +10%) 배수 순 22.9% · ATR10 순 26.6%
+  측정(`scripts/research/two_day_study.py`·`two_day_cv.py`, 지문 `d30cf1675546e7f8`): P(이틀 ≥ +10%) 배수 순 22.9% · ATR10 순 26.6%
   (시간 순 5조각 중 4조각 우세) · 이틀 평균 +0.6~0.9% · 손실 48%. 종목 비율 규정 상수 `MAX_SINGLE_WEIGHT`는 1.0(규정 없음, 11/17).
 - **직접 매매 기간(2026-11-18 낮, 사용자 결정 — 저녁에 위 재가동으로 바뀜)**: 엔진 매수 차단은 서버에 `state/NO_BUY` 파일을 만들면 된다(재시작 불필요,
   지우면 풀린다 · `.env` `ENGINE_NO_BUY=true`도 같다). **매도도 막는다**(`state/NO_SELL` · `ENGINE_NO_SELL`) — 손절 25%·
@@ -252,7 +252,7 @@ P(+100%) **21.48%** · 중앙 +10.9% · −20% 이하 11.11%. ②·④를 켠 �
 거래대금 3·5일 이평 꺾임 12.56·15.27%, 종가<5일 이평 15.27%, 5일 이평 꺾임 8.37%, vol_alive 결합 19.21·10.59%.
 분봉 이평(가격 5·20·60분, 거래대금 10분) 청산은 거래당 −0.3~−0.5%, 단타 ±1~5% 익절·손절은 −0.37~−0.55%(승률 36~54%).
 
-289종목 시절 측정(`scripts/combo_study.py`, 분 단위 자리 순서까지 실거래와 같게): ②·④ 조합 **P(+100%) 7.16%** ·
+289종목 시절 측정(`scripts/research/combo_study.py`, 분 단위 자리 순서까지 실거래와 같게): ②·④ 조합 **P(+100%) 7.16%** ·
 30일 −20% 이하 20.5%(지문 `a12a9eb45ea44d2d`). 기각된 것: VWAP 청산을 OR·단독 조건으로(0.00~0.74%,
 −20% 이하 34~77%), 유니버스 거래대금 하한 5억(376종목, 0.49%), 장중 추가 x3(3.48% — 질 낮은 발동이
 VWAP가 판 자리를 다시 채우는 회전). 상세는 `docs/TODO-대회준비.md`.
@@ -269,7 +269,7 @@ VWAP가 판 자리를 다시 채우는 회전). 상세는 `docs/TODO-대회준�
   측정 데이터는 `collect_opening.py --until 1530 --dir fullday`(모든 날 하루 전체 분봉)다.
 
 **지수 종목 요건은 소액 매매로 채운다.** 폭증 진입은 소형주를 골라 30거래일에 지수(코스피200·
-코스닥150) 종목을 중앙 2개만 산다(5종목 요건 충족 10.7%, `scripts/compliance_study.py`). 그래서
+코스닥150) 종목을 중앙 2개만 산다(5종목 요건 충족 10.7%, `scripts/research/compliance_study.py`). 그래서
 `main.py::_compliance_trades`가 `COMPLIANCE_START`(10/19)부터 모자라면 지수 대형주를 종목당
 `COMPLIANCE_TRADE_KRW`(100만원)씩 09:30에 사서 14:30에 판다. 관문은 `evaluate_entry(max_notional=...)`
 로 금액을 묶고 자리 한도를 면제한다. 전략 경로는 `slot_exempt`로 이 포지션을 자리 수에서 뺀다.
@@ -293,7 +293,7 @@ VWAP가 판 자리를 다시 채우는 회전). 상세는 `docs/TODO-대회준�
 돌려주고 실제 주문은 `TradingEngine`이 `RiskManager`를 통과시킨 뒤 낸다(2번 관문
 원칙 유지). 덕분에 셀프테스트에서 네트워크 없이 검증된다(17·18번 항목).
 
-측정은 `scripts/replay_intraday.py`가 **같은 `IntradayWatcher`를 그대로 구동**한다.
+측정은 `scripts/research/replay_intraday.py`가 **같은 `IntradayWatcher`를 그대로 구동**한다.
 재구현하면 검증이 아니라 다른 코드를 테스트하는 것이 된다.
 
 알아야 할 세 가지.
@@ -404,7 +404,7 @@ VWAP가 판 자리를 다시 채우는 회전). 상세는 `docs/TODO-대회준�
 
 ### 10. 측정 전에 데이터 지문을 확인한다
 
-`scripts/ablate_exits.py`와 `scripts/replay_intraday.py`가 실행마다 패널 지문
+`scripts/research/ablate_exits.py`와 `scripts/research/replay_intraday.py`가 실행마다 패널 지문
 (정렬된 종가의 MD5 + 종목·봉 수)을 찍는다. **지문이 다른 실행의 수치는 비교하지
 않는다.**
 

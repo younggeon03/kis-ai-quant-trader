@@ -113,7 +113,7 @@ def surge_days(panel: Dict[str, pd.DataFrame], trigger: float,
             # **`.shift(1)`이 반드시 있어야 한다.** 분모는 **전일까지**의 20봉
             # 중앙값이다. 장중에 판정하려면 09:00에 알 수 있는 값이어야 하고
             # (`strategy/intraday.py::burst_ratio`, `main.py::_prime_intraday`),
-            # 측정 스크립트(`scripts/intraday_entry_study.py`)도 같은 창을 쓴다.
+            # 측정 스크립트(`scripts/research/intraday_entry_study.py`)도 같은 창을 쓴다.
             #
             # 빼먹으면 당일 거래대금이 중앙값을 끌어올려 **조건이 더 엄격해지고**
             # 수집 집단이 측정 집단보다 작아진다. 실제로 그렇게 받았다가 커버리지가
