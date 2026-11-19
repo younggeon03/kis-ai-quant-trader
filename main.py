@@ -674,7 +674,14 @@ class TradingEngine:
         end, today = self._comp_end(), now.strftime("%Y-%m-%d")
         if not end:
             return False
-        return today > end or (bool(self.s.FINAL_FLATTEN) and today == end)
+        if today > end:
+            return True
+        if bool(self.s.FINAL_FLATTEN) and today == end:
+            # 마지막 날 매수 허용(FINAL_DAY_BUY, 11/19 사용자 결정): 전량 매도 시각 전까지는 평소처럼 산다(09:04 장 시작 판정)
+            if bool(self.s.FINAL_DAY_BUY):
+                return now.strftime("%H%M") >= str(self.s.FINAL_FLATTEN_HHMM)
+            return True
+        return False
 
     async def _final_flatten(self, now: dt.datetime, prices: Dict[str, float]) -> None:
         """대회 마지막 날 `FINAL_FLATTEN_HHMM`부터 요건 포지션까지 전부 판다(`FINAL_FLATTEN`).

@@ -732,6 +732,9 @@ class Settings(BaseSettings):
         default="1510",
         description="마지막 날 전량 매도 시작 시각. 15:20~15:30 동시호가에는 엔진이 주문을 내지 않으므로 "
                     "연속 매매 구간에서 시작해 안 팔린 잔량을 미체결 매도 재접수(60초)로 따라간다")
+    FINAL_DAY_BUY: bool = Field(
+        default=False,
+        description="대회 마지막 날에도 FINAL_FLATTEN_HHMM 전까지는 평소처럼 산다(09:04 장 시작 판정). 15:10 전량 매도는 그대로(11/19)")
     OPENING_RANK_BY: str = Field(
         default="ratio",
         description="장 시작 판정 발동 종목의 매수 순서 — ratio(배수 큰 순) | atr10(10일 평균 고저폭 큰 순, 11/18 이틀 +10% 교차검증)")

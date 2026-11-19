@@ -2666,6 +2666,13 @@ async def test_server_reliability():
             assert not eng._entries_closed(d(2026, 11, 19, 9, 5)), "마지막 날 전에 매수를 막았다"
             assert eng._entries_closed(d(2026, 11, 20, 9, 5)), "마지막 날(전량 매도 켬)에 샀다"
             assert eng._entries_closed(d(2026, 11, 23, 9, 5)), "대회 종료 뒤에 샀다"
+            # 마지막 날 매수 허용(FINAL_DAY_BUY) — 15:10 전까지만 사고, 종료 뒤는 여전히 막는다
+            saved_fdb = s.FINAL_DAY_BUY
+            s.FINAL_DAY_BUY = True
+            assert not eng._entries_closed(d(2026, 11, 20, 9, 4)), "FINAL_DAY_BUY 인데 마지막 날 09:04 매수를 막았다"
+            assert eng._entries_closed(d(2026, 11, 20, 15, 10)), "FINAL_DAY_BUY 여도 전량 매도 시각부터는 사지 않는다"
+            assert eng._entries_closed(d(2026, 11, 21, 9, 4)), "FINAL_DAY_BUY 여도 종료 뒤에는 사지 않는다"
+            s.FINAL_DAY_BUY = saved_fdb
             eng.portfolio.positions = {}      # 앞 검증이 남긴 포지션과 섞지 않는다
             eng.portfolio.positions["FN1"] = Position(symbol="FN1", qty=7, avg_price=100.0)
             eng.portfolio.positions["FN2"] = Position(symbol="FN2", qty=3, avg_price=100.0)
@@ -2889,7 +2896,7 @@ async def test_server_reliability():
     return ("주문 읽기 타임아웃·5xx 재시도 안 함(결과 불명) · 접속 실패 재시도 · 조회 재시도 · "
             "무손실 체결 채널 · 히스토그램 분위수·Prometheus · Date 헤더 시계 오차 · "
             "장중 VWAP 청산(판정·배관) · 장중 추가 매수(첫 발동·배수 순·빈자리·당일 매도 제외·전일 대비 하한) · 체결통보로 미체결 추적 정리 · 날짜 변경 시 전날 미체결·요건 표시 정리 · 목표 도달 잠금(확인 대기·요건 제외) · 제한폭 밖 가격 버림 · 매수 지정가 상한가 클립 · "
-            "미체결 매도 취소·재대조 · 대회 마지막 날 전량 매도·종료 뒤 매수 금지 · 장 시작 정리(그날 전 종목만·현재가→15초 재접수→판정 직전 −1%·자리 면제·진입 대기)·걸어 두는 익절(재접수 없음·남은 몫·마지막 날 취소)·장 밖 WS 가격 무시·판정 순서(atr10) · WS 여러 건 체결가 파싱·미구독 종목 버림·멈춘 연결 재연결 모두 작동")
+            "미체결 매도 취소·재대조 · 대회 마지막 날 전량 매도·종료 뒤 매수 금지·마지막 날 매수 허용(15:10 전) · 장 시작 정리(그날 전 종목만·현재가→15초 재접수→판정 직전 −1%·자리 면제·진입 대기)·걸어 두는 익절(재접수 없음·남은 몫·마지막 날 취소)·장 밖 WS 가격 무시·판정 순서(atr10) · WS 여러 건 체결가 파싱·미구독 종목 버림·멈춘 연결 재연결 모두 작동")
 
 
 @check("27. 직접 매매 스위치(매수·매도) · 지수 종목 순위판")
