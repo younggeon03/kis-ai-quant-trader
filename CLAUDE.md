@@ -43,6 +43,8 @@ python scripts/research/final_review.py              # 에이전트 후보 봉�
 python -m compileall -q config core api strategy backtest utils monitor scripts main.py
 ```
 
+**대회는 2026-11-20에 끝났다 — 최종 4등, 117,227,869원(+17.2%, 마지막 주 사용자 직접 매매 포함).** 기록은 `docs/TODO-대회준비.md` 맨 위.
+
 **실거래는 NCP 서버에서 돈다(2026-10-13~).** 서버 IP는 저장소에 두지 않는다 — `deploy/server.local`(git 제외)에 한 줄로 두고 `export BANKIS_SERVER=$(cat deploy/server.local)`로 쓴다. 노트북에서 `main.py`·`run_live.ps1`을 켜지 않는다(같은 계좌 이중 주문).
 
 ```bash
