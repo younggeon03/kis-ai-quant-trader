@@ -56,7 +56,8 @@ python -m compileall -q config core api strategy backtest utils monitor scripts 
 ### 다시 돌릴 때 확인할 것
 
 1. **같은 계좌에 엔진은 하나만.** 서버와 노트북(`main.py`·`scripts/run_live.ps1`)을 동시에 켜면 주문이 두 번 나간다.
-   서버를 다시 켜려면 `systemctl enable --now bankis`, 서버 IP는 `deploy/server.local`(git 제외)에 있다.
+   **NCP 서버는 11/22 반납했다**(서버·공인 IP·스토리지, 기본 ACG만 남음 — 삭제 불가·무료). 다시 돌리려면 서버를 새로 만들고
+   `deploy/oracle/NCP.md` 절차로 설치한다. 마지막 운영 `.env`·시세 데이터·측정 폴더는 `logs/server_final_20261122/extra/`(git 제외, 키 포함)에 있다.
 2. **서버 `.env`는 마지막 날 설정 그대로다** — 1자리 x98%(`MAX_POSITIONS=1`·`FIXED_POSITION_WEIGHT=0.98`) · `OPENING_RANK_BY=atr10` ·
    `EXIT_TAKE_PROFIT_PCT=0.103` · `FINAL_DAY_BUY=true` · `FINAL_FLATTEN=false` · 손절·`vol_alive`·종가 손절·하드스톱 끔(11/17~).
    대회 대부분 기간의 규칙(§9 표)으로 돌리려면 서버의 `.env.bak.*`(날짜별 백업)에서 고른다.
