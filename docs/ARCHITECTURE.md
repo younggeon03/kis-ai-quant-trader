@@ -6,6 +6,10 @@
 읽는 사람은 Python은 알지만 asyncio나 증권 API는 처음일 수 있다고 가정한다.
 모르는 용어가 나오면 그 자리에서 짧게 설명하고 넘어간다.
 
+> **상태(2026-11-22):** 대회(2026-10-12 ~ 11-20)는 끝났고 서버 엔진은 11/22에 멈췄다(`systemctl stop`·`disable`).
+> 코드 구조 설명은 그대로 유효하다. 날짜가 붙은 "실거래 경로" 절은 대회 기간에 돌던 배선이다.
+> 결과와 경과는 [TODO-대회준비.md](TODO-대회준비.md) 맨 위.
+
 > **인터랙티브 다이어그램**: [`architecture.html`](architecture.html) — 확대/이동, 경로 추적,
 > 4개 가이드 뷰를 쓸 수 있다. 매매 중이라면 <http://127.0.0.1:8500/architecture> 에서도 열린다.
 
@@ -977,13 +981,13 @@ VWAP가 판 종목을 장중 추가 매수가 곧바로 되산다.
 **저장 모드가 다르면 복구하지 않는다.** Mock과 실서버가 같은 파일을 쓰므로, 그대로
 복구하면 Mock 자산 고점이 실계좌 첫날 낙폭으로 잡히고 Mock 가상 날짜가 진입일로 넘어온다.
 
-### 장중 규칙 진입과 청산 — 지금 실거래 경로 (2026-10-16, 11/04 갱신)
+### 장중 규칙 진입과 청산 — 대회 실거래 경로 (2026-10-16, 11/04·11/16 갱신)
 
 규칙은 [매매전략.md 12-13절](매매전략.md), 설정값은 `CLAUDE.md` §9에 있다. 여기서는 배선만 적는다.
 
 | 태스크 | 언제 | 조회 | 판정 |
 |---|---|---|---|
-| `_opening_scan` → `_opening_entries` | 09:0N 직후 한 번 | 복수시세(`get_turnovers`, 30종목/호출 · 289종목 10호출 약 20초, 지금 701종목 24호출) | `strategy/opening.py` |
+| `_opening_scan` → `_opening_entries` | 09:0N 직후 한 번 | 복수시세(`get_turnovers`, 30종목/호출 · 289종목 10호출 약 20초, 10/19~ 701종목 24호출, 11/10~ 지수 309종목) | `strategy/opening.py` |
 | `_slide_poll` → `_slide_entries` **[10/20 끔]** | 장중 20초마다 | 복수시세 289종목, 누적 거래대금의 차분으로 직전 5분 | `strategy/sliding.py` + 기준선 표 `turnover_profile_w5.json` |
 | `_vwap_exits` **[10/20 끔]** | 09:10 뒤 20초마다 | 복수시세 보유 종목만 | `exit_rules.py::vwap_fade` + `turnover_profile_w10.json` |
 
@@ -994,6 +998,12 @@ VWAP가 판 종목을 장중 추가 매수가 곧바로 되산다.
   다시 읽으므로 파일만 바꾸면 재시작 없이 다음 날 적용된다.
 - 진입 직전 `strategy/eligibility.py::vts_tradable`로 매매불가(증거금 100%·경보)를 거르고(11/04~ `VTS_BLOCK_FULL_MARGIN=true`),
   `40070000` 거부 종목은 그날 다시 내지 않는다.
+- 매매 대상은 `UNIVERSE_INDEX_ONLY`(기본 켬, 11/10~)가 유니버스 파일의 `tradable`을 지수 구성종목으로 좁힌다(`config/settings.py`).
+  장 시작 판정의 직전 3일 상승 필터는 `_prior_run`(일봉 패널, 모르면 통과), 마지막 이틀의 ATR10 순 정렬은 `_order_opening_picks`다.
+- 다일 청산 두 개가 `_tick()`에서 따로 돈다(11/13·11/16~): `_close_stop_exits`(확정 종가 ≤ 평단 −3%면 09:00 매도, `EXIT_CLOSE_STOP_*`)와
+  `_intraday_stop_exits`(현재가 ≤ 평단 x0.93이 20초 이어지면 매도, `EXIT_INTRADAY_STOP_*`). 요건 포지션은 둘 다 제외한다.
+- 직접 매매 스위치(11/18~): `state/NO_BUY`·`NO_SELL` 파일 또는 `ENGINE_NO_BUY`·`ENGINE_NO_SELL`을 `_no_buy_switch`·`_no_sell_switch`가 보고,
+  모든 엔진 주문이 지나는 `_submit`에서 막는다(파일이라 재시작 없이 켜고 끈다).
 - 대회 마지막 날(`COMP_END`)은 매수를 막고 15:10부터 `_final_flatten()`이 요건 포지션까지 판다(`FINAL_FLATTEN`).
   `FINAL_DAY_BUY=true`면 `_entries_closed()`가 그날 `FINAL_FLATTEN_HHMM` 전까지 진입을 열어 둔다(장 시작 판정이 평소처럼 돈다).
   종료 뒤에는 `_entries_closed()`가 설정과 무관하게 모든 진입 경로(장 시작·장중 추가·sliding·분봉·일봉·요건 매수)를 막는다.

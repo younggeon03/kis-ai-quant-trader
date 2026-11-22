@@ -30,7 +30,7 @@ python scripts/preflight.py                   # 대회 직전 점검 (--live 로
 python scripts/research/slot_sim.py                    # 달력 시간순 2슬롯 평가(라운드 근사 대신 — 보유일수가 다른 규칙 비교용)
 python scripts/collect_opening.py             # 모든 거래일 09:00~09:30 분봉(토스 · 수집 전 현재 IP 확인)
 python scripts/research/opening_study.py               # 장 시작 구간 진입 격자 vs 현재 규칙(수집 완료 후)
-python scripts/research/combo_study.py --slide-grid 5:10   # 지금 실거래 조합(장 시작 + 장중 추가 x VWAP 청산)을 분 단위 자리 순서로 측정
+python scripts/research/combo_study.py --slide-grid 5:10   # 10/16 실거래 조합(장 시작 + 장중 추가 x VWAP 청산)을 분 단위 자리 순서로 측정
 #   --vwap-variants 로 VWAP 청산 결합(AND·OR·단독) 비교 · --diag 로 원인 진단 · UNIVERSE_FILE 로 유니버스 지정
 python scripts/build_turnover_profile.py --window 10  # VWAP 청산 기준선 표(--window 5 = 장중 추가 매수용) — 분봉 수집 뒤 다시 만들어 서버에 보낸다
 python scripts/probe_warn.py <종목들>          # 모의투자 매매불가(증거금 100%) 확인 — 엔진과 같은 앱 키라 장 마감 후
@@ -43,40 +43,29 @@ python scripts/research/final_review.py              # 에이전트 후보 봉�
 python -m compileall -q config core api strategy backtest utils monitor scripts main.py
 ```
 
-**대회는 2026-11-20에 끝났다 — 최종 4등, 117,227,869원(+17.2%, 마지막 주 사용자 직접 매매 포함).** 기록은 `docs/TODO-대회준비.md` 맨 위.
+## 지금 상태 — 대회 종료 · 엔진 정지 (2026-11-22)
 
-**실거래는 NCP 서버에서 돈다(2026-10-13~).** 서버 IP는 저장소에 두지 않는다 — `deploy/server.local`(git 제외)에 한 줄로 두고 `export BANKIS_SERVER=$(cat deploy/server.local)`로 쓴다. 노트북에서 `main.py`·`run_live.ps1`을 켜지 않는다(같은 계좌 이중 주문).
+- **제16회 뱅키스 대회(AI 부문, 2026-10-12 ~ 11-20, 30거래일)는 끝났다 — 최종 4등, 117,227,869원(+17.2%).**
+  11/18~20에 사용자 직접 매매가 섞였으므로 **이 숫자를 엔진 성과로 쓰지 않는다.** 결과·경과는 `docs/TODO-대회준비.md` 맨 위.
+- **서버 엔진은 11/22 13:44에 멈췄다**(`systemctl stop`·`disable bankis` — 재부팅해도 안 켜진다). 그때 보유 0 · 전액 현금.
+  대회 기간(2026-10-13 ~ 11-22)에는 실거래가 NCP 서버 한 곳에서만 돌았다.
+- 서버 로그·원장·상태 파일은 비공개 저장소 `younggeon03/bankis16-logs`와 로컬 `logs/server_final_20261122/`(git 제외)에 보관했다.
+- 아래 Architecture §1~12는 코드 설명이라 그대로 유효하다. 대회 중 서버 운영 지시(배포 절차·직접 매매 스위치·마지막 이틀 설정)는
+  맨 아래 **"대회 기간 운영 기록"**으로 옮겼다.
 
-```bash
-BANKIS_SSH_USER=root bash deploy/oracle/deploy.sh $BANKIS_SERVER code    # HEAD 코드 반영 + 엔진 재시작
-BANKIS_SSH_USER=root bash deploy/oracle/deploy.sh $BANKIS_SERVER status
-scripts/open_dashboard.cmd                    # SSH 터널(8500) + 관제 화면(localhost:8500)
-```
+### 다시 돌릴 때 확인할 것
 
-- **마지막 이틀(11/19~20) 엔진 재가동 — 목표 이틀 누적 +10%(11/18 저녁, 사용자 결정)**: 서버 `.env`(백업 `.env.bak.20261118`)
-  `MAX_POSITIONS=1` · `FIXED_POSITION_WEIGHT=0.98` · `MAX_POSITION_WEIGHT=1.0` · `OPENING_RANK_BY=atr10`(장 시작 판정 통과 종목 중
-  10일 평균 고저폭 큰 순) · `OPEN_FLATTEN_DATE=2026-11-19`(09:00 그 전에 산 종목 매도 → 09:04 판정으로 갈아타기) ·
-  `EXIT_TAKE_PROFIT_PCT=0.103`(순수익 +10% 익절, 체결 직후 지정가를 **걸어 둔다** — `TPLIMIT`, 상태 파일로 같은 날 복원) ·
-  **11/20(마지막 날, 11/19 20:30 사용자 결정)** — `FINAL_DAY_BUY=true`(평소처럼 09:04 판정으로 산다) · `FINAL_FLATTEN=false`
-  (15:10 전량 매도 없음, 사용자가 직접 판다) · 익절 지정가는 그대로 · `NO_BUY`·`NO_SELL` 없음(백업 `.env.bak.20261119`).
-  `FINAL_FLATTEN`을 켜면 15:10에 걸어 둔 익절을 먼저 취소하고 전량 매도한다. 장 시작 정리는 현재가부터(15초 재접수, 판정 40초 전 −1%, 진입 최대 120초 대기).
-  손절·`vol_alive`는 11/17부터 꺼져 있다. `NO_BUY`·`NO_SELL` 삭제. 규칙 표는 `docs/매매전략.md` 12-14절.
-  측정(`scripts/research/two_day_study.py`·`two_day_cv.py`, 지문 `d30cf1675546e7f8`): P(이틀 ≥ +10%) 배수 순 22.9% · ATR10 순 26.6%
-  (시간 순 5조각 중 4조각 우세) · 이틀 평균 +0.6~0.9% · 손실 48%. 종목 비율 규정 상수 `MAX_SINGLE_WEIGHT`는 1.0(규정 없음, 11/17).
-- **직접 매매 기간(2026-11-18 낮, 사용자 결정 — 저녁에 위 재가동으로 바뀜)**: 엔진 매수 차단은 서버에 `state/NO_BUY` 파일을 만들면 된다(재시작 불필요,
-  지우면 풀린다 · `.env` `ENGINE_NO_BUY=true`도 같다). **매도도 막는다**(`state/NO_SELL` · `ENGINE_NO_SELL`) — 손절 25%·
-  `vol_alive`·11/20 15:10 전량 매도·요건 청산·미체결 취소(앱 주문 포함)가 전부 꺼지고 청산은 사람이 한다
-  (사용자는 하루 +5% 단기 차익). 모든 엔진 주문이 지나는 `_submit`에서 막는다. 관제 화면에 지수 종목 거래대금·등락률 순위와
-  관심 종목(`config/dash_picks.json`)을 띄운다(`monitor/ranking.py`, 60초 복수시세 — 매매에는 안 쓴다).
-  ```bash
-  ssh -i ~/.ssh/bankis_oracle root@$BANKIS_SERVER "touch ~/bankis/state/NO_BUY ~/bankis/state/NO_SELL"   # 매수·매도 차단
-  ```
-- `code`는 git HEAD만 보낸다 — **커밋하지 않은 변경은 안 간다.** 데이터·`.env`는 보내지 않는다.
-- `switch`는 노트북 원장·상태 파일까지 서버에 덮어쓴다. 서버가 실거래 중인 지금은 쓰지 않는다.
-  기준선 표(`data/cache/turnover_profile_w5/w10.json`)만 바꿀 때는 서버 파일을 `.bak`으로 남기고 `scp`한다 —
-  엔진이 자정 날짜 변경 때 다시 읽으므로 재시작이 필요 없다(로그 `[장중·VWAP] 기준선 ... 최신 YYYYMMDD`).
-- 토스 수집은 노트북에서 하되 서버 IP로 나간다(토스 IP 등록): `ssh -i ~/.ssh/bankis_oracle -N -D 1080 root@서버`
-  를 열고 `ALL_PROXY=socks5://127.0.0.1:1080`. 수집 전 `curl --socks5-hostname 127.0.0.1:1080 https://api.ipify.org`로 확인한다.
+1. **같은 계좌에 엔진은 하나만.** 서버와 노트북(`main.py`·`scripts/run_live.ps1`)을 동시에 켜면 주문이 두 번 나간다.
+   서버를 다시 켜려면 `systemctl enable --now bankis`, 서버 IP는 `deploy/server.local`(git 제외)에 있다.
+2. **서버 `.env`는 마지막 날 설정 그대로다** — 1자리 x98%(`MAX_POSITIONS=1`·`FIXED_POSITION_WEIGHT=0.98`) · `OPENING_RANK_BY=atr10` ·
+   `EXIT_TAKE_PROFIT_PCT=0.103` · `FINAL_DAY_BUY=true` · `FINAL_FLATTEN=false` · 손절·`vol_alive`·종가 손절·하드스톱 끔(11/17~).
+   대회 대부분 기간의 규칙(§9 표)으로 돌리려면 서버의 `.env.bak.*`(날짜별 백업)에서 고른다.
+3. **기간 설정** — `COMP_END`(2026-11-20)가 지나면 `_entries_closed()`가 설정과 무관하게 모든 매수를 막는다.
+   새 기간이면 `COMP_START`·`COMP_END`·`PHASE1_END`·`COMPLIANCE_START`를 다시 정한다.
+4. **계좌·데이터가 낡았다** — 대회 계좌 자격증명이 아직 유효한지 `python main.py --health-only`로 본다. 유니버스는 10/19 KRX 시세 기준이고
+   지수 구성 목록도 대회 전 것이라 지수 정기변경 뒤에는 `scripts/refresh_universe.py`로 다시 만든다. 기준선 표(`turnover_profile_w5/w10.json`)도 분봉을 새로 받아 다시 만든다.
+5. **상태 파일** — `state/engine_state.json`(잠금·진입일·걸어 둔 익절 `tp_orders`)과 `state/NO_BUY`·`NO_SELL` 유무를 먼저 본다.
+6. `python scripts/selftest.py`(27/27) · `python scripts/preflight.py --live`(치명 0) 뒤에 켠다.
 
 단일 항목만 검증하려면 `scripts/selftest.py`의 `run_all()` 안 `tests` 리스트를 줄이거나,
 해당 테스트 함수(`test_risk_manager` 등)를 직접 `asyncio.run()`으로 호출한다. pytest는 쓰지 않는다.
@@ -208,7 +197,7 @@ KIS 유량: 실전 20건/초, 모의투자는 문서상 2건/초지만 **실측 
 0.5로 두면 정상 신호가 전부 음수로 읽혀 익스포저가 4%까지 붕괴한다.
 `bet == 0.0`은 "진입 금지"라는 뜻이며, `_MIN_BET` 바닥값으로 덮지 않는다.
 
-### 9. 장중 분봉 전략이 현재 주 전략이다 (`USE_INTRADAY=true`)
+### 9. 장중 분봉 전략이 대회 주 전략이었다 (`USE_INTRADAY=true`)
 
 목적함수가 **절대수익 top10**이므로 최적화 대상은 `E[R]`이 아니라 `P(R ≥ 100%)`다.
 그래서 일봉 스윙에서 **장중 거래대금 폭증 진입 → 다일 보유**로 전환했다. 두 경로는 배타적이다 —
@@ -217,7 +206,7 @@ KIS 유량: 실전 20건/초, 모의투자는 문서상 2건/초지만 **실측 
 
 **매매 대상은 코스피200·코스닥150뿐이다(11/10 대회 안내 확인)** — `UNIVERSE_INDEX_ONLY`(기본 켬)가 유니버스 파일의 `tradable`을 `indices`로 좁혀 309종목이 된다. 아래 측정 수치(21%대)는 지수 밖 소형주가 만든 것이고, 지수만으로 다시 재면 P(+100%) **0.49%**다(`docs/TODO-대회준비.md` 11/10).
 
-**지금 실거래 규칙(2026-10-20~, 서버 `.env`)** — 유니버스 파일은 거래대금 10억 이상 708종목(`config/universe_10b.json`, 지수 필터 뒤 309) — 10/19에 증거금 100% 205종목을 다시 넣고(494),
+**대회 실거래 규칙(2026-10-20 ~ 11-17, 서버 `.env` — 11/17 사용자 매매로 청산 규칙을 끄고 11/18~ 직접 매매·마지막 이틀 설정으로 바뀌었다, 맨 아래 운영 기록)** — 유니버스 파일은 거래대금 10억 이상 708종목(`config/universe_10b.json`, 지수 필터 뒤 309) — 10/19에 증거금 100% 205종목을 다시 넣고(494),
 10/19 KRX 전종목시세로 10억 이상 214종목을 더했다(합집합, `added_20261019`). 새 종목은 측정하지 않았다(고른 뒤 재는 편향).
 증거금 100%는 **판정에서 뺀다**(`VTS_BLOCK_FULL_MARGIN=true`, 11/04~ — 10/19~10/30 주문해 보니 장 시작 판정 4일 모두
 `40070000`·`40250000`으로 거부됐다. 현재가 응답의 증거금률로 거르고 다음 순위로 바로 내려간다). 요건 매매도 그 종목을 피한다.
@@ -246,7 +235,7 @@ KIS 유량: 실전 20건/초, 모의투자는 문서상 2건/초지만 **실측 
 P(+100%) **21.48%** · 중앙 +10.9% · −20% 이하 11.11%. ②·④를 켠 그때까지의 서버 칸은 16.30% · 29.63%, 장중 추가 격자
 38칸 중 최고도 20.99%(3분x10 + vol_alive). 289종목에서는 ②·④가 나았다. 10/19에는 "증거금 100%를 API가 끝내 거부하면
 ②·④를 다시 켠다"고 정했지만, **11/04 실제로 다 거부된 것을 보고도 ②·④는 끈 채로 두고 증거금 100%만 판정에서 뺐다**(사용자 결정).
-그래서 지금 칸에는 측정한 지문이 없다 — 21.48%는 살 수 없는 종목이 들어간 수치다. 거부된 34종목 중 10/14 기준 증거금
+그래서 그 칸(대회 실거래 규칙)에는 측정한 지문이 없다 — 21.48%는 살 수 없는 종목이 들어간 수치다. 거부된 34종목 중 10/14 기준 증거금
 100%가 아닌 종목도 있어 원인이 증거금만은 아닐 수 있다 — **11/04 장 마감 뒤 조회**(`reports/probe_reject_20261104.json`):
 22종목은 증거금 100%, **12종목은 30~60%인데도 `40070000 매매불가`**였다(소형주, 10/26·27·30). 그날만 100%로 지정됐다
 풀린 것인지, 모의투자가 따로 막는 종목인지 보려 했고 **11/05 뒤쪽으로 확인됐다** — 필터를 통과한(당일 100% 아닌) 009450이
@@ -459,7 +448,7 @@ VWAP가 판 자리를 다시 채우는 회전). 상세는 `docs/TODO-대회준�
 ## 문서
 
 - `docs/ARCHITECTURE.md` — 코드 구조·비동기 설계·데이터 계약. 새 모듈을 넣기 전에 읽는다.
-- `docs/TODO-대회준비.md` — 측정 결과와 남은 일. **파라미터를 바꾸기 전에 읽는다.**
+- `docs/TODO-대회준비.md` — 대회 기록(회고): 맨 위 결과 요약, 아래 날짜별 측정·운영 기록. **파라미터를 바꾸기 전에 읽는다.**
 - `docs/매매전략.md` — 피처·라벨링·앙상블·사이징·청산 규칙, 그리고 12장의 성과 해석.
   전략 파라미터를 바꾸기 전에 읽는다.
 - `docs/기술노트.md` — 이 저장소를 교재로 한 서버·운영 기술 공부 노트(tech-note 스킬, 규칙은 `.tech-note/RULES.md`).
@@ -491,3 +480,42 @@ VWAP가 판 자리를 다시 채우는 회전). 상세는 `docs/TODO-대회준�
   바꿀 때마다 모든 주문의 최종 결정권자를 건드려야 한다. 실제로 청산 규칙이
   `risk_manager.evaluate_exits()` 안에 하드코딩돼 있어서 `strategy/exit_rules.py`로
   분리했다. 순수 로직만 두면 네트워크 없이 셀프테스트로 검증된다.
+
+## 대회 기간 운영 기록 (2026-10-13 ~ 11-20)
+
+대회 중 서버 운영 지시를 그대로 남긴다. **지금은 엔진이 멈춰 있어 아래를 그대로 따르지 않는다** — 다시 돌릴 때는 위 "다시 돌릴 때 확인할 것"부터 본다.
+
+**실거래는 NCP 서버에서 돌았다(2026-10-13 20:37 ~ 11-22 13:44).** 서버 IP는 저장소에 두지 않는다 — `deploy/server.local`(git 제외)에 한 줄로 두고
+`export BANKIS_SERVER=$(cat deploy/server.local)`로 쓴다. 그 기간에는 노트북에서 `main.py`·`run_live.ps1`을 켜지 않았다(같은 계좌 이중 주문).
+
+```bash
+BANKIS_SSH_USER=root bash deploy/oracle/deploy.sh $BANKIS_SERVER code    # HEAD 코드 반영 + 엔진 재시작
+BANKIS_SSH_USER=root bash deploy/oracle/deploy.sh $BANKIS_SERVER status
+scripts/open_dashboard.cmd                    # SSH 터널(8500) + 관제 화면(localhost:8500)
+```
+
+- `code`는 git HEAD만 보낸다 — **커밋하지 않은 변경은 안 간다.** 데이터·`.env`는 보내지 않는다.
+- `switch`는 노트북 원장·상태 파일까지 서버에 덮어쓴다. 서버가 실거래 원본이던 대회 기간에는 쓰지 않았다(서버 원장이 정답이다).
+  기준선 표(`data/cache/turnover_profile_w5/w10.json`)만 바꿀 때는 서버 파일을 `.bak`으로 남기고 `scp`한다 —
+  엔진이 자정 날짜 변경 때 다시 읽으므로 재시작이 필요 없다(로그 `[장중·VWAP] 기준선 ... 최신 YYYYMMDD`).
+- 토스 수집은 노트북에서 하되 서버 IP로 나간다(토스 IP 등록): `ssh -i ~/.ssh/bankis_oracle -N -D 1080 root@서버`
+  를 열고 `ALL_PROXY=socks5://127.0.0.1:1080`. 수집 전 `curl --socks5-hostname 127.0.0.1:1080 https://api.ipify.org`로 확인한다.
+- **마지막 이틀(11/19~20) 엔진 재가동 — 목표 이틀 누적 +10%(11/18 저녁, 사용자 결정)**: 서버 `.env`(백업 `.env.bak.20261118`)
+  `MAX_POSITIONS=1` · `FIXED_POSITION_WEIGHT=0.98` · `MAX_POSITION_WEIGHT=1.0` · `OPENING_RANK_BY=atr10`(장 시작 판정 통과 종목 중
+  10일 평균 고저폭 큰 순) · `OPEN_FLATTEN_DATE=2026-11-19`(09:00 그 전에 산 종목 매도 → 09:04 판정으로 갈아타기) ·
+  `EXIT_TAKE_PROFIT_PCT=0.103`(순수익 +10% 익절, 체결 직후 지정가를 **걸어 둔다** — `TPLIMIT`, 상태 파일로 같은 날 복원) ·
+  **11/20(마지막 날, 11/19 20:30 사용자 결정)** — `FINAL_DAY_BUY=true`(평소처럼 09:04 판정으로 산다) · `FINAL_FLATTEN=false`
+  (15:10 전량 매도 없음, 사용자가 직접 판다) · 익절 지정가는 그대로 · `NO_BUY`·`NO_SELL` 없음(백업 `.env.bak.20261119`).
+  `FINAL_FLATTEN`을 켜면 15:10에 걸어 둔 익절을 먼저 취소하고 전량 매도한다. 장 시작 정리는 현재가부터(15초 재접수, 판정 40초 전 −1%, 진입 최대 120초 대기).
+  손절·`vol_alive`는 11/17부터 꺼져 있었다. 규칙 표는 `docs/매매전략.md` 12-14절.
+  측정(`scripts/research/two_day_study.py`·`two_day_cv.py`, 지문 `d30cf1675546e7f8`): P(이틀 ≥ +10%) 배수 순 22.9% · ATR10 순 26.6%
+  (시간 순 5조각 중 4조각 우세) · 이틀 평균 +0.6~0.9% · 손실 48%. 종목 비율 규정 상수 `MAX_SINGLE_WEIGHT`는 1.0(규정 없음, 11/17).
+  **결과**: 11/19(수능일 10:00 개장)는 09:04 판정이 장 열리기 전 빈 데이터로 돌아 매수 0건. 11/20은 ATR10 1위 280360을 사서 익절에 못 닿고 −0.27%에 사용자가 직접 팔았다.
+- **직접 매매 기간(2026-11-18 낮, 사용자 결정 — 저녁에 위 재가동으로 바뀜)**: 엔진 매수 차단은 서버에 `state/NO_BUY` 파일을 만들면 된다(재시작 불필요,
+  지우면 풀린다 · `.env` `ENGINE_NO_BUY=true`도 같다). **매도도 막는다**(`state/NO_SELL` · `ENGINE_NO_SELL`) — 손절 25%·
+  `vol_alive`·11/20 15:10 전량 매도·요건 청산·미체결 취소(앱 주문 포함)가 전부 꺼지고 청산은 사람이 한다
+  (사용자는 하루 +5% 단기 차익). 모든 엔진 주문이 지나는 `_submit`에서 막는다. 관제 화면에 지수 종목 거래대금·등락률 순위와
+  관심 종목(`config/dash_picks.json`)을 띄운다(`monitor/ranking.py`, 60초 복수시세 — 매매에는 안 쓴다).
+  ```bash
+  ssh -i ~/.ssh/bankis_oracle root@$BANKIS_SERVER "touch ~/bankis/state/NO_BUY ~/bankis/state/NO_SELL"   # 매수·매도 차단
+  ```

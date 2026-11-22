@@ -1,5 +1,9 @@
 # 네이버 클라우드(NCP)로 옮기기
 
+> **상태(2026-11-22):** 대회 기간(2026-10-13 20:37 ~ 11-22 13:44) 실거래 서버였다. 대회가 끝나 11/22에 엔진을 멈췄다
+> (`systemctl stop`·`disable bankis` — 재부팅해도 안 뜬다, 다시 켜려면 `systemctl enable --now bankis`).
+> 서버 로그는 비공개 저장소와 노트북 `logs/server_final_20261122/`(git 제외)에 보관했다. 과금을 멈추려면 서버와 공인 IP를 반납한다(아래 "알아 둘 것").
+
 배포 스크립트(`deploy.sh`·`setup.sh`)는 오라클과 같다. NCP는 **root 로 접속**하고, 처음에는
 **비밀번호로** 들어가서 노트북 공개키를 한 번 등록한다. 그 뒤로는 Claude 가 키로 배포한다.
 
@@ -38,9 +42,9 @@ BANKIS_SSH_USER=root bash deploy/oracle/deploy.sh <IP> status
 ```
 setup 이 끝나면 SSH 비밀번호 로그인을 끈다(키로만 접속 — 22번이 전체에 열려 있으므로).
 
-## 운영 중 (2026-10-13 전환 후)
+## 대회 중 운영 (2026-10-13 전환 ~ 11-22 정지)
 
-서버가 실거래 원본이다. 이제 쓰는 것은 `code`·`status` 와 파일 단위 교체뿐이다.
+대회 기간에는 서버가 실거래 원본이었다. 그동안 쓴 것은 `code`·`status` 와 파일 단위 교체뿐이다.
 
 ```bash
 BANKIS_SSH_USER=root bash deploy/oracle/deploy.sh <IP> code     # 커밋된 코드 반영 + 엔진 재시작(상태는 파일에서 복구)
@@ -48,7 +52,7 @@ BANKIS_SSH_USER=root bash deploy/oracle/deploy.sh <IP> status
 scripts/open_dashboard.cmd                                      # 관제 화면(SSH 터널 8500)
 ```
 
-- **`switch` 는 다시 쓰지 않는다** — 노트북의 원장·상태 파일을 서버에 덮어써 서버가 쌓은 기록이 사라진다.
+- **`switch` 는 다시 쓰지 않았다** — 노트북의 원장·상태 파일을 서버에 덮어써 서버가 쌓은 기록이 사라진다.
 - **기준선 표 교체**(`data/cache/turnover_profile_w5.json`·`_w10.json`, 노트북에서 `build_turnover_profile.py` 로 만든다):
   서버 파일을 `*.YYYYMMDD.bak` 으로 복사해 두고 `scp` 로 `.new` 를 올린 뒤 `mv` 로 바꾼다. 엔진이 자정 날짜 변경 때
   다시 읽으므로 재시작하지 않는다. 다음 날 00:05 로그 `[장중·VWAP] 기준선 289종목 · 최신 YYYYMMDD` 로 확인한다.
